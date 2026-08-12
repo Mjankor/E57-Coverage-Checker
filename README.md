@@ -18,6 +18,7 @@ built yet.**
 | stage | state |
 |---|---|
 | E57 reader | done, 63 round-trip checks passing |
+| `e57cov info` — format audit CLI | done |
 | range-image builder | not started |
 | CPU reference visibility pass | not started |
 | Metal gather kernel | not started |
@@ -59,7 +60,59 @@ actually emit rather than the whole standard:
   stepped over without being unpacked, roughly halving decode cost on a
   prototype that also carries intensity and colour
 
+## Auditing a corpus
+
+`e57cov info` answers the two questions the visibility pipeline needs settled
+before it can be written correctly — and both are properties of your files, not
+of the algorithm:
+
+```sh
+e57cov info --crc /path/to/scan.e57
+```
+
+For each scan it reports the pose, the prototype with per-field bit widths, and:
+
+- **how no-return rays are represented** — an explicit `cartesianInvalidState` /
+  `sphericalInvalidState` field, or nothing at all. This decides whether the
+  field of view has to be recovered from angular extent, and getting it wrong
+  carves a cone straight through the floor beneath every tripod (DESIGN.md §4).
+- **which coordinate frame the points are in** — scanner-local with a
+  meaningful pose, or already transformed to global. Both conventions appear in
+  the wild, sometimes within one corpus.
+
+It also runs the two checks that would expose a mis-decoded bit stream: decoded
+record count against the declared `recordCount`, and decoded bounds against the
+file's own `cartesianBounds`. Exit status is nonzero if either fails, so it can
+be run across a whole directory as a smoke test.
+
 ## Build and test
+
+Two build systems, both first-class. Xcode is the one to use on the Mac — the
+forthcoming Metal work depends on its GPU capture and shader debugger. CMake
+keeps the reader buildable and testable off the target platform.
+
+**Xcode**
+
+```sh
+open E57CoverageChecker.xcodeproj
+```
+
+Targets `e57cov` and `test_e57`, both macOS command-line tools, C++20, with
+shared schemes. ⌘R on the `test_e57` scheme runs the test suite in the console.
+
+The project uses explicit file lists, so a new source file needs four pbxproj
+entries: `PBXBuildFile`, `PBXFileReference`, a group child, and a `Sources`
+build phase entry. `tools/validate_xcodeproj.py` checks all of that:
+
+```sh
+python3 tools/validate_xcodeproj.py E57CoverageChecker.xcodeproj
+```
+
+It verifies the object graph resolves, that referenced files exist on disk,
+that no source is silently missing from the build, and that schemes point at
+real targets. Run it after editing the project.
+
+**CMake**
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -69,17 +122,20 @@ cmake --build build -j
 
 Tests write fixtures to `/tmp`; set `E57COV_TMPDIR` to redirect them.
 
-The reader is plain C++20 and builds anywhere, which is deliberate — it is
-developed and tested on Linux CI as well as on the target Mac. Only the
-forthcoming Metal layer is macOS-only.
+Both build systems list sources explicitly, so **adding a file means editing
+both.** The validator catches an omission on the Xcode side; nothing catches it
+on the CMake side but a failed build.
 
 ## Layout
 
 ```
-src/e57.{h,cpp}        ASTM E2807 reader
-tests/e57_fixture.h    E57 writer used to generate test files
-tests/test_e57.cpp     round-trip tests
-DESIGN.md              design and rationale
+src/e57.{h,cpp}             ASTM E2807 reader
+src/main.cpp                e57cov CLI
+tests/e57_fixture.h         E57 writer used to generate test files
+tests/test_e57.cpp          round-trip tests
+tools/validate_xcodeproj.py pbxproj structural validator
+E57CoverageChecker.xcodeproj
+DESIGN.md                   design and rationale
 ```
 
 ## Related

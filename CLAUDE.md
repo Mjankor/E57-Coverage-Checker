@@ -53,6 +53,14 @@ Claims about format correctness need real scanner files, not more fixtures.
 - No third-party dependencies in the reader. It is written directly against
   ASTM E2807 and must stay buildable on plain C++20 with no external libraries,
   so it can be tested off the target platform.
+- **Two build systems, both explicit.** A new source file must be added to
+  `CMakeLists.txt` *and* to the Xcode project, which uses explicit file lists —
+  four pbxproj entries: `PBXBuildFile`, `PBXFileReference`, a group child, and
+  a `Sources` build phase entry. After editing the project run
+  `python3 tools/validate_xcodeproj.py E57CoverageChecker.xcodeproj`; it fails
+  on dangling object IDs, missing files, sources absent from the build, and
+  schemes pointing at renamed targets. It cannot tell you whether Xcode will
+  open the project — only that the object graph is sound.
 - Keep the reader platform-neutral; confine macOS/Metal code to the GPU layer.
 - DESIGN.md is the spec. When an implementation decision contradicts it,
   update the document in the same change rather than letting them diverge.

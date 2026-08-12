@@ -177,6 +177,13 @@ struct Scan {
     bool     hasIndexBounds = false;
     int64_t  rowMin = 0, rowMax = 0, colMin = 0, colMax = 0;
 
+    // The file's own declared extent. Worth carrying because it is an
+    // independent statement of what the data should contain: decoding the
+    // points and comparing against it is the cheapest available check that the
+    // bit-stream decode did not drift.
+    bool     hasCartesianBounds = false;
+    double   xMin = 0, xMax = 0, yMin = 0, yMax = 0, zMin = 0, zMax = 0;
+
     uint64_t cvFileOffset = 0;   // physical, from the XML attribute
 
     const ProtoField* field(const std::string& n) const;

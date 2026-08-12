@@ -462,6 +462,22 @@ void parseIndexBounds(const XmlNode& x, Scan& s) {
     s.colMin = c0->asInt(); s.colMax = c1->asInt();
 }
 
+void parseCartesianBounds(const XmlNode& x, Scan& s) {
+    const XmlNode* cb = x.child("cartesianBounds");
+    if (!cb) return;
+    struct { const char* name; double* dst; } m[6] = {
+        {"xMinimum", &s.xMin}, {"xMaximum", &s.xMax},
+        {"yMinimum", &s.yMin}, {"yMaximum", &s.yMax},
+        {"zMinimum", &s.zMin}, {"zMaximum", &s.zMax},
+    };
+    for (auto& e : m) {
+        const XmlNode* c = cb->child(e.name);
+        if (!c) return;             // partial bounds are not usable as a check
+        *e.dst = c->asDouble();
+    }
+    s.hasCartesianBounds = true;
+}
+
 } // namespace
 
 bool Reader::open(const std::string& path, std::string& err) {
@@ -493,6 +509,7 @@ bool Reader::open(const std::string& path, std::string& err) {
         if (const XmlNode* n = vc.child("name")) s.name = n->text;
         parsePose(vc, s);
         parseIndexBounds(vc, s);
+        parseCartesianBounds(vc, s);
 
         const XmlNode* pts = vc.child("points");
         if (!pts) { err = "scan '" + s.name + "' has no points node"; return false; }
