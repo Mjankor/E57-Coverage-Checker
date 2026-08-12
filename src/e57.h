@@ -177,6 +177,10 @@ struct Scan {
     bool     hasIndexBounds = false;
     int64_t  rowMin = 0, rowMax = 0, colMin = 0, colMax = 0;
 
+    // pointGroupingSchemes/groupingByLine: the file explicitly describing how
+    // points map onto scan lines, which only a single-setup scan can do.
+    bool     hasPointGrouping = false;
+
     // The file's own declared extent. Worth carrying because it is an
     // independent statement of what the data should contain: decoding the
     // points and comparing against it is the cheapest available check that the

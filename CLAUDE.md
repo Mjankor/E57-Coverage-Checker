@@ -62,5 +62,11 @@ Claims about format correctness need real scanner files, not more fixtures.
   schemes pointing at renamed targets. It cannot tell you whether Xcode will
   open the project — only that the object graph is sound.
 - Keep the reader platform-neutral; confine macOS/Metal code to the GPU layer.
+- **`app/` cannot be compiled or run in the development environment** — no
+  Xcode, no Cocoa, no Metal. So logic does not go there. Anything with a
+  decision in it (classification, camera arithmetic, picking, decimation)
+  belongs in `src/` behind a plain-C++ interface with tests; `app/` is only
+  AppKit and Metal glue. When a viewer feature needs new logic, the reflex is
+  to add it to `src/` and test it, not to write it inline in a `.mm` file.
 - DESIGN.md is the spec. When an implementation decision contradicts it,
   update the document in the same change rather than letting them diverge.

@@ -287,7 +287,7 @@ def main():
                        if d not in ('build', '.git', 'DerivedData')
                        and not d.endswith('.xcodeproj')]
         for fn in filenames:
-            if fn.endswith(('.cpp', '.metal')):
+            if fn.endswith(('.cpp', '.mm', '.m', '.metal')):
                 rel = os.path.relpath(os.path.join(dirpath, fn), root_dir)
                 if rel not in files.values():
                     warnings.append("source '%s' exists on disk but is not in the project" % rel)

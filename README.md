@@ -19,6 +19,8 @@ built yet.**
 |---|---|
 | E57 reader | done, 63 round-trip checks passing |
 | `e57cov info` — format audit CLI | done |
+| structured-vs-merged check | done |
+| viewer app (open, inspect, navigate) | done — **rendering layer unrun**, see below |
 | range-image builder | not started |
 | CPU reference visibility pass | not started |
 | Metal gather kernel | not started |
@@ -60,6 +62,42 @@ actually emit rather than the whole standard:
   stepped over without being unpacked, roughly halving decode cost on a
   prototype that also carries intensity and colour
 
+## The viewer
+
+`E57CoverageChecker.app` opens one or more E57 files, checks each scan, and
+draws the ones that pass.
+
+**Navigation**
+
+| input | action |
+|---|---|
+| left drag | pan |
+| right drag | orbit |
+| **right click** | set the orbit centre to the point under the crosshair |
+| wheel / pinch | zoom |
+| `F` | frame all |
+| `[` `]` | smaller / larger points |
+
+Control-left is an alias for right throughout, because holding a two-finger
+click through a drag on a trackpad is awkward.
+
+The orbit centre is picked from the nearest point under the centre crosshair,
+and the camera does not move when it changes — only what it turns about — so
+the view never jumps. If the crosshair is over empty space the centre is left
+alone and the status bar says so, rather than flinging the view somewhere
+arbitrary.
+
+**Merged clouds are rejected on load.** Every scan is classified and the reason
+shown in the list: green for usable, red for rejected, amber for ambiguous.
+Rejected scans stay listed with their reason on hover — they are just not drawn
+and will not be fed to the visibility pipeline. See `src/scan_check.h` for how
+the decision is made; it uses metadata *and* a geometric test of whether the
+scan actually behaves like a range image, because metadata alone is not
+decisive in either direction.
+
+Scans are decimated to a point budget (4 M each by default) on load. The list
+shows kept-vs-total, so it is always clear you are looking at a subsample.
+
 ## Auditing a corpus
 
 `e57cov info` answers the two questions the visibility pipeline needs settled
@@ -97,8 +135,16 @@ keeps the reader buildable and testable off the target platform.
 open E57CoverageChecker.xcodeproj
 ```
 
-Targets `e57cov` and `test_e57`, both macOS command-line tools, C++20, with
-shared schemes. ⌘R on the `test_e57` scheme runs the test suite in the console.
+Four targets, all C++20 with shared schemes:
+
+| target | kind | what it is |
+|---|---|---|
+| `E57CoverageChecker` | app | the viewer |
+| `e57cov` | tool | the format-audit CLI |
+| `test_e57` | tool | reader tests |
+| `test_viewer` | tool | camera / classifier / picker tests |
+
+⌘R on a test scheme runs that suite in the console.
 
 The project uses explicit file lists, so a new source file needs four pbxproj
 entries: `PBXBuildFile`, `PBXFileReference`, a group child, and a `Sources`
@@ -130,13 +176,25 @@ on the CMake side but a failed build.
 
 ```
 src/e57.{h,cpp}             ASTM E2807 reader
+src/scan_check.{h,cpp}      structured-vs-merged classification
+src/point_cloud.{h,cpp}     decode + decimate for display
+src/camera.{h,cpp}          orbit camera
+src/picker.{h,cpp}          screen-space point picking (orbit centre)
+src/math3d.h                vectors and matrices
 src/main.cpp                e57cov CLI
+app/                        macOS app: AppKit window, Metal renderer
 tests/e57_fixture.h         E57 writer used to generate test files
-tests/test_e57.cpp          round-trip tests
+tests/test_e57.cpp          reader round-trip tests
+tests/test_viewer.cpp       camera, classifier, picker, decimation tests
 tools/validate_xcodeproj.py pbxproj structural validator
 E57CoverageChecker.xcodeproj
 DESIGN.md                   design and rationale
 ```
+
+Everything that can be tested off a Mac lives in `src/` and is covered by
+`test_viewer`. `app/` holds only AppKit and Metal glue — the split is
+deliberate, because `app/` cannot be compiled or run in the development
+environment at all.
 
 ## Related
 

@@ -510,6 +510,7 @@ bool Reader::open(const std::string& path, std::string& err) {
         parsePose(vc, s);
         parseIndexBounds(vc, s);
         parseCartesianBounds(vc, s);
+        s.hasPointGrouping = vc.child("pointGroupingSchemes") != nullptr;
 
         const XmlNode* pts = vc.child("points");
         if (!pts) { err = "scan '" + s.name + "' has no points node"; return false; }
