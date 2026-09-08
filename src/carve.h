@@ -105,6 +105,27 @@ struct Domain {
     }
 };
 
+// When a voxel has learned enough to stop asking.
+//
+// Cost is domain voxels times setups in range, and at a thousand setups the
+// second factor is what explodes: a voxel in a dense survey can be within range
+// of eighty of them. Most are answered by the first or second.
+enum class EarlyOut : uint8_t {
+    // Ask every setup about every voxel. What the reference does, always.
+    None,
+    // Stop once a voxel has both evidence bits. Exact: both bits set is the
+    // most any number of further setups could produce, so the result is
+    // identical to the full OR. Only `setupTests` differs, and that counts work
+    // done rather than the size of the question.
+    Saturated,
+    // Stop at the first bit of evidence of any kind. Faster, and still exact for
+    // the reachable and unknown counts — a voxel that any setup said anything
+    // about is not unknown, whichever thing was said. But `visible` and
+    // `occupied` become lower bounds rather than counts, so this is a mode to
+    // ask for, not a default.
+    AnyEvidence,
+};
+
 struct Params {
     double voxelSize = 0.05;
     // Half a voxel diagonal. Keeps the voxel holding the measured surface out
@@ -133,6 +154,9 @@ struct Params {
 
     // The region being asked about. Unbounded reproduces the range spheres.
     Domain domain;
+
+    // Ignored by carveTileReference, which never stops early.
+    EarlyOut earlyOut = EarlyOut::Saturated;
 
     double tileMetres() const { return voxelSize * double(tileVoxels); }
 };
@@ -215,7 +239,11 @@ struct Stats {
     // Reachable, but no setup said anything about it: seen through by none,
     // measured by none. These are the candidate voids — the deliverable.
     uint64_t unknown = 0;
-    uint64_t setupTests = 0;   // (voxel, setup) pairs actually evaluated
+    // (voxel, setup) pairs actually evaluated. A measure of work done, so early
+    // exits and brick culling reduce it — it is not a property of the site, and
+    // it is the one statistic that legitimately differs between the fast path
+    // and the reference.
+    uint64_t setupTests = 0;
 };
 
 // Tiles whose cube intersects at least one setup's range sphere. Sorted, so a

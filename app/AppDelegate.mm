@@ -624,7 +624,7 @@ const char *kindLabel(check::Kind k) {
     }
 
     // --- parameters -------------------------------------------------------
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 400, 190)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 212)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -634,20 +634,29 @@ const char *kindLabel(check::Kind k) {
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (int i = 0; i < 4; ++i) {
-        const CGFloat y = 162 - i * 28;
+        const CGFloat y = 184 - i * 28;
         [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 220, 20)]];
         NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(230, y - 3, 90, 22)];
         [acc addSubview:f];
         [fields addObject:f];
     }
 
-    NSButton *extent = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 400, 20)];
-    extent.title = @"Limit to the surveyed extent";
+    NSButton *extent = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
+    extent.title = @"Limit to the surveyed extent (recommended for interiors)";
     [extent setButtonType:NSButtonTypeSwitch];
     extent.font = [NSFont systemFontOfSize:11];
     extent.state = (_visOptions.domain == vis::DomainMode::MeasuredExtent)
                  ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:extent];
+
+    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 400, 20)];
+    firstHit.title = @"Stop at the first evidence (faster; visible and occupied become "
+                     @"lower bounds)";
+    [firstHit setButtonType:NSButtonTypeSwitch];
+    firstHit.font = [NSFont systemFontOfSize:11];
+    firstHit.state = (_visOptions.earlyOut == carve::EarlyOut::AnyEvidence)
+                   ? NSControlStateValueOn : NSControlStateValueOff;
+    [acc addSubview:firstHit];
 
     NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 400, 20)];
     solid.title = @"Show every unobserved voxel, not just the frontier";
@@ -691,6 +700,8 @@ const char *kindLabel(check::Kind k) {
     opt.domain       = (extent.state == NSControlStateValueOn)
                      ? vis::DomainMode::MeasuredExtent : vis::DomainMode::RangeSpheres;
     opt.solid        = (solid.state == NSControlStateValueOn);
+    opt.earlyOut     = (firstHit.state == NSControlStateValueOn)
+                     ? carve::EarlyOut::AnyEvidence : carve::EarlyOut::Saturated;
     _visOptions      = opt;
 
     // --- run --------------------------------------------------------------

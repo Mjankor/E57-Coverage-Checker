@@ -324,10 +324,13 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
     std::printf("  reachable %llu  (%.1f m^3) — within %.0f m of some setup\n",
                 (unsigned long long)st.reachable,
                 double(st.reachable) * voxelVolume, opt.maxRange);
-    std::printf("  visible   %llu  (%.1f%%) — some setup had line of sight\n",
-                (unsigned long long)st.visible, double(st.visible) * pct);
-    std::printf("  occupied  %llu  (%.1f%%) — some setup measured a surface\n",
-                (unsigned long long)st.occupied, double(st.occupied) * pct);
+    const bool bounds = opt.earlyOut == carve::EarlyOut::AnyEvidence;
+    std::printf("  visible   %llu  (%.1f%%) — some setup had line of sight%s\n",
+                (unsigned long long)st.visible, double(st.visible) * pct,
+                bounds ? "   [lower bound]" : "");
+    std::printf("  occupied  %llu  (%.1f%%) — some setup measured a surface%s\n",
+                (unsigned long long)st.occupied, double(st.occupied) * pct,
+                bounds ? "   [lower bound]" : "");
     std::printf("  unknown   %llu  (%.1f%%, %.1f m^3) — neither: the candidate voids\n",
                 (unsigned long long)st.unknown, double(st.unknown) * pct,
                 double(st.unknown) * voxelVolume);
@@ -382,6 +385,12 @@ void usage() {
         "  --domain-margin <m>\n"
         "          (carve) How far past the last return the question still applies.\n"
         "          Default 2 m: wall thickness, eaves and registration slop.\n"
+        "  --early-out none|saturated|any\n"
+        "          (carve) When a voxel stops asking further setups. 'saturated'\n"
+        "          (default) stops once it has both evidence bits, which is exact.\n"
+        "          'any' stops at the first bit: still exact for the unknown set,\n"
+        "          but visible and occupied become lower bounds. 'none' asks every\n"
+        "          setup, matching the reference's work exactly.\n"
         "  --threads <n>\n"
         "          (carve) Worker threads over the tile list. Default 0, the\n"
         "          machine's count. The answer is identical at any count.\n"
@@ -429,6 +438,14 @@ int main(int argc, char** argv) {
             continue;
         }
         if (std::strcmp(argv[i], "--solid") == 0) { co.solid = true; continue; }
+        if (std::strcmp(argv[i], "--early-out") == 0 && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if      (v == "none")      co.earlyOut = carve::EarlyOut::None;
+            else if (v == "saturated") co.earlyOut = carve::EarlyOut::Saturated;
+            else if (v == "any")       co.earlyOut = carve::EarlyOut::AnyEvidence;
+            else { std::printf("--early-out must be none, saturated or any\n"); return 2; }
+            continue;
+        }
         if (std::strcmp(argv[i], "--domain") == 0 && i + 1 < argc) {
             const std::string v = argv[++i];
             if      (v == "extent")  co.domain = vis::DomainMode::MeasuredExtent;

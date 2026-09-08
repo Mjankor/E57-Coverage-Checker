@@ -441,12 +441,14 @@ static void testFastPathMatchesReference() {
     for (uint32_t tileVoxels : {8u, 13u, 32u}) {
         for (uint32_t apron : {0u, 1u}) {
           for (int clipped = 0; clipped < 2; ++clipped) {
+           for (carve::EarlyOut eo : {carve::EarlyOut::None, carve::EarlyOut::Saturated}) {
             carve::Params p;
             p.voxelSize     = 0.25;
             p.surfaceMargin = 0.5 * 0.25 * 1.7320508075688772;
             p.maxRange      = 6.0;
             p.tileVoxels    = tileVoxels;
             p.apron         = apron;
+            p.earlyOut      = eo;
             if (clipped) {
                 // A box that slices through the scene rather than containing
                 // it, so tiles and bricks land inside, outside and straddling.
@@ -472,14 +474,70 @@ static void testFastPathMatchesReference() {
             CHECK(fastStats.visible == refStats.visible, "same visible count");
             CHECK(fastStats.occupied == refStats.occupied, "same occupied count");
             CHECK(fastStats.unknown == refStats.unknown, "same unknown count");
-            CHECK(fastStats.setupTests == refStats.setupTests, "same number of setup tests");
             CHECK(fastStats.voxels == refStats.voxels, "same voxels examined");
+            // setupTests measures work, so it is the one statistic allowed to
+            // differ — and under Saturated it had better be smaller, or the
+            // early exit is not doing anything.
+            if (eo == carve::EarlyOut::None)
+                CHECK(fastStats.setupTests == refStats.setupTests,
+                      "with no early exit, even the work matches");
+            else
+                CHECK(fastStats.setupTests < refStats.setupTests,
+                      "the early exit really skips setups");
             // Not a trivial pass: there has to be something to disagree about.
             CHECK(fastStats.visible > 0 && fastStats.occupied > 0 && fastStats.unknown > 0,
                   "the comparison covered all three outcomes");
+           }
           }
         }
     }
+}
+
+// AnyEvidence trades the visible and occupied counts for speed. What it must
+// not trade is the answer: the set of voxels nobody observed.
+static void testAnyEvidenceKeepsTheUnknownSet() {
+    std::printf("early exit at the first evidence\n");
+
+    rimg::RangeImage a = shellImage(3.0, 6.0);
+    rimg::RangeImage b = shellImage(2.4, 6.0);
+    rimg::RangeImage c = shellImage(4.1, 6.0);
+    setPose(b, 3.3, 1.7, -0.9, 0.9);
+    setPose(c, -2.1, -3.4, 1.2, -2.2);
+    makeNoReturnColumns(a, 40, 60, 6.0);
+    for (rimg::RangeImage* im : {&a, &b, &c}) rimg::buildPyramid(*im);
+    std::vector<carve::SetupView> setups{carve::makeSetupView(a), carve::makeSetupView(b),
+                                         carve::makeSetupView(c)};
+
+    carve::Params exact;
+    exact.voxelSize = 0.25;
+    exact.surfaceMargin = 0.5 * 0.25 * 1.7320508075688772;
+    exact.maxRange = 6.0;
+    exact.tileVoxels = 16;
+    carve::Params fast = exact;
+    fast.earlyOut = carve::EarlyOut::AnyEvidence;
+
+    carve::Stats es, fs;
+    carve::Tile et, ft;
+    uint64_t unknownDiffs = 0, reachDiffs = 0;
+    for (const carve::TileKey& k : carve::tilesForSetups(setups, exact)) {
+        carve::carveTile(k, setups, exact, et, es);
+        carve::carveTile(k, setups, fast,  ft, fs);
+        for (size_t i = 0; i < et.state.size(); ++i) {
+            const uint8_t e = et.state[i], f = ft.state[i];
+            if ((e == carve::kReachable) != (f == carve::kReachable)) ++unknownDiffs;
+            if ((e & carve::kReachable) != (f & carve::kReachable)) ++reachDiffs;
+        }
+    }
+    CHECK(unknownDiffs == 0, "exactly the same voxels come out unknown");
+    CHECK(reachDiffs == 0, "and exactly the same voxels are in the domain");
+    CHECK(fs.unknown == es.unknown, "so the unknown count is exact");
+    CHECK(fs.reachable == es.reachable, "as is the reachable count");
+    CHECK(fs.setupTests < es.setupTests, "with less work");
+    // Lower bounds, not counts — which is why this is not the default.
+    CHECK(fs.visible <= es.visible, "visible becomes a lower bound");
+    CHECK(fs.occupied <= es.occupied, "and so does occupied");
+    CHECK(fs.visible + fs.occupied < es.visible + es.occupied,
+          "and they really are lower, not incidentally equal");
 }
 
 static void testDomainClipping() {
@@ -574,6 +632,7 @@ int main() {
     testTilingDoesNotChangeTheAnswer();
     testFastPathMatchesReference();
     testDomainClipping();
+    testAnyEvidenceKeepsTheUnknownSet();
     testEarlyStop();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

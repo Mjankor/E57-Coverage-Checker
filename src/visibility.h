@@ -70,6 +70,10 @@ struct Options {
     // Keep only unknown voxels that touch visible space. See the header note.
     bool     solid      = false;
 
+    // See carve::EarlyOut. Saturated is exact; AnyEvidence is exact for the
+    // unknown set only and has to be asked for.
+    carve::EarlyOut earlyOut = carve::EarlyOut::Saturated;
+
     DomainMode domain = DomainMode::MeasuredExtent;
     // How far past the last measured return the question still applies. Two
     // metres covers wall thickness, eaves, and registration slop — enough that a

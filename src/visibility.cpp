@@ -227,6 +227,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     // The frontier rule asks about face neighbours; the apron is what lets it
     // do that without the answer depending on where tile seams fall.
     p.apron      = opt.solid ? 0u : 1u;
+    p.earlyOut   = opt.earlyOut;
 
     // --- the domain -------------------------------------------------------
     // What the range spheres alone would cover, kept for comparison so the
@@ -439,6 +440,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                     out.domainVolume, out.sphereVolume);
     else if (out.domain.kind == carve::Domain::Kind::Unbounded)
         note += "domain is the full range spheres, so most of it is open air; ";
+    if (opt.earlyOut == carve::EarlyOut::AnyEvidence)
+        note += "stopped at the first evidence, so visible and occupied are lower bounds; ";
     if (out.partial)
         note += out.cancelled ? "cancelled part way; " : "stopped at the tile limit; ";
     out.note = note;

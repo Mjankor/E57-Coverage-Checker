@@ -341,7 +341,37 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
     const uint32_t B  = kBrickVoxels;
     const uint32_t nb = (dim + B - 1) / B;
 
-    for (size_t si : reach) {
+    // Nearest setup first. Under Saturated this only changes how quickly voxels
+    // settle, never what they settle on; under AnyEvidence it decides which of
+    // several true answers is recorded, so the order has to be fixed rather than
+    // incidental — hence the tie-break on index.
+    std::vector<size_t> order = reach;
+    if (p.earlyOut != EarlyOut::None && order.size() > 1) {
+        double c[3];
+        for (int k = 0; k < 3; ++k)
+            c[k] = out.origin[k] + 0.5 * double(dim) * p.voxelSize;
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            const double da = distSqPointBox(setups[a].origin, c, c);
+            const double db = distSqPointBox(setups[b].origin, c, c);
+            if (da != db) return da < db;
+            return a < b;
+        });
+    }
+
+    const uint8_t kEvidence = uint8_t(kVisible | kOccupied);
+    const uint8_t settledMask = (p.earlyOut == EarlyOut::Saturated)  ? kEvidence
+                              : (p.earlyOut == EarlyOut::AnyEvidence) ? 0u : 0xFFu;
+    auto settled = [&](uint8_t bits) {
+        switch (p.earlyOut) {
+        case EarlyOut::None:        return false;
+        case EarlyOut::Saturated:   return (bits & kEvidence) == kEvidence;
+        case EarlyOut::AnyEvidence: return (bits & kEvidence) != 0;
+        }
+        return false;
+    };
+    (void)settledMask;
+
+    for (size_t si : order) {
         const SetupView& s = setups[si];
         for (uint32_t bz = 0; bz < nb; ++bz) {
             for (uint32_t by = 0; by < nb; ++by) {
@@ -415,6 +445,10 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                     for (uint32_t z = z0; z < z1; ++z) {
                         for (uint32_t y = y0; y < y1; ++y) {
                             for (uint32_t x = x0; x < x1; ++x) {
+                                uint8_t& cell = out.state[out.index(x, y, z)];
+                                // Nothing another setup can add. This is the
+                                // whole of the win at high setup counts.
+                                if (settled(cell)) continue;
                                 double c[3];
                                 out.centre(x, y, z, p.voxelSize, c);
                                 if (!allInDomain &&
@@ -426,8 +460,7 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                                 // OR across setups, so the order they are
                                 // combined in cannot change the result — which
                                 // is exactly what makes this reordering legal.
-                                out.state[out.index(x, y, z)] |=
-                                    uint8_t(kReachable | evidenceAt(s, p, c[0], c[1], c[2]));
+                                cell |= uint8_t(kReachable | evidenceAt(s, p, c[0], c[1], c[2]));
                                 if (out.isInterior(x, y, z)) ++stats.setupTests;
                             }
                         }
