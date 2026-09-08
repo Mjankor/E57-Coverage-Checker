@@ -22,6 +22,7 @@
 #include "e57.h"
 #include "frame.h"
 #include "range_image.h"
+#include "visibility.h"
 
 #include <chrono>
 #include <memory>
@@ -253,135 +254,64 @@ int info(const std::string& path, bool verifyCrc, double maxRange) {
 }
 
 // ---------------------------------------------------------------------------
-// carve — the visibility pass, on the CPU reference.
+// carve — the visibility pass.
 //
-// This runs the oracle, not the production path: every voxel is tested against
-// every setup that can reach it, single-threaded. It is here so the reference
-// can be pointed at real files rather than only at synthetic fixtures, and so
-// the Metal kernel has something to be compared against on real data. On a full
-// corpus at 5 cm it will be slow — the estimate is printed before it starts,
-// and --max-tiles stops it after a sample.
+// The pipeline itself lives in src/visibility.{h,cpp} so the CLI and the app
+// run exactly the same code. This is the terminal's view of it: parameters in,
+// numbers out, and a progress line that can be watched on a long run.
 //
-// It also holds every range image in memory at once, which is what the
-// production path will not do: it will stream setups per tile. For a handful of
-// scans that is the difference between 200 MB and an architecture.
+// It runs the CPU reference — every voxel tested against every setup that can
+// reach it, single-threaded — because that is the oracle the Metal kernel will
+// be asserted bit-exact against. On a full corpus at 5 cm it will be slow; the
+// domain size is printed before it starts and --max-tiles stops it after a
+// sample.
 
-struct CarveOptions {
-    double   voxelSize = 0.05;
-    double   maxRange  = 45.0;
-    uint32_t tileVoxels = 256;
-    uint64_t maxTiles  = 0;      // 0 = the whole domain
-    uint32_t maxCells  = 32u << 20;
-};
+int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) {
+    const auto start = std::chrono::steady_clock::now();
+    uint64_t lastTiles = 0;
 
-struct CarveProgress {
-    uint64_t tiles = 0;
-    uint64_t limit = 0;
-    uint64_t total = 0;
-    std::chrono::steady_clock::time_point start;
-};
-
-bool carveProgressSink(const carve::Tile&, void* user) {
-    CarveProgress* pr = static_cast<CarveProgress*>(user);
-    ++pr->tiles;
-    if (pr->tiles % 16 == 0 || pr->tiles == pr->total) {
+    vis::Progress progress = [&](const std::string& stage, uint64_t done, uint64_t total) {
+        // Every tile on a big run would be thousands of lines of scrollback.
+        if (stage == "carving" && done != total && done - lastTiles < 16) return true;
+        lastTiles = done;
         const double secs = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - pr->start).count();
-        std::fprintf(stderr, "\r  tiles %llu / %llu  (%.1f s)",
-                     (unsigned long long)pr->tiles, (unsigned long long)pr->total, secs);
+            std::chrono::steady_clock::now() - start).count();
+        std::fprintf(stderr, "\r  %-22s %llu / %llu  (%.1f s)          ",
+                     stage.c_str(), (unsigned long long)done,
+                     (unsigned long long)total, secs);
         std::fflush(stderr);
-    }
-    return !(pr->limit && pr->tiles >= pr->limit);
-}
+        return true;
+    };
 
-int carveCorpus(const std::vector<std::string>& paths, const CarveOptions& co) {
-    // The readers have to outlive the range images, and the range images have to
-    // outlive the setup views, which hold pointers into them.
-    std::vector<std::unique_ptr<e57::Reader>>    readers;
-    std::vector<std::unique_ptr<rimg::RangeImage>> images;
-    std::vector<carve::SetupView>                setups;
-
-    rimg::Options ro;
-    ro.maxRange = co.maxRange;
-    ro.maxCells = co.maxCells;
-
-    uint64_t skipped = 0;
-    for (const std::string& path : paths) {
-        auto r = std::make_unique<e57::Reader>();
-        std::string err;
-        if (!r->open(path, err)) {
-            std::printf("%s: ERROR %s\n", path.c_str(), err.c_str());
-            return 1;
-        }
-        for (size_t i = 0; i < r->scanCount(); ++i) {
-            auto img = std::make_unique<rimg::RangeImage>();
-            std::string rerr;
-            if (!rimg::build(*r, i, ro, *img, rerr)) {
-                // A scan with no usable raster cannot contribute evidence, and
-                // guessing one would invent visibility. Skipped and counted.
-                std::printf("  skipped %s [%zu]: %s\n", path.c_str(), i, rerr.c_str());
-                ++skipped;
-                continue;
-            }
-            images.push_back(std::move(img));
-            setups.push_back(carve::makeSetupView(*images.back()));
-        }
-        readers.push_back(std::move(r));
-    }
-
-    if (setups.empty()) {
-        std::printf("no usable setups — nothing to carve\n");
+    vis::Result res;
+    std::string err;
+    if (!vis::run(paths, opt, progress, res, err)) {
+        std::fprintf(stderr, "\n");
+        std::printf("carve failed: %s\n", err.c_str());
         return 1;
     }
-
-    carve::Params p;
-    p.voxelSize  = co.voxelSize;
-    // Half a voxel diagonal, so it tracks the voxel size rather than being a
-    // constant that silently stops matching it.
-    p.surfaceMargin = 0.5 * co.voxelSize * 1.7320508075688772;
-    p.maxRange   = co.maxRange;
-    p.tileVoxels = co.tileVoxels;
-
-    std::printf("\nsetups    : %zu (%llu scan(s) skipped)\n",
-                setups.size(), (unsigned long long)skipped);
-    for (size_t i = 0; i < setups.size() && i < 8; ++i) {
-        std::printf("  [%zu] origin (%.3f, %.3f, %.3f)  %llu returns, %llu no-returns\n",
-                    i, setups[i].origin[0], setups[i].origin[1], setups[i].origin[2],
-                    (unsigned long long)setups[i].image->diag.hits,
-                    (unsigned long long)setups[i].image->diag.noReturns);
-    }
-    if (setups.size() > 8) std::printf("  ... and %zu more\n", setups.size() - 8);
-
-    const std::vector<carve::TileKey> keys = carve::tilesForSetups(setups, p);
-    const uint64_t perTile = uint64_t(p.tileVoxels) * p.tileVoxels * p.tileVoxels;
-    std::printf("\nvoxel     : %.3f m, surface margin %.4f m\n", p.voxelSize, p.surfaceMargin);
-    std::printf("tile      : %u^3 voxels = %.2f m cube, %.1f MB of state\n",
-                p.tileVoxels, p.tileMetres(), double(perTile) / 1048576.0);
-    std::printf("domain    : %zu tiles, %.3f G voxels\n",
-                keys.size(), double(keys.size()) * double(perTile) / 1e9);
-    if (co.maxTiles)
-        std::printf("            stopping after %llu tiles (--max-tiles)\n",
-                    (unsigned long long)co.maxTiles);
-
-    CarveProgress pr;
-    pr.limit = co.maxTiles;
-    pr.total = co.maxTiles ? std::min<uint64_t>(co.maxTiles, keys.size()) : keys.size();
-    pr.start = std::chrono::steady_clock::now();
-
-    const carve::Stats st = carve::carveAll(setups, p, carveProgressSink, &pr);
-    const double secs = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - pr.start).count();
     std::fprintf(stderr, "\n");
 
-    const double voxelVolume = p.voxelSize * p.voxelSize * p.voxelSize;
+    const double secs = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - start).count();
+    const carve::Stats& st = res.stats;
+    const double voxelVolume = opt.voxelSize * opt.voxelSize * opt.voxelSize;
     const double pct = st.reachable ? 100.0 / double(st.reachable) : 0.0;
+
+    std::printf("\nsetups    : %llu used, %llu skipped\n",
+                (unsigned long long)res.setupsUsed, (unsigned long long)res.scansSkipped);
+    std::printf("voxel     : %.3f m   ·   tile %u^3   ·   max range %.0f m\n",
+                opt.voxelSize, opt.tileVoxels, opt.maxRange);
+    std::printf("domain    : %llu tiles, %llu carved%s\n",
+                (unsigned long long)res.tilesTotal, (unsigned long long)res.tilesCarved,
+                res.partial ? "  (stopped early — the numbers below are a sample)" : "");
+
     std::printf("\nresult    : %.1f s, %.2f M voxel-setup tests\n",
                 secs, double(st.setupTests) / 1e6);
-    std::printf("  examined  %llu voxels in %llu tiles\n",
-                (unsigned long long)st.voxels, (unsigned long long)pr.tiles);
+    std::printf("  examined  %llu voxels\n", (unsigned long long)st.voxels);
     std::printf("  reachable %llu  (%.1f m^3) — within %.0f m of some setup\n",
                 (unsigned long long)st.reachable,
-                double(st.reachable) * voxelVolume, p.maxRange);
+                double(st.reachable) * voxelVolume, opt.maxRange);
     std::printf("  visible   %llu  (%.1f%%) — some setup had line of sight\n",
                 (unsigned long long)st.visible, double(st.visible) * pct);
     std::printf("  occupied  %llu  (%.1f%%) — some setup measured a surface\n",
@@ -389,6 +319,11 @@ int carveCorpus(const std::vector<std::string>& paths, const CarveOptions& co) {
     std::printf("  unknown   %llu  (%.1f%%, %.1f m^3) — neither: the candidate voids\n",
                 (unsigned long long)st.unknown, double(st.unknown) * pct,
                 double(st.unknown) * voxelVolume);
+    std::printf("\ndrawable  : %zu voxels%s%s\n", res.voxels.size(),
+                opt.solid ? " (solid)" : " on the observed frontier",
+                res.keptFraction < 1.0 ? ", sampled to fit the display cap" : "");
+    if (!res.note.empty()) std::printf("note      : %s\n", res.note.c_str());
+
     std::printf("\nThe unknown set still mixes three things: shadows inside the site,\n"
                 "material behind measured surfaces, and space outside the building\n"
                 "that no setup could ever see. Separating them is the next stage\n"
@@ -421,10 +356,13 @@ void usage() {
         "          (carve) Voxel edge. Default 0.05 m. The surface margin is\n"
         "          derived from it as half a voxel diagonal.\n"
         "  --tile <voxels>\n"
-        "          (carve) Voxels per tile edge. Default 256. Affects working\n"
+        "          (carve) Voxels per tile edge. Default 128. Affects working\n"
         "          set and nothing else — the answer is identical either way.\n"
         "  --max-tiles <n>\n"
-        "          (carve) Stop after n tiles. Default 0, the whole domain.\n");
+        "          (carve) Stop after n tiles. Default 0, the whole domain.\n"
+        "  --solid (carve) Keep every unknown voxel rather than only those on the\n"
+        "          frontier with observed space. Far more voxels, same answer:\n"
+        "          an opaque volume hides its own interior anyway.\n");
 }
 
 } // namespace
@@ -441,7 +379,7 @@ int main(int argc, char** argv) {
     }
 
     bool                     crc = false;
-    CarveOptions             co;
+    vis::Options             co;
     std::vector<std::string> paths;
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--crc") == 0) { crc = true; continue; }
@@ -465,6 +403,7 @@ int main(int argc, char** argv) {
             co.maxTiles = std::strtoull(argv[++i], nullptr, 10);
             continue;
         }
+        if (std::strcmp(argv[i], "--solid") == 0) { co.solid = true; continue; }
         paths.push_back(argv[i]);
     }
     if (paths.empty()) { usage(); return 2; }

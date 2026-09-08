@@ -333,11 +333,9 @@ static bool collectSink(const carve::Tile& t, void* user) {
             for (uint32_t x = 0; x < t.dim; ++x) {
                 // The lattice is global and anchored at the world origin, so a
                 // voxel's index does not depend on the tile that carried it.
-                const std::array<int64_t, 3> id{
-                    t.key.x * int64_t(t.dim) + int64_t(x),
-                    t.key.y * int64_t(t.dim) + int64_t(y),
-                    t.key.z * int64_t(t.dim) + int64_t(z)};
-                c->voxels[id] = t.state[t.index(x, y, z)];
+                int64_t g[3];
+                t.globalIndex(x, y, z, g);
+                c->voxels[{g[0], g[1], g[2]}] = t.state[t.index(x, y, z)];
             }
         }
     }

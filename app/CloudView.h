@@ -19,6 +19,7 @@
 #include "../src/camera.h"
 #include "../src/lod.h"
 #include "../src/point_store.h"
+#include "../src/visibility.h"
 
 #include <vector>
 
@@ -41,10 +42,25 @@
 - (BOOL)openStore:(NSString *)path error:(NSString **)error;
 - (void)closeAll;
 
+// The visibility pass's answer. Held in the result's own frame and re-expressed
+// against the store's origin whenever that changes, the same way setup markers
+// are — otherwise opening a store after a carve would slide the voxels off the
+// geometry they describe.
+- (void)setVoxelResult:(const vis::Result &)result;
+- (void)clearVoxels;
+- (BOOL)hasVoxels;
+- (size_t)voxelCount;
+
+// Frames the voxels rather than the whole site, which is usually what you want
+// immediately after a run.
+- (void)frameVoxels;
+
 - (void)frameAll;
 - (BOOL)hasStore;
 
 @property (nonatomic) float  pointSize;
 @property (nonatomic) size_t pointBudget;
+@property (nonatomic) BOOL   showClouds;
+@property (nonatomic) BOOL   showVoxels;
 
 @end

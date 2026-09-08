@@ -28,6 +28,12 @@
 // The store to draw. Pass nullptr to clear. The reader must outlive the call.
 - (void)setStore:(const store::Reader *)reader;
 
+// Voxels from the visibility pass, already expressed against the same origin as
+// the store. They are StorePoints, so they go through the same vertex shader as
+// the cloud — a voxel and a point are both a coloured position, and giving them
+// separate pipelines would only mean two things to keep in step.
+- (void)setVoxels:(const std::vector<lod::StorePoint> &)voxels;
+
 // Setup positions in the store's local frame, drawn as markers. Available from
 // headers alone, so these are shown while the store is still being built.
 - (void)setSetupMarkers:(const std::vector<simd_float3> &)markers;
@@ -38,6 +44,11 @@
          selection:(const lod::Selection &)selection;
 
 @property (nonatomic) float pointSize;
+// Voxels are drawn a little larger than cloud points: at the same size a 5 cm
+// lattice reads as a haze rather than as a surface.
+@property (nonatomic) float voxelPointScale;
+@property (nonatomic) BOOL  showPoints;
+@property (nonatomic) BOOL  showVoxels;
 @property (nonatomic) BOOL  showSetups;
 @property (nonatomic) BOOL  showCrosshair;
 @property (nonatomic) BOOL  showPivot;
@@ -47,5 +58,6 @@
 @property (nonatomic, readonly) BOOL zeroCopy;
 // Bytes currently held in per-node buffers; zero on the zero-copy path.
 @property (nonatomic, readonly) uint64_t cachedBytes;
+@property (nonatomic, readonly) size_t   voxelCount;
 
 @end

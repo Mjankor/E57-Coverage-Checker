@@ -149,6 +149,8 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
 
     std::vector<simd_float3>   _setups;
     id<MTLBuffer>              _setupBuffer;
+    id<MTLBuffer>              _voxelBuffer;
+    size_t                     _voxelCount;
     m3::Vec3                   _pivot;
 }
 
@@ -206,7 +208,10 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
     dd.depthWriteEnabled    = YES;
     r->_depthState = [device newDepthStencilStateWithDescriptor:dd];
 
-    r->_pointSize     = 2.5f;
+    r->_pointSize       = 2.5f;
+    r->_voxelPointScale = 1.6f;
+    r->_showPoints      = YES;
+    r->_showVoxels      = YES;
     r->_showSetups    = YES;
     r->_showCrosshair = YES;
     r->_showPivot     = YES;
@@ -216,6 +221,20 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
 - (void)setPivot:(m3::Vec3)pivot { _pivot = pivot; }
 - (BOOL)zeroCopy { return _wholeStore != nil; }
 - (uint64_t)cachedBytes { return _cacheBytes; }
+- (size_t)voxelCount { return _voxelCount; }
+
+- (void)setVoxels:(const std::vector<lod::StorePoint> &)voxels {
+    _voxelBuffer = nil;
+    _voxelCount  = 0;
+    if (voxels.empty()) return;
+    const size_t bytes = voxels.size() * sizeof(lod::StorePoint);
+    _voxelBuffer = [_device newBufferWithBytes:voxels.data()
+                                        length:bytes
+                                       options:MTLResourceStorageModeShared];
+    // A failed allocation is not fatal: the count stays zero and nothing is
+    // drawn, which is better than a half-populated buffer read as geometry.
+    if (_voxelBuffer) _voxelCount = voxels.size();
+}
 
 - (void)setStore:(const store::Reader *)reader {
     _store = reader;
@@ -300,7 +319,7 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
     // control means what it says wherever the camera is.
     const float atten = std::max(camera.distance(), 1e-3f);
 
-    if (_store && _store->isOpen() && !selection.nodes.empty()) {
+    if (_showPoints && _store && _store->isOpen() && !selection.nodes.empty()) {
         [enc setRenderPipelineState:_pointPipeline];
         Uniforms u{};
         u.viewProj         = vp;
@@ -326,6 +345,22 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
             }
             [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:count];
         }
+    }
+
+    if (_showVoxels && _voxelBuffer && _voxelCount) {
+        // Depth-tested along with the cloud, so a voxel behind a wall is hidden
+        // by that wall. Showing the void through the geometry in front of it
+        // would make every shadow look like it reached the camera.
+        [enc setRenderPipelineState:_pointPipeline];
+        Uniforms u{};
+        u.viewProj         = vp;
+        u.pointSize        = _pointSize * _voxelPointScale;
+        u.attenuationScale = atten;
+        u.useVertexColour  = 1u;
+        u.tint             = simd_make_float4(1, 1, 1, 1);
+        [enc setVertexBuffer:_voxelBuffer offset:0 atIndex:0];
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+        [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:_voxelCount];
     }
 
     if (_showSetups && _setupBuffer && !_setups.empty()) {

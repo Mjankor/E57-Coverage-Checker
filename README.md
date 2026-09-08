@@ -29,6 +29,8 @@ remaining work is making it fast and turning the raw result into an answer.
 | viewer on the store, two-phase open | done — **rendering layer unrun** |
 | **range-image builder** | done and tested |
 | **CPU reference visibility pass** | done and tested — `e57cov carve` |
+| **visibility filter in the app** | done — Processing ▸ Run Visibility Filter |
+| **voxel display + layer toggles** | done — **rendering layer unrun** |
 | Metal gather kernel | not started |
 | void extraction, classification, export | not started |
 
@@ -100,6 +102,8 @@ byte-budgeted LRU of per-node buffers.
 | **right click** | set the orbit centre to the point under the crosshair |
 | wheel / pinch | zoom |
 | `F` | frame all |
+| `⇧F` | frame the voxels |
+| `⌘1` `⌘2` | show / hide the clouds, show / hide the voxels |
 | `[` `]` | smaller / larger points |
 
 Control-left is an alias for right throughout, because holding a two-finger
@@ -132,7 +136,8 @@ and treating it as disqualifying would discard most of a corpus. The store
 records the ambiguity so it stays visible rather than being quietly forgotten.
 
 The status line reports how many points are drawn out of how many the store
-holds, and says when the budget cut the detail short.
+holds, and says when the budget cut the detail short — and, after a visibility
+run, how much unobserved space was found.
 
 ## Auditing a corpus
 
@@ -178,6 +183,13 @@ not yet the answer — at this stage it still mixes occlusion shadows inside the
 site with material behind walls and with the open air outside the building.
 Separating those is the next stage.
 
+The same pipeline runs from the app: **Processing ▸ Run Visibility Filter…**
+asks for the voxel size, range and tile size, runs on a background queue with a
+progress line and File ▸ Cancel, and draws the result over the point cloud. The
+two buttons at the top right of the view turn the original clouds and the voxels
+on and off independently (⌘1 and ⌘2 do the same), because reading the result
+means flicking between them.
+
 Two things about this command are worth knowing. It is the **CPU reference**:
 single-threaded, no early exits, written to be obviously correct so the Metal
 kernel can be asserted bit-exact against it. On a full corpus at 5 cm it will
@@ -203,7 +215,7 @@ keeps the reader buildable and testable off the target platform.
 open E57CoverageChecker.xcodeproj
 ```
 
-Eight targets, all C++20 with shared schemes:
+Nine targets, all C++20 with shared schemes:
 
 | target | kind | what it is |
 |---|---|---|
@@ -215,6 +227,7 @@ Eight targets, all C++20 with shared schemes:
 | `test_indexer` | tool | survey, bounded-memory build, store round trip |
 | `test_range_image` | tool | grid path, angular mapping, conservative binning |
 | `test_carve` | tool | per-setup evidence, OR across setups, tiling invariance |
+| `test_visibility` | tool | frontier reduction, display sampling, end-to-end run |
 
 ⌘R on a test scheme runs that suite in the console.
 
@@ -255,6 +268,7 @@ src/point_store.{h,cpp}     on-disk store, mmap'd and zero-copy
 src/indexer.{h,cpp}         corpus survey and bounded-memory build
 src/range_image.{h,cpp}     structured scan -> range image (visibility stage 1)
 src/carve.{h,cpp}           tiled visibility carve, CPU reference (stage 2)
+src/visibility.{h,cpp}      the carve as a job: files in, drawable voxels out
 src/camera.{h,cpp}          orbit camera
 src/picker.{h,cpp}          screen-space point picking (orbit centre)
 src/math3d.h                vectors and matrices
@@ -267,6 +281,7 @@ tests/test_lod.cpp          octree, selection, store tests
 tests/test_indexer.cpp      survey and build tests
 tests/test_range_image.cpp  range image tests
 tests/test_carve.cpp        visibility carve tests
+tests/test_visibility.cpp   frontier reduction, display sampling, tiling invariance
 tools/genproj.py            regenerates the Xcode project from a file list
 tools/validate_xcodeproj.py pbxproj structural validator
 E57CoverageChecker.xcodeproj

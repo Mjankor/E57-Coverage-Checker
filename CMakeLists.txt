@@ -21,7 +21,8 @@ add_library(e57cov_core STATIC
   src/point_store.cpp
   src/indexer.cpp
   src/range_image.cpp
-  src/carve.cpp)
+  src/carve.cpp
+  src/visibility.cpp)
 target_include_directories(e57cov_core PUBLIC src)
 target_compile_options(e57cov_core PRIVATE -Wall -Wextra)
 
@@ -59,3 +60,8 @@ add_executable(test_carve tests/test_carve.cpp)
 target_link_libraries(test_carve PRIVATE e57cov_core)
 target_compile_options(test_carve PRIVATE -Wall -Wextra)
 add_test(NAME carve COMMAND test_carve)
+
+add_executable(test_visibility tests/test_visibility.cpp)
+target_link_libraries(test_visibility PRIVATE e57cov_core)
+target_compile_options(test_visibility PRIVATE -Wall -Wextra)
+add_test(NAME visibility COMMAND test_visibility)

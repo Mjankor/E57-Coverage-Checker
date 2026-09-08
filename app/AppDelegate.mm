@@ -23,9 +23,11 @@
 #include "../src/indexer.h"
 #include "../src/point_store.h"
 #include "../src/scan_check.h"
+#include "../src/visibility.h"
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -71,6 +73,12 @@ std::string corpusKey(const std::vector<std::string> &paths) {
     return buf;
 }
 
+// The sidebar's default width. Narrow on purpose: it identifies setups, and
+// the cloud is what the window is for.
+constexpr CGFloat kSidebarWidth    = 320;
+constexpr CGFloat kSidebarMinWidth = 200;
+constexpr CGFloat kSidebarMaxWidth = 620;
+
 const char *kindLabel(check::Kind k) {
     switch (k) {
     case check::Kind::Structured: return "structured";
@@ -83,7 +91,8 @@ const char *kindLabel(check::Kind k) {
 } // namespace
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSTableViewDataSource,
-                                   NSTableViewDelegate, CloudViewDelegate>
+                                   NSTableViewDelegate, NSSplitViewDelegate,
+                                   CloudViewDelegate>
 @end
 
 @implementation AppDelegate {
@@ -94,7 +103,15 @@ const char *kindLabel(check::Kind k) {
     NSTextField         *_progress;
     NSProgressIndicator *_spinner;
 
+    NSButton            *_cloudToggle;
+    NSButton            *_voxelToggle;
+
     indexer::Survey      _survey;
+    // The corpus as opened, so the visibility pass can be run over exactly the
+    // files the view is showing.
+    std::vector<std::string> _paths;
+    // Carried between runs so the sheet reopens with what was last used.
+    vis::Options         _visOptions;
     BOOL                 _busy;
     // Shared with the worker rather than read through `self`: it is written on
     // the main thread and read on a background queue, which as a plain BOOL was
@@ -106,7 +123,13 @@ const char *kindLabel(check::Kind k) {
     (void)note;
     [self buildMenu];
 
-    const NSRect frame = NSMakeRect(0, 0, 1400, 900);
+    // Open to most of the display rather than a fixed box. A point cloud is
+    // read by eye, and the default window is the one people actually work in.
+    NSScreen *screen = NSScreen.mainScreen;
+    const NSRect visible = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1440, 900);
+    const NSRect frame = NSMakeRect(0, 0,
+                                    std::min(visible.size.width  - 80.0, 1760.0),
+                                    std::min(visible.size.height - 60.0, 1100.0));
     _window = [[NSWindow alloc]
         initWithContentRect:frame
                   styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -114,22 +137,27 @@ const char *kindLabel(check::Kind k) {
                     backing:NSBackingStoreBuffered
                       defer:NO];
     _window.title = @"E57 Coverage Checker";
+    _window.contentMinSize = NSMakeSize(900, 600);
     [_window center];
 
     NSSplitView *split = [[NSSplitView alloc] initWithFrame:frame];
     split.vertical = YES;
     split.dividerStyle = NSSplitViewDividerStyleThin;
     split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    split.delegate = self;
 
     _table = [[NSTableView alloc] initWithFrame:NSZeroRect];
     _table.dataSource = self;
     _table.delegate = self;
     _table.usesAlternatingRowBackgroundColors = YES;
     _table.rowHeight = 30;
+    // Sized so the three columns fit the sidebar at its default width: the list
+    // is for identifying a setup, not for reading paths, and every pixel it
+    // takes is one the cloud does not get.
     struct { NSString *ident; NSString *title; CGFloat width; } cols[] = {
-        {@"scan",   @"Setup",  230},
-        {@"status", @"Status", 170},
-        {@"points", @"Points", 90},
+        {@"scan",   @"Setup",  158},
+        {@"status", @"Status",  95},
+        {@"points", @"Points",  52},
     };
     for (auto &c : cols) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:c.ident];
@@ -137,21 +165,25 @@ const char *kindLabel(check::Kind k) {
         col.width = c.width;
         [_table addTableColumn:col];
     }
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 520, 900)];
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:
+        NSMakeRect(0, 0, kSidebarWidth, frame.size.height)];
     scroll.documentView = _table;
     scroll.hasVerticalScroller = YES;
     scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    NSView *rightPane = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 880, 900)];
+    const CGFloat rightWidth = std::max<CGFloat>(400, frame.size.width - kSidebarWidth);
+    NSView *rightPane = [[NSView alloc] initWithFrame:
+        NSMakeRect(0, 0, rightWidth, frame.size.height)];
     rightPane.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    _cloudView = [[CloudView alloc] initWithFrame:NSMakeRect(0, 44, 880, 856)];
+    _cloudView = [[CloudView alloc] initWithFrame:
+        NSMakeRect(0, 44, rightWidth, frame.size.height - 44)];
     _cloudView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _cloudView.cloudDelegate = self;
     [rightPane addSubview:_cloudView];
 
-    _status = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 22, 830, 18)];
-    _progress = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 4, 830, 18)];
+    _status = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 22, rightWidth - 50, 18)];
+    _progress = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 4, rightWidth - 50, 18)];
     for (NSTextField *f in @[_status, _progress]) {
         f.bezeled = NO; f.editable = NO; f.drawsBackground = NO;
         f.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
@@ -162,15 +194,18 @@ const char *kindLabel(check::Kind k) {
     _status.stringValue = @"File ▸ Open to load E57 scans.   left drag pan · right drag orbit · "
                           @"right click sets orbit centre · wheel zoom · F frames all";
 
-    _spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(852, 12, 18, 18)];
+    _spinner = [[NSProgressIndicator alloc] initWithFrame:
+        NSMakeRect(rightWidth - 28, 12, 18, 18)];
     _spinner.style = NSProgressIndicatorStyleSpinning;
     _spinner.hidden = YES;
     _spinner.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
     [rightPane addSubview:_spinner];
 
+    [self buildLayerTogglesInPane:rightPane width:rightWidth height:frame.size.height];
+
     [split addSubview:scroll];
     [split addSubview:rightPane];
-    [split setPosition:520 ofDividerAtIndex:0];
+    [split setPosition:kSidebarWidth ofDividerAtIndex:0];
 
     _window.contentView = split;
     [_window makeKeyAndOrderFront:nil];
@@ -190,6 +225,68 @@ const char *kindLabel(check::Kind k) {
     (void)sender; return YES;
 }
 
+// --- layer toggles --------------------------------------------------------
+//
+// Two push-on/push-off buttons floating over the top right of the cloud. They
+// are here rather than in the menu because comparing the voxels against the
+// geometry means flicking between them repeatedly, and a menu round trip for
+// that gets old within a minute.
+
+- (void)buildLayerTogglesInPane:(NSView *)pane width:(CGFloat)width height:(CGFloat)height {
+    const CGFloat w = 128, h = 24, margin = 12, gap = 6;
+    struct { NSString *title; SEL action; NSButton * __strong *slot; int index; } defs[] = {
+        {@"Original clouds", @selector(toggleClouds:), &_cloudToggle, 0},
+        {@"Voxels",          @selector(toggleVoxels:), &_voxelToggle, 1},
+    };
+    for (auto &d : defs) {
+        const CGFloat y = height - margin - h - d.index * (h + gap);
+        NSButton *b = [[NSButton alloc] initWithFrame:
+            NSMakeRect(width - margin - w, y, w, h)];
+        b.title       = d.title;
+        b.bezelStyle  = NSBezelStyleRounded;
+        [b setButtonType:NSButtonTypePushOnPushOff];
+        b.state       = NSControlStateValueOn;
+        b.font        = [NSFont systemFontOfSize:11];
+        b.target      = self;
+        b.action      = d.action;
+        // MTKView forces the window layer-backed, so a sibling drawn over it
+        // needs its own layer or it renders underneath.
+        b.wantsLayer = YES;
+        // Pinned to the top right corner as the window resizes.
+        b.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+        [pane addSubview:b];
+        *d.slot = b;
+    }
+}
+
+- (void)toggleClouds:(id)sender {
+    _cloudView.showClouds = (((NSButton *)sender).state == NSControlStateValueOn);
+}
+
+- (void)toggleVoxels:(id)sender {
+    _cloudView.showVoxels = (((NSButton *)sender).state == NSControlStateValueOn);
+}
+
+// --- split view -----------------------------------------------------------
+
+- (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposed
+         ofSubviewAt:(NSInteger)index {
+    (void)splitView; (void)proposed; (void)index;
+    return kSidebarMinWidth;
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView constrainMaxCoordinate:(CGFloat)proposed
+         ofSubviewAt:(NSInteger)index {
+    (void)splitView; (void)index;
+    return std::min<CGFloat>(proposed, kSidebarMaxWidth);
+}
+
+// The cloud takes the space when the window grows; the list keeps its width.
+- (BOOL)splitView:(NSSplitView *)splitView shouldAdjustSizeOfSubview:(NSView *)subview {
+    (void)splitView;
+    return subview != splitView.subviews.firstObject;
+}
+
 - (void)buildMenu {
     NSMenu *bar = [[NSMenu alloc] init];
 
@@ -207,14 +304,29 @@ const char *kindLabel(check::Kind k) {
     [fileMenu addItemWithTitle:@"Open…" action:@selector(openDocument:) keyEquivalent:@"o"];
     [fileMenu addItemWithTitle:@"Open Folder…" action:@selector(openFolder:) keyEquivalent:@"O"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"Cancel Indexing" action:@selector(cancelIndexing:) keyEquivalent:@"."];
+    [fileMenu addItemWithTitle:@"Cancel" action:@selector(cancelIndexing:) keyEquivalent:@"."];
     [fileMenu addItemWithTitle:@"Close All" action:@selector(closeAll:) keyEquivalent:@"w"];
     fileItem.submenu = fileMenu;
     [bar addItem:fileItem];
 
+    NSMenuItem *procItem = [[NSMenuItem alloc] init];
+    NSMenu *procMenu = [[NSMenu alloc] initWithTitle:@"Processing"];
+    [procMenu addItemWithTitle:@"Run Visibility Filter…"
+                        action:@selector(runVisibilityFilter:) keyEquivalent:@"r"];
+    [procMenu addItem:[NSMenuItem separatorItem]];
+    [procMenu addItemWithTitle:@"Clear Voxels" action:@selector(clearVoxels:) keyEquivalent:@""];
+    procItem.submenu = procMenu;
+    [bar addItem:procItem];
+
     NSMenuItem *viewItem = [[NSMenuItem alloc] init];
     NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
     [viewMenu addItemWithTitle:@"Frame All" action:@selector(frameAll:) keyEquivalent:@"f"];
+    [viewMenu addItemWithTitle:@"Frame Voxels" action:@selector(frameVoxels:) keyEquivalent:@"F"];
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    [viewMenu addItemWithTitle:@"Original Clouds"
+                        action:@selector(toggleCloudsMenu:) keyEquivalent:@"1"];
+    [viewMenu addItemWithTitle:@"Voxels" action:@selector(toggleVoxelsMenu:) keyEquivalent:@"2"];
+    [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"Larger Points" action:@selector(biggerPoints:) keyEquivalent:@"]"];
     [viewMenu addItemWithTitle:@"Smaller Points" action:@selector(smallerPoints:) keyEquivalent:@"["];
     viewItem.submenu = viewMenu;
@@ -274,6 +386,7 @@ const char *kindLabel(check::Kind k) {
     (void)sender;
     if (_busy) return;
     _survey = indexer::Survey{};
+    _paths.clear();
     [_table reloadData];
     [_cloudView closeAll];
     _status.stringValue = @"Closed.";
@@ -281,6 +394,29 @@ const char *kindLabel(check::Kind k) {
 }
 
 - (void)frameAll:(id)sender { (void)sender; [_cloudView frameAll]; }
+- (void)frameVoxels:(id)sender { (void)sender; [_cloudView frameVoxels]; }
+
+// The menu items and the buttons are two faces of one switch, so each keeps the
+// other in step rather than the two drifting apart.
+- (void)toggleCloudsMenu:(id)sender {
+    (void)sender;
+    const BOOL on = !_cloudView.showClouds;
+    _cloudView.showClouds = on;
+    _cloudToggle.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (void)toggleVoxelsMenu:(id)sender {
+    (void)sender;
+    const BOOL on = !_cloudView.showVoxels;
+    _cloudView.showVoxels = on;
+    _voxelToggle.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (void)clearVoxels:(id)sender {
+    (void)sender;
+    [_cloudView clearVoxels];
+    _status.stringValue = @"Voxels cleared.";
+}
 - (void)biggerPoints:(id)sender { (void)sender; _cloudView.pointSize = _cloudView.pointSize + 0.5f; }
 - (void)smallerPoints:(id)sender { (void)sender; _cloudView.pointSize = _cloudView.pointSize - 0.5f; }
 
@@ -309,6 +445,7 @@ const char *kindLabel(check::Kind k) {
         if (u) cpaths.push_back(u);
     }
     if (cpaths.empty()) { _status.stringValue = @"No readable paths."; return; }
+    _paths = cpaths;
 
     _busy = YES;
     _cancel = std::make_shared<std::atomic<bool>>(false);
@@ -440,6 +577,184 @@ const char *kindLabel(check::Kind k) {
                     @"%zu setups   ·   store %@   ·   drag to navigate",
                     usable, cached ? @"reused from cache" : @"built"];
             }
+            me->_progress.stringValue = @"";
+            me->_busy = NO;
+            [me->_spinner stopAnimation:nil];
+            me->_spinner.hidden = YES;
+        });
+      }
+    });
+}
+
+// --- the visibility filter ------------------------------------------------
+//
+// Same pipeline as `e57cov carve`: src/visibility.{h,cpp} does the work, and
+// this is the window's way of asking for it. It runs on a background queue for
+// the same reason indexing does — a full site at 5 cm is minutes of arithmetic
+// and a beachball is not a progress report.
+//
+// The parameters are asked for rather than assumed. Voxel size and range change
+// both the answer and how long it takes by orders of magnitude, and a filter
+// that silently picked them would be reporting on a question the operator never
+// asked.
+
+- (NSTextField *)labelWithText:(NSString *)text frame:(NSRect)frame {
+    NSTextField *f = [[NSTextField alloc] initWithFrame:frame];
+    f.stringValue = text;
+    f.bezeled = NO; f.editable = NO; f.drawsBackground = NO;
+    f.font = [NSFont systemFontOfSize:11];
+    f.textColor = [NSColor secondaryLabelColor];
+    return f;
+}
+
+- (NSTextField *)fieldWithValue:(NSString *)value frame:(NSRect)frame {
+    NSTextField *f = [[NSTextField alloc] initWithFrame:frame];
+    f.stringValue = value;
+    f.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightRegular];
+    f.alignment = NSTextAlignmentRight;
+    return f;
+}
+
+- (void)runVisibilityFilter:(id)sender {
+    (void)sender;
+    if (_busy) return;
+    if (_paths.empty()) {
+        _status.stringValue = @"Open some E57 scans first.";
+        return;
+    }
+
+    // --- parameters -------------------------------------------------------
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 132)];
+    struct { NSString *label; NSString *value; } rows[] = {
+        {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
+        {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
+        {@"Tile size (voxels)", [NSString stringWithFormat:@"%u", _visOptions.tileVoxels]},
+    };
+    NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
+    for (int i = 0; i < 3; ++i) {
+        const CGFloat y = 104 - i * 28;
+        [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 200, 20)]];
+        NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(210, y - 3, 90, 22)];
+        [acc addSubview:f];
+        [fields addObject:f];
+    }
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 380, 20)];
+    solid.title = @"Show every unobserved voxel, not just the frontier";
+    [solid setButtonType:NSButtonTypeSwitch];
+    solid.font = [NSFont systemFontOfSize:11];
+    solid.state = _visOptions.solid ? NSControlStateValueOn : NSControlStateValueOff;
+    [acc addSubview:solid];
+
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = @"Run visibility filter";
+    a.informativeText =
+        @"Marks every voxel some setup could see through or measured a surface in, and "
+        @"reports the rest: space in range of a scanner that nothing observed.\n\n"
+        @"By default only the frontier of that space is drawn — where coverage stops. "
+        @"The full volume hides its own interior anyway, and there is far more of it.\n\n"
+        @"This is the CPU reference, so a large site at 5 cm takes minutes. "
+        @"File ▸ Cancel stops it, and a coarser voxel is much faster: halving the "
+        @"voxel size costs eight times the work.";
+    [a addButtonWithTitle:@"Run"];
+    [a addButtonWithTitle:@"Cancel"];
+    a.accessoryView = acc;
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+
+    vis::Options opt = _visOptions;
+    const double voxel = fields[0].doubleValue;
+    const double range = fields[1].doubleValue;
+    const long   tile  = fields[2].integerValue;
+    if (!(voxel > 0.0) || !(range > 0.0) || tile <= 0 || tile > 4096) {
+        _status.stringValue = @"Voxel size and range must be positive, tile size 1–4096.";
+        return;
+    }
+    opt.voxelSize  = voxel;
+    opt.maxRange   = range;
+    opt.tileVoxels = uint32_t(tile);
+    opt.solid      = (solid.state == NSControlStateValueOn);
+    _visOptions    = opt;
+
+    // --- run --------------------------------------------------------------
+    // Everything the worker needs is captured by value; nothing on the
+    // background queue reaches through `self`.
+    _busy = YES;
+    _cancel = std::make_shared<std::atomic<bool>>(false);
+    _spinner.hidden = NO;
+    [_spinner startAnimation:nil];
+    _status.stringValue = @"Running the visibility filter…";
+
+    auto cancel = _cancel;
+    auto paths  = std::make_shared<std::vector<std::string>>(_paths);
+    __weak AppDelegate *weakSelf = self;
+
+    void (^report)(NSString *) = ^(NSString *line) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *me = weakSelf;
+            if (me) me->_progress.stringValue = line;
+        });
+    };
+    void (^finish)(NSString *) = ^(NSString *line) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *me = weakSelf;
+            if (!me) return;
+            me->_status.stringValue = line;
+            me->_progress.stringValue = @"";
+            me->_busy = NO;
+            [me->_spinner stopAnimation:nil];
+            me->_spinner.hidden = YES;
+        });
+    };
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      @autoreleasepool {
+        auto result = std::make_shared<vis::Result>();
+        std::string err;
+
+        // Progress crosses to the main thread at most every 200 ms: the carve
+        // ticks per tile, and a dispatch per tile would cost more than the
+        // arithmetic it is reporting on.
+        auto lastPost = std::chrono::steady_clock::now();
+        vis::Progress progress = [report, cancel, &lastPost]
+                                 (const std::string &stage, uint64_t done, uint64_t total) {
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - lastPost).count() > 0.2 || done == total) {
+                lastPost = now;
+                @autoreleasepool {
+                    report([NSString stringWithFormat:@"%s  %llu / %llu",
+                            stage.c_str(), (unsigned long long)done,
+                            (unsigned long long)total]);
+                }
+            }
+            return !cancel->load();
+        };
+
+        const bool ok = vis::run(*paths, opt, progress, *result, err);
+        if (!ok) {
+            finish(cancel->load() ? @"Visibility filter cancelled."
+                                  : [NSString stringWithFormat:@"Visibility filter failed: %s",
+                                     err.c_str()]);
+            return;
+        }
+
+        const double vol = result->unknownVolume();
+        const double pct = result->stats.reachable
+                         ? 100.0 * double(result->stats.unknown) / double(result->stats.reachable)
+                         : 0.0;
+        NSString *note = result->note.empty() ? @""
+                       : [NSString stringWithFormat:@"   ·   %s", result->note.c_str()];
+        NSString *line = [NSString stringWithFormat:
+            @"%llu setups   ·   %.0f m³ unobserved (%.1f%% of what was in range)   ·   "
+            @"%zu voxels drawn%@%@",
+            (unsigned long long)result->setupsUsed, vol, pct, result->voxels.size(),
+            result->partial ? @"   ·   PARTIAL RUN" : @"", note];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *me = weakSelf;
+            if (!me) return;
+            [me->_cloudView setVoxelResult:*result];
+            me->_voxelToggle.state = NSControlStateValueOn;
+            me->_cloudView.showVoxels = YES;
+            me->_status.stringValue = line;
             me->_progress.stringValue = @"";
             me->_busy = NO;
             [me->_spinner stopAnimation:nil];

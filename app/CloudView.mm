@@ -22,6 +22,11 @@
     lod::Aabb                _setupBounds;
     BOOL                     _haveSetupBounds;
 
+    // The carve's answer in its own frame, kept so it can be re-expressed if
+    // the store's origin arrives or changes afterwards.
+    vis::Result              _voxelResult;
+    BOOL                     _haveVoxels;
+
     NSPoint                  _lastPoint;
     BOOL                     _dragging;
     BOOL                     _orbiting;
@@ -32,6 +37,8 @@
     if (!_renderer) return NO;
     self.pointSize   = 2.5f;
     self.pointBudget = 12000000;
+    _showClouds = YES;
+    _showVoxels = YES;
     self.enableSetNeedsDisplay = YES;   // redraw on interaction, not at 60 Hz
     self.paused = YES;
     _origin[0] = _origin[1] = _origin[2] = 0.0;
@@ -45,6 +52,18 @@
 - (void)setPointSize:(float)pointSize {
     _pointSize = pointSize;
     _renderer.pointSize = pointSize;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)setShowClouds:(BOOL)show {
+    _showClouds = show;
+    _renderer.showPoints = show;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)setShowVoxels:(BOOL)show {
+    _showVoxels = show;
+    _renderer.showVoxels = show;
     [self setNeedsDisplay:YES];
 }
 
@@ -81,6 +100,45 @@
     [_renderer setSetupMarkers:markers];
 }
 
+- (void)rebuildVoxels {
+    if (!_haveVoxels) { [_renderer setVoxels:std::vector<lod::StorePoint>{}]; return; }
+    std::vector<lod::StorePoint> shifted;
+    vis::rebase(_voxelResult, _origin, shifted);
+    [_renderer setVoxels:shifted];
+}
+
+- (void)setVoxelResult:(const vis::Result &)result {
+    _voxelResult = result;
+    _haveVoxels  = !result.voxels.empty();
+    [self rebuildVoxels];
+    [self setNeedsDisplay:YES];
+    [self reportStatus];
+}
+
+- (void)clearVoxels {
+    _voxelResult = vis::Result{};
+    _haveVoxels  = NO;
+    [_renderer setVoxels:std::vector<lod::StorePoint>{}];
+    [self setNeedsDisplay:YES];
+    [self reportStatus];
+}
+
+- (BOOL)hasVoxels { return _haveVoxels; }
+- (size_t)voxelCount { return _voxelResult.voxels.size(); }
+
+- (void)frameVoxels {
+    if (!_haveVoxels) { [self frameAll]; return; }
+    [self updateViewport];
+    // The result's bounds are in its own frame; the camera works in the store's.
+    const float dx = float(_voxelResult.origin[0] - _origin[0]);
+    const float dy = float(_voxelResult.origin[1] - _origin[1]);
+    const float dz = float(_voxelResult.origin[2] - _origin[2]);
+    const lod::Aabb &b = _voxelResult.bounds;
+    _camera.frameBounds({b.lo[0] + dx, b.lo[1] + dy, b.lo[2] + dz},
+                        {b.hi[0] + dx, b.hi[1] + dy, b.hi[2] + dz});
+    [self viewChanged];
+}
+
 - (void)setSetups:(const std::vector<double> &)fileFrameXYZ {
     _setupsFileFrame = fileFrameXYZ;
     if (!_store.isOpen() && !_setupsFileFrame.empty()) {
@@ -107,9 +165,10 @@
     }
     _tree = _store.tree();
     for (int k = 0; k < 3; ++k) _origin[k] = _store.header().origin[k];
-    // Setups were placed against a provisional origin; re-express them against
-    // the store's so markers and points stay registered.
+    // Setups and voxels were placed against a provisional origin; re-express
+    // them against the store's so everything stays registered.
     [self rebuildSetupMarkers];
+    [self rebuildVoxels];
     [_renderer setStore:&_store];
     _selectionStale = YES;
     [self frameAll];
@@ -124,6 +183,7 @@
     _setupsFileFrame.clear();
     _haveSetupBounds = NO;
     [_renderer setSetupMarkers:std::vector<simd_float3>{}];
+    [self clearVoxels];
     [self setNeedsDisplay:YES];
 }
 
@@ -132,6 +192,9 @@
     if (!_tree.nodes.empty()) {
         const lod::Aabb &b = _tree.bounds;
         _camera.frameBounds({b.lo[0], b.lo[1], b.lo[2]}, {b.hi[0], b.hi[1], b.hi[2]});
+    } else if (_haveVoxels) {
+        [self frameVoxels];
+        return;
     } else if (_haveSetupBounds) {
         // Setups alone are a plane of points; pad so the initial view is not
         // edge-on to a degenerate box.
@@ -160,6 +223,10 @@
                   double(_store.header().totalPoints) / 1e6,
                   (unsigned long)_selection.nodes.size(),
                   _selection.budgetExhausted ? @"   (budget reached)" : @""];
+    }
+    if (_haveVoxels) {
+        detail = [detail stringByAppendingFormat:@"   ·   %.0f k unobserved voxels (%.0f m³)",
+                  double(_voxelResult.voxels.size()) / 1e3, _voxelResult.unknownVolume()];
     }
     [self.cloudDelegate cloudViewDidChangeView:
         [NSString stringWithFormat:@"pivot %.2f, %.2f, %.2f   ·   %.1f m out%@",

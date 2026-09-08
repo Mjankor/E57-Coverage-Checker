@@ -15,7 +15,8 @@ GROUPS = {
          ("point_store.cpp","sourcecode.cpp.cpp"),("indexer.h","sourcecode.c.h"),
          ("indexer.cpp","sourcecode.cpp.cpp"),("range_image.h","sourcecode.c.h"),
          ("range_image.cpp","sourcecode.cpp.cpp"),("carve.h","sourcecode.c.h"),
-         ("carve.cpp","sourcecode.cpp.cpp"),("main.cpp","sourcecode.cpp.cpp")],
+         ("carve.cpp","sourcecode.cpp.cpp"),("visibility.h","sourcecode.c.h"),
+         ("visibility.cpp","sourcecode.cpp.cpp"),("main.cpp","sourcecode.cpp.cpp")],
  "app": [("Renderer.h","sourcecode.c.h"),("Renderer.mm","sourcecode.cpp.objcpp"),
          ("CloudView.h","sourcecode.c.h"),("CloudView.mm","sourcecode.cpp.objcpp"),
          ("AppDelegate.mm","sourcecode.cpp.objcpp"),("Info.plist","text.plist.xml")],
@@ -24,7 +25,8 @@ GROUPS = {
            ("test_lod.cpp","sourcecode.cpp.cpp"),
            ("test_indexer.cpp","sourcecode.cpp.cpp"),
            ("test_range_image.cpp","sourcecode.cpp.cpp"),
-           ("test_carve.cpp","sourcecode.cpp.cpp")],
+           ("test_carve.cpp","sourcecode.cpp.cpp"),
+           ("test_visibility.cpp","sourcecode.cpp.cpp")],
 }
 DOCS = [("README.md","net.daringfireball.markdown"),("DESIGN.md","net.daringfireball.markdown"),
         ("CLAUDE.md","net.daringfireball.markdown"),("CMakeLists.txt","text")]
@@ -37,7 +39,7 @@ for name, ft in DOCS: fref[(".",name)] = (uid(), ft)
 CORE = [("src","e57.cpp"),("src","camera.cpp"),("src","scan_check.cpp"),
         ("src","point_cloud.cpp"),("src","picker.cpp"),("src","frame.cpp"),
         ("src","lod.cpp"),("src","point_store.cpp"),("src","indexer.cpp"),
-        ("src","range_image.cpp"),("src","carve.cpp")]
+        ("src","range_image.cpp"),("src","carve.cpp"),("src","visibility.cpp")]
 TARGETS = [
   ("e57cov","com.apple.product-type.tool","e57cov","compiled.mach-o-executable",
    CORE+[("src","main.cpp")], False),
@@ -53,6 +55,8 @@ TARGETS = [
    CORE+[("tests","test_range_image.cpp")], False),
   ("test_carve","com.apple.product-type.tool","test_carve","compiled.mach-o-executable",
    CORE+[("tests","test_carve.cpp")], False),
+  ("test_visibility","com.apple.product-type.tool","test_visibility","compiled.mach-o-executable",
+   CORE+[("tests","test_visibility.cpp")], False),
   ("E57CoverageChecker","com.apple.product-type.application","E57CoverageChecker.app",
    "wrapper.application",
    CORE+[("app","Renderer.mm"),("app","CloudView.mm"),("app","AppDelegate.mm")], True),

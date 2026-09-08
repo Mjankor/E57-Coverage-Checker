@@ -134,11 +134,11 @@ std::vector<TileKey> tilesForSetups(const std::vector<SetupView>& setups, const 
     return keys;
 }
 
-std::vector<size_t> setupsForTile(const TileKey& key, const std::vector<SetupView>& setups,
-                                  const Params& p) {
+namespace {
+
+std::vector<size_t> setupsForBox(const double lo[3], const double hi[3],
+                                 const std::vector<SetupView>& setups, const Params& p) {
     std::vector<size_t> out;
-    double lo[3], hi[3];
-    tileBounds(key, p, lo, hi);
     const double R2 = p.maxRange * p.maxRange;
     for (size_t i = 0; i < setups.size(); ++i) {
         if (!setups[i].image) continue;
@@ -147,18 +147,38 @@ std::vector<size_t> setupsForTile(const TileKey& key, const std::vector<SetupVie
     return out;
 }
 
-void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
-               const Params& p, Tile& out, Stats& stats) {
-    const uint32_t dim = p.tileVoxels;
-    out.key = key;
-    out.dim = dim;
+} // namespace
+
+std::vector<size_t> setupsForTile(const TileKey& key, const std::vector<SetupView>& setups,
+                                  const Params& p) {
     double lo[3], hi[3];
     tileBounds(key, p, lo, hi);
-    out.origin[0] = lo[0]; out.origin[1] = lo[1]; out.origin[2] = lo[2];
+    return setupsForBox(lo, hi, setups, p);
+}
+
+void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
+               const Params& p, Tile& out, Stats& stats) {
+    const uint32_t core = p.tileVoxels;
+    const uint32_t ap   = p.apron;
+    const uint32_t dim  = core + 2 * ap;
+    out.key   = key;
+    out.dim   = dim;
+    out.core  = core;
+    out.apron = ap;
+
+    double lo[3], hi[3];
+    tileBounds(key, p, lo, hi);
+    const double pad = double(ap) * p.voxelSize;
+    for (int k = 0; k < 3; ++k) out.origin[k] = lo[k] - pad;
     out.state.assign(size_t(dim) * dim * dim, 0);
     if (dim == 0) return;
 
-    const std::vector<size_t> reach = setupsForTile(key, setups, p);
+    // The apron reaches outside the tile, so setup selection has to as well —
+    // otherwise an apron voxel would be judged against the wrong setup list and
+    // the neighbour answers at the seam would be wrong.
+    double plo[3], phi[3];
+    for (int k = 0; k < 3; ++k) { plo[k] = lo[k] - pad; phi[k] = hi[k] + pad; }
+    const std::vector<size_t> reach = setupsForBox(plo, phi, setups, p);
     const double R2 = p.maxRange * p.maxRange;
 
     for (uint32_t z = 0; z < dim; ++z) {
@@ -167,8 +187,8 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                 double c[3];
                 out.centre(x, y, z, p.voxelSize, c);
 
-                uint8_t bits = 0;
-                bool inDomain = false;
+                uint8_t  bits = 0;
+                uint64_t tests = 0;
                 for (size_t si : reach) {
                     const SetupView& s = setups[si];
                     const double dx = c[0] - s.origin[0];
@@ -179,8 +199,8 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                     // optimisation: outside the range sphere there is nothing
                     // to say.
                     if (dx * dx + dy * dy + dz * dz > R2) continue;
-                    inDomain = true;
-                    ++stats.setupTests;
+                    bits |= kReachable;
+                    ++tests;
                     // OR across setups: visibility from any one of them is
                     // visibility, and the order they are combined in cannot
                     // change the result.
@@ -188,10 +208,15 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                 }
 
                 out.state[out.index(x, y, z)] = bits;
+
+                // Apron voxels belong to the neighbouring tile; counting them
+                // here would tally them twice.
+                if (!out.isInterior(x, y, z)) continue;
                 ++stats.voxels;
-                if (inDomain) {
+                stats.setupTests += tests;
+                if (bits & kReachable) {
                     ++stats.reachable;
-                    if (!bits) ++stats.unknown;
+                    if (bits == kReachable) ++stats.unknown;
                 }
                 if (bits & kVisible)  ++stats.visible;
                 if (bits & kOccupied) ++stats.occupied;

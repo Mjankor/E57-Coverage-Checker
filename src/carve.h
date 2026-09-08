@@ -46,6 +46,14 @@ namespace carve {
 enum Bits : uint8_t {
     kVisible  = 1u << 0,   // some setup had line of sight through it
     kOccupied = 1u << 1,   // some setup measured a surface inside it
+    // Within maxRange of at least one setup — the domain. Set by carveTile
+    // rather than by evidenceAt, because it is a property of the voxel's
+    // position relative to the setups and not of anything a setup saw.
+    //
+    // It is what separates "nobody observed this" from "this is outside the
+    // problem": a zero state means the voxel is not part of the question at
+    // all, and exactly kReachable means it is, and nothing observed it.
+    kReachable = 1u << 2,
 };
 
 struct Params {
@@ -61,6 +69,18 @@ struct Params {
     // of state. Small enough to stream, large enough that per-tile setup
     // selection is not the dominant cost.
     uint32_t tileVoxels = 256;
+    // Extra voxels carved on every face of a tile, beyond the tile proper.
+    //
+    // A consumer that asks about a voxel's neighbours — which is how the
+    // observed frontier is found — needs the voxels just outside the tile to
+    // exist. Recomputing them costs (dim+2)^3/dim^3, about 2.4% at 256, and
+    // buys an answer that is still identical for any tiling: the alternative,
+    // treating a tile edge as a boundary, would make a voxel's classification
+    // depend on where the tile seams happened to fall.
+    //
+    // Apron voxels are carved but not counted: they belong to the neighbouring
+    // tile, and counting them here would tally them twice.
+    uint32_t apron = 0;
 
     double tileMetres() const { return voxelSize * double(tileVoxels); }
 };
@@ -95,9 +115,20 @@ struct TileKey {
 
 struct Tile {
     TileKey  key;
+    // The carved cube, apron included: dim == core + 2 * apron. Indices run
+    // over the whole of it, and the tile proper is [apron, apron + core).
     uint32_t dim = 0;
-    double   origin[3] = {0, 0, 0};   // world position of the minimum corner
+    uint32_t core = 0;
+    uint32_t apron = 0;
+    double   origin[3] = {0, 0, 0};   // world position of the carved minimum corner
     std::vector<uint8_t> state;
+
+    uint32_t interiorBegin() const { return apron; }
+    uint32_t interiorEnd() const { return apron + core; }
+    bool isInterior(uint32_t x, uint32_t y, uint32_t z) const {
+        return x >= apron && x < apron + core && y >= apron && y < apron + core &&
+               z >= apron && z < apron + core;
+    }
 
     size_t index(uint32_t x, uint32_t y, uint32_t z) const {
         return (size_t(z) * dim + y) * dim + x;
@@ -106,6 +137,16 @@ struct Tile {
         out[0] = origin[0] + (double(x) + 0.5) * voxelSize;
         out[1] = origin[1] + (double(y) + 0.5) * voxelSize;
         out[2] = origin[2] + (double(z) + 0.5) * voxelSize;
+    }
+
+    // The voxel's index on the global lattice, which is the same whatever
+    // tiling produced it. Anything that has to be reproducible across runs with
+    // different tile sizes — a decimation, an export, a comparison — keys off
+    // this rather than off (tile, local index).
+    void globalIndex(uint32_t x, uint32_t y, uint32_t z, int64_t out[3]) const {
+        out[0] = key.x * int64_t(core) + int64_t(x) - int64_t(apron);
+        out[1] = key.y * int64_t(core) + int64_t(y) - int64_t(apron);
+        out[2] = key.z * int64_t(core) + int64_t(z) - int64_t(apron);
     }
 };
 
