@@ -123,7 +123,10 @@ std::vector<TileKey> tilesForSetups(const std::vector<SetupView>& setups, const 
                     tileBounds(k, p, lo, hi);
                     // The bounding box of a sphere is not the sphere: the
                     // corner tiles it names can be entirely out of reach.
-                    if (distSqPointBox(s.origin, lo, hi) <= R2) keys.push_back(k);
+                    if (distSqPointBox(s.origin, lo, hi) > R2) continue;
+                    // And a tile the domain excludes is not asked about at all.
+                    if (p.domain.testBox(lo, hi) == Overlap::None) continue;
+                    keys.push_back(k);
                 }
             }
         }
@@ -360,6 +363,12 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                                            out.origin[2] + z1 * p.voxelSize};
                     if (distSqPointBox(s.origin, blo, bhi) > R2) continue;
 
+                    // Out of the domain is out of the question: not unknown,
+                    // not counted, not carved.
+                    const Overlap ov = p.domain.testBox(blo, bhi);
+                    if (ov == Overlap::None) continue;
+                    const bool allInDomain = (ov == Overlap::Full);
+
                     // Whether every voxel in the brick is inside the rated
                     // range, which decides whether the per-voxel distance test
                     // can be skipped as well.
@@ -385,9 +394,11 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                         for (uint32_t z = z0; z < z1; ++z) {
                             for (uint32_t y = y0; y < y1; ++y) {
                                 for (uint32_t x = x0; x < x1; ++x) {
-                                    if (!allInRange) {
+                                    if (!allInRange || !allInDomain) {
                                         double c[3];
                                         out.centre(x, y, z, p.voxelSize, c);
+                                        if (!allInDomain &&
+                                            !p.domain.contains(c[0], c[1], c[2])) continue;
                                         const double dx = c[0] - s.origin[0];
                                         const double dy = c[1] - s.origin[1];
                                         const double dz = c[2] - s.origin[2];
@@ -406,6 +417,8 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                             for (uint32_t x = x0; x < x1; ++x) {
                                 double c[3];
                                 out.centre(x, y, z, p.voxelSize, c);
+                                if (!allInDomain &&
+                                    !p.domain.contains(c[0], c[1], c[2])) continue;
                                 const double dx = c[0] - s.origin[0];
                                 const double dy = c[1] - s.origin[1];
                                 const double dz = c[2] - s.origin[2];
@@ -439,6 +452,7 @@ void carveTileReference(const TileKey& key, const std::vector<SetupView>& setups
             for (uint32_t x = 0; x < dim; ++x) {
                 double c[3];
                 out.centre(x, y, z, p.voxelSize, c);
+                if (!p.domain.contains(c[0], c[1], c[2])) continue;
 
                 uint8_t  bits = 0;
                 uint64_t tests = 0;

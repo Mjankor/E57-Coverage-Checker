@@ -43,6 +43,22 @@
 
 namespace vis {
 
+// Which region the question covers. See carve::Domain for why this matters more
+// than any other single setting.
+enum class DomainMode {
+    // Everything within maxRange of any setup. Honest, and mostly outdoors.
+    RangeSpheres,
+    // A box around what the scans actually returned, grown by domainMargin.
+    // The default, because a scan of a building interior otherwise spends
+    // almost all of its answer on the sky and the neighbours' gardens.
+    //
+    // A box is the first approximation of the right shape. The right shape is a
+    // shrinkwrap of the returns, which for an interior job is the building and
+    // which would also drop the corners of this box that no scan ever reached.
+    // carve::Domain is the seam that will be cut along.
+    MeasuredExtent,
+};
+
 struct Options {
     double   voxelSize  = 0.05;
     double   maxRange   = 45.0;
@@ -53,6 +69,14 @@ struct Options {
 
     // Keep only unknown voxels that touch visible space. See the header note.
     bool     solid      = false;
+
+    DomainMode domain = DomainMode::MeasuredExtent;
+    // How far past the last measured return the question still applies. Two
+    // metres covers wall thickness, eaves, and registration slop — enough that a
+    // void just behind a surface is still asked about, without reaching into the
+    // open air the scan was never about. It is a physical depth, not a tolerance,
+    // so it is in metres rather than derived from the voxel size.
+    double   domainMargin = 2.0;
 
     // Total range-image cells across the whole corpus, which is what actually
     // bounds memory: one 2500 x 5280 scan is 40 MB, so a thousand of them at
@@ -86,6 +110,11 @@ struct Result {
     uint64_t     scansSkipped = 0;
     bool         partial   = false;    // maxTiles stopped it short
     bool         cancelled = false;
+
+    // The region actually asked about, and how much smaller it made the job.
+    carve::Domain domain;
+    double        domainVolume = 0;      // m^3 of the domain box, 0 when unbounded
+    double        sphereVolume = 0;      // m^3 of the range-sphere bounding box
 
     // Voxels to draw, as StorePoints so the existing point pipeline can render
     // them with no new shader. Positions are metres relative to `origin`.

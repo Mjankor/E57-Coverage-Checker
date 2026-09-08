@@ -228,6 +228,69 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     // do that without the answer depending on where tile seams fall.
     p.apron      = opt.solid ? 0u : 1u;
 
+    // --- the domain -------------------------------------------------------
+    // What the range spheres alone would cover, kept for comparison so the
+    // report can say how much narrowing the question actually saved.
+    {
+        double slo[3] = {0, 0, 0}, shi[3] = {0, 0, 0};
+        bool first = true;
+        for (const carve::SetupView& s : setups) {
+            for (int k = 0; k < 3; ++k) {
+                const double a = s.origin[k] - opt.maxRange, b = s.origin[k] + opt.maxRange;
+                if (first) { slo[k] = a; shi[k] = b; }
+                else { slo[k] = std::min(slo[k], a); shi[k] = std::max(shi[k], b); }
+            }
+            first = false;
+        }
+        out.sphereVolume = (shi[0] - slo[0]) * (shi[1] - slo[1]) * (shi[2] - slo[2]);
+    }
+
+    if (opt.domain == DomainMode::MeasuredExtent) {
+        // The union of what every scan actually returned. Bounds are measured in
+        // each scanner's own frame, so the eight corners of each box go through
+        // that setup's pose — transforming a box by a rotation and re-bounding
+        // it grows it, which is the safe direction for a region that decides
+        // what gets asked about.
+        double lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+        bool have = false;
+        auto include = [&](double x, double y, double z) {
+            const double v[3] = {x, y, z};
+            for (int k = 0; k < 3; ++k) {
+                if (!have) { lo[k] = hi[k] = v[k]; }
+                else { lo[k] = std::min(lo[k], v[k]); hi[k] = std::max(hi[k], v[k]); }
+            }
+            have = true;
+        };
+        for (const carve::SetupView& s : setups) {
+            // The setup itself is always part of the surveyed region, even for a
+            // scan that returned nothing.
+            include(s.origin[0], s.origin[1], s.origin[2]);
+            const rimg::Diagnostics& d = s.image->diag;
+            if (!d.hasReturnBounds) continue;
+            const viewer::Rigid fwd = s.image->hasPose
+                                    ? viewer::rigidFromPose(s.image->pose)
+                                    : viewer::Rigid{};
+            for (int corner = 0; corner < 8; ++corner) {
+                double c[3];
+                for (int k = 0; k < 3; ++k)
+                    c[k] = (corner & (1 << k)) ? d.returnMax[k] : d.returnMin[k];
+                fwd.apply(c[0], c[1], c[2]);
+                include(c[0], c[1], c[2]);
+            }
+        }
+        if (have) {
+            p.domain.kind = carve::Domain::Kind::Box;
+            for (int k = 0; k < 3; ++k) {
+                p.domain.lo[k] = lo[k] - opt.domainMargin;
+                p.domain.hi[k] = hi[k] + opt.domainMargin;
+            }
+            out.domainVolume = (p.domain.hi[0] - p.domain.lo[0]) *
+                               (p.domain.hi[1] - p.domain.lo[1]) *
+                               (p.domain.hi[2] - p.domain.lo[2]);
+        }
+    }
+    out.domain = p.domain;
+
     const std::vector<carve::TileKey> keys = carve::tilesForSetups(setups, p);
     out.tilesTotal = keys.size();
     const uint64_t plannedTiles = opt.maxTiles
@@ -371,6 +434,11 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     if (out.keptFraction < 1.0)
         note += fmt("showing %.1f%% of %llu frontier voxels (display cap); ",
                     100.0 * out.keptFraction, (unsigned long long)out.qualified);
+    if (out.domain.kind == carve::Domain::Kind::Box && out.sphereVolume > 0)
+        note += fmt("domain narrowed to the surveyed extent, %.0f m^3 instead of %.0f; ",
+                    out.domainVolume, out.sphereVolume);
+    else if (out.domain.kind == carve::Domain::Kind::Unbounded)
+        note += "domain is the full range spheres, so most of it is open air; ";
     if (out.partial)
         note += out.cancelled ? "cancelled part way; " : "stopped at the tile limit; ";
     out.note = note;

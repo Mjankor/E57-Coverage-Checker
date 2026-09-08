@@ -440,12 +440,21 @@ static void testFastPathMatchesReference() {
     // the far faces are exercised.
     for (uint32_t tileVoxels : {8u, 13u, 32u}) {
         for (uint32_t apron : {0u, 1u}) {
+          for (int clipped = 0; clipped < 2; ++clipped) {
             carve::Params p;
             p.voxelSize     = 0.25;
             p.surfaceMargin = 0.5 * 0.25 * 1.7320508075688772;
             p.maxRange      = 6.0;
             p.tileVoxels    = tileVoxels;
             p.apron         = apron;
+            if (clipped) {
+                // A box that slices through the scene rather than containing
+                // it, so tiles and bricks land inside, outside and straddling.
+                p.domain.kind = carve::Domain::Kind::Box;
+                p.domain.lo[0] = -3.1; p.domain.hi[0] = 4.4;
+                p.domain.lo[1] = -2.6; p.domain.hi[1] = 3.9;
+                p.domain.lo[2] = -2.2; p.domain.hi[2] = 2.7;
+            }
 
             const std::vector<carve::TileKey> keys = carve::tilesForSetups(setups, p);
             CHECK(!keys.empty(), "there are tiles to compare");
@@ -468,8 +477,70 @@ static void testFastPathMatchesReference() {
             // Not a trivial pass: there has to be something to disagree about.
             CHECK(fastStats.visible > 0 && fastStats.occupied > 0 && fastStats.unknown > 0,
                   "the comparison covered all three outcomes");
+          }
         }
     }
+}
+
+static void testDomainClipping() {
+    std::printf("domain clipping\n");
+
+    carve::Domain d;
+    CHECK(d.contains(1e9, -1e9, 0), "an unbounded domain contains everything");
+    const double any[3] = {5, 5, 5}, any2[3] = {6, 6, 6};
+    CHECK(d.testBox(any, any2) == carve::Overlap::Full, "and every box is fully inside it");
+
+    d.kind = carve::Domain::Kind::Box;
+    d.lo[0] = 0; d.lo[1] = 0; d.lo[2] = 0;
+    d.hi[0] = 10; d.hi[1] = 10; d.hi[2] = 10;
+    CHECK(d.contains(5, 5, 5), "inside");
+    CHECK(!d.contains(5, 5, 11), "outside");
+    CHECK(d.contains(0, 0, 0) && d.contains(10, 10, 10), "the faces are inside");
+
+    const double inLo[3] = {1, 1, 1},   inHi[3] = {2, 2, 2};
+    const double outLo[3] = {11, 1, 1}, outHi[3] = {12, 2, 2};
+    const double strLo[3] = {9, 1, 1},  strHi[3] = {11, 2, 2};
+    CHECK(d.testBox(inLo, inHi) == carve::Overlap::Full, "a contained box is Full");
+    CHECK(d.testBox(outLo, outHi) == carve::Overlap::None, "a disjoint box is None");
+    CHECK(d.testBox(strLo, strHi) == carve::Overlap::Partial, "a straddling box is Partial");
+
+    // Full must mean it: every point of such a box has to be contained, or the
+    // carve would skip the per-voxel test on voxels that are actually outside.
+    CHECK(d.contains(inLo[0], inLo[1], inLo[2]) && d.contains(inHi[0], inHi[1], inHi[2]),
+          "Full implies the corners are contained");
+
+    // Clipping removes voxels; it never changes the verdict on one it keeps.
+    rimg::RangeImage a = shellImage(3.0, 8.0);
+    rimg::buildPyramid(a);
+    std::vector<carve::SetupView> setups{carve::makeSetupView(a)};
+
+    carve::Params open_;
+    open_.voxelSize = 0.25;
+    open_.surfaceMargin = 0.5 * 0.25 * 1.7320508075688772;
+    open_.maxRange = 8.0;
+    open_.tileVoxels = 16;
+    carve::Params clip = open_;
+    clip.domain.kind = carve::Domain::Kind::Box;
+    for (int k = 0; k < 3; ++k) { clip.domain.lo[k] = -2.0; clip.domain.hi[k] = 2.0; }
+
+    carve::Stats os, cs;
+    carve::Tile ot, ct;
+    uint64_t disagree = 0, kept = 0;
+    for (const carve::TileKey& k : carve::tilesForSetups(setups, clip)) {
+        carve::carveTile(k, setups, open_, ot, os);
+        carve::carveTile(k, setups, clip, ct, cs);
+        for (uint32_t z = 0; z < ct.dim; ++z)
+            for (uint32_t y = 0; y < ct.dim; ++y)
+                for (uint32_t x = 0; x < ct.dim; ++x) {
+                    const uint8_t c = ct.state[ct.index(x, y, z)];
+                    if (!c) continue;
+                    ++kept;
+                    if (c != ot.state[ot.index(x, y, z)]) ++disagree;
+                }
+    }
+    CHECK(kept > 1000, "the clipped run kept a real number of voxels");
+    CHECK(disagree == 0, "and gave each of them the same verdict as the unclipped run");
+    CHECK(cs.reachable < os.reachable, "while asking about fewer of them");
 }
 
 static void testEarlyStop() {
@@ -502,6 +573,7 @@ int main() {
     testDomainIsTheUnionOfSpheres();
     testTilingDoesNotChangeTheAnswer();
     testFastPathMatchesReference();
+    testDomainClipping();
     testEarlyStop();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

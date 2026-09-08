@@ -90,6 +90,14 @@ struct Diagnostics {
     // than assumed away.
     uint32_t emptyLeadingRows = 0;
     uint32_t emptyTrailingRows = 0;
+    // Bounding box of the returns, in the SCANNER's frame. This is the scan's
+    // own statement of what it actually reached, and it is what a domain narrower
+    // than the range sphere is built from — the file's declared cartesianBounds
+    // would do for a conformant writer, but this is measured from the points
+    // that survived decoding rather than taken on trust.
+    bool   hasReturnBounds = false;
+    double returnMin[3] = {0, 0, 0};
+    double returnMax[3] = {0, 0, 0};
     std::string note;
 };
 

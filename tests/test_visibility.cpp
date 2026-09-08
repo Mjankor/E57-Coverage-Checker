@@ -330,6 +330,41 @@ static void testEndToEnd() {
               "the sample still spans the site rather than one corner of it");
     }
 
+    // 4. The domain. Narrowing to the surveyed extent must remove voxels from
+    // the question without changing the verdict on any it keeps.
+    {
+        vis::Options spheres = opt;
+        spheres.domain = vis::DomainMode::RangeSpheres;
+        vis::Result sr;
+        CHECK(vis::run({path}, spheres, nullptr, sr, err), "ran on the range spheres");
+        CHECK(sr.domain.kind == carve::Domain::Kind::Unbounded, "which leaves it unbounded");
+
+        vis::Options ext = opt;
+        ext.domain = vis::DomainMode::MeasuredExtent;
+        ext.domainMargin = 1.0;
+        vis::Result er;
+        CHECK(vis::run({path}, ext, nullptr, er, err), "ran on the surveyed extent");
+        CHECK(er.domain.kind == carve::Domain::Kind::Box, "which is a box");
+
+        // The room is 10 x 8 x 3 about the origin, plus a metre of margin.
+        CHECK(er.domain.lo[0] < -5.5 && er.domain.hi[0] > 5.5, "the box spans the room in x");
+        CHECK(er.domain.lo[2] < -0.5 && er.domain.hi[2] > 3.5, "and in z");
+        CHECK(er.domain.hi[0] < 8.0 && er.domain.hi[1] < 7.0,
+              "and does not reach out to the range sphere");
+
+        CHECK(er.stats.reachable < sr.stats.reachable / 2,
+              "narrowing the domain removes most of the question");
+        CHECK(er.stats.setupTests < sr.stats.setupTests,
+              "and most of the work with it");
+        // Everything the clipped run kept, the open run agreed about. Compared
+        // through the drawn frontier, which is the part that has to look right.
+        const auto sset = latticeSet(sr), eset = latticeSet(er);
+        uint64_t strays = 0;
+        for (const auto& v : eset) if (!sset.count(v)) ++strays;
+        CHECK(strays == 0, "every voxel the clipped run drew, the open run drew too");
+        CHECK(!eset.empty(), "and it drew something");
+    }
+
     // Cancelling part way must report what it had rather than claiming success.
     vis::Result stopped;
     int seen = 0;

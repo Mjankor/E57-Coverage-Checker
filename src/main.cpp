@@ -304,6 +304,16 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
     std::printf("voxel     : %.3f m   ·   tile %u^3   ·   max range %.0f m   ·   %u thread(s)\n",
                 opt.voxelSize, opt.tileVoxels, opt.maxRange,
                 opt.threads ? opt.threads : std::thread::hardware_concurrency());
+    if (res.domain.kind == carve::Domain::Kind::Box) {
+        std::printf("region    : surveyed extent  x[%.1f, %.1f] y[%.1f, %.1f] z[%.1f, %.1f]\n"
+                    "            %.0f m^3, against %.0f m^3 of range spheres (%.0fx smaller)\n",
+                    res.domain.lo[0], res.domain.hi[0], res.domain.lo[1], res.domain.hi[1],
+                    res.domain.lo[2], res.domain.hi[2], res.domainVolume, res.sphereVolume,
+                    res.domainVolume > 0 ? res.sphereVolume / res.domainVolume : 0.0);
+    } else {
+        std::printf("region    : full range spheres, %.0f m^3 — mostly open air\n",
+                    res.sphereVolume);
+    }
     std::printf("domain    : %llu tiles, %llu carved%s\n",
                 (unsigned long long)res.tilesTotal, (unsigned long long)res.tilesCarved,
                 res.partial ? "  (stopped early — the numbers below are a sample)" : "");
@@ -362,6 +372,16 @@ void usage() {
         "          set and nothing else — the answer is identical either way.\n"
         "  --max-tiles <n>\n"
         "          (carve) Stop after n tiles. Default 0, the whole domain.\n"
+        "  --domain extent|spheres\n"
+        "          (carve) Which region to ask about. 'extent' (default) is a box\n"
+        "          around what the scans actually returned, grown by\n"
+        "          --domain-margin; 'spheres' is everything within --max-range of\n"
+        "          any setup. A building interior scanned from inside fills only a\n"
+        "          small part of its range spheres, so 'spheres' spends most of the\n"
+        "          run, and most of the answer, on open air.\n"
+        "  --domain-margin <m>\n"
+        "          (carve) How far past the last return the question still applies.\n"
+        "          Default 2 m: wall thickness, eaves and registration slop.\n"
         "  --threads <n>\n"
         "          (carve) Worker threads over the tile list. Default 0, the\n"
         "          machine's count. The answer is identical at any count.\n"
@@ -409,6 +429,18 @@ int main(int argc, char** argv) {
             continue;
         }
         if (std::strcmp(argv[i], "--solid") == 0) { co.solid = true; continue; }
+        if (std::strcmp(argv[i], "--domain") == 0 && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if      (v == "extent")  co.domain = vis::DomainMode::MeasuredExtent;
+            else if (v == "spheres") co.domain = vis::DomainMode::RangeSpheres;
+            else { std::printf("--domain must be 'extent' or 'spheres'\n"); return 2; }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--domain-margin") == 0 && i + 1 < argc) {
+            co.domainMargin = std::strtod(argv[++i], nullptr);
+            if (co.domainMargin < 0.0) { std::printf("--domain-margin must not be negative\n"); return 2; }
+            continue;
+        }
         if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             const long v = std::strtol(argv[++i], nullptr, 10);
             if (v < 0 || v > 1024) { std::printf("--threads must be in 0..1024\n"); return 2; }

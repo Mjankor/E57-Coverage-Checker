@@ -337,6 +337,18 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
             if (range <= 1e-6) continue;
             farthest = std::max(farthest, range);
             nearest  = std::min(nearest, range);
+            if (!out.diag.hasReturnBounds) {
+                out.diag.hasReturnBounds = true;
+                out.diag.returnMin[0] = out.diag.returnMax[0] = x;
+                out.diag.returnMin[1] = out.diag.returnMax[1] = y;
+                out.diag.returnMin[2] = out.diag.returnMax[2] = z;
+            } else {
+                const double v[3] = {x, y, z};
+                for (int a = 0; a < 3; ++a) {
+                    out.diag.returnMin[a] = std::min(out.diag.returnMin[a], v[a]);
+                    out.diag.returnMax[a] = std::max(out.diag.returnMax[a], v[a]);
+                }
+            }
             ++decoded;
 
             if (!gridPath) {

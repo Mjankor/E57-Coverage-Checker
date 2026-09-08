@@ -624,21 +624,32 @@ const char *kindLabel(check::Kind k) {
     }
 
     // --- parameters -------------------------------------------------------
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 380, 132)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 400, 190)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
         {@"Tile size (voxels)", [NSString stringWithFormat:@"%u", _visOptions.tileVoxels]},
+        {@"Margin past the last return (m)",
+                                [NSString stringWithFormat:@"%.1f", _visOptions.domainMargin]},
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
-    for (int i = 0; i < 3; ++i) {
-        const CGFloat y = 104 - i * 28;
-        [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 200, 20)]];
-        NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(210, y - 3, 90, 22)];
+    for (int i = 0; i < 4; ++i) {
+        const CGFloat y = 162 - i * 28;
+        [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 220, 20)]];
+        NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(230, y - 3, 90, 22)];
         [acc addSubview:f];
         [fields addObject:f];
     }
-    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 380, 20)];
+
+    NSButton *extent = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 400, 20)];
+    extent.title = @"Limit to the surveyed extent";
+    [extent setButtonType:NSButtonTypeSwitch];
+    extent.font = [NSFont systemFontOfSize:11];
+    extent.state = (_visOptions.domain == vis::DomainMode::MeasuredExtent)
+                 ? NSControlStateValueOn : NSControlStateValueOff;
+    [acc addSubview:extent];
+
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 400, 20)];
     solid.title = @"Show every unobserved voxel, not just the frontier";
     [solid setButtonType:NSButtonTypeSwitch];
     solid.font = [NSFont systemFontOfSize:11];
@@ -650,6 +661,9 @@ const char *kindLabel(check::Kind k) {
     a.informativeText =
         @"Marks every voxel some setup could see through or measured a surface in, and "
         @"reports the rest: space in range of a scanner that nothing observed.\n\n"
+        @"Limiting to the surveyed extent asks only about a box around what the scans "
+        @"actually returned. Leave it on for an interior job: the range spheres otherwise "
+        @"reach tens of metres out through every wall, and the answer becomes mostly sky.\n\n"
         @"By default only the frontier of that space is drawn — where coverage stops. "
         @"The full volume hides its own interior anyway, and there is far more of it.\n\n"
         @"This is the CPU reference, so a large site at 5 cm takes minutes. "
@@ -663,16 +677,21 @@ const char *kindLabel(check::Kind k) {
     vis::Options opt = _visOptions;
     const double voxel = fields[0].doubleValue;
     const double range = fields[1].doubleValue;
-    const long   tile  = fields[2].integerValue;
-    if (!(voxel > 0.0) || !(range > 0.0) || tile <= 0 || tile > 4096) {
-        _status.stringValue = @"Voxel size and range must be positive, tile size 1–4096.";
+    const long   tile   = fields[2].integerValue;
+    const double margin = fields[3].doubleValue;
+    if (!(voxel > 0.0) || !(range > 0.0) || tile <= 0 || tile > 4096 || margin < 0.0) {
+        _status.stringValue =
+            @"Voxel size and range must be positive, tile size 1–4096, margin not negative.";
         return;
     }
-    opt.voxelSize  = voxel;
-    opt.maxRange   = range;
-    opt.tileVoxels = uint32_t(tile);
-    opt.solid      = (solid.state == NSControlStateValueOn);
-    _visOptions    = opt;
+    opt.voxelSize    = voxel;
+    opt.maxRange     = range;
+    opt.tileVoxels   = uint32_t(tile);
+    opt.domainMargin = margin;
+    opt.domain       = (extent.state == NSControlStateValueOn)
+                     ? vis::DomainMode::MeasuredExtent : vis::DomainMode::RangeSpheres;
+    opt.solid        = (solid.state == NSControlStateValueOn);
+    _visOptions      = opt;
 
     // --- run --------------------------------------------------------------
     // Everything the worker needs is captured by value; nothing on the

@@ -56,6 +56,55 @@ enum Bits : uint8_t {
     kReachable = 1u << 2,
 };
 
+// How much of a box lies inside the domain.
+enum class Overlap : uint8_t { None, Partial, Full };
+
+// The region of space the question is being asked about.
+//
+// The domain has always been the union of the setups' range spheres — the
+// largest region anything could be said about. That is rarely the region anyone
+// cares about. Scanning a building interior leaves those spheres bulging tens of
+// metres through every wall into open air that was never the subject and could
+// never have been observed: at 45 m the spheres are of order 10^6 m^3 where the
+// building is 10^4, so the answer is dominated, ninety-something per cent of it,
+// by outdoors. Every one of those voxels is unknown, correctly and uselessly.
+//
+// Narrowing the domain therefore does two things at once. It is the largest
+// single speed factor available, and it is what makes the unknown count mean
+// "space in the building nobody captured" rather than "mostly sky".
+//
+// Today the shape is a box around the measured returns. It is heading for a
+// shrinkwrap of the point cloud — the surveyed envelope, which for an interior
+// job is the building itself, and which would exclude the corners of a box that
+// no scan ever reached. The interface is deliberately a pair of predicates
+// rather than a box, so that when the wrap arrives it is a new Kind here and
+// nothing above this has to change: carveTile asks whether a brick is out, in,
+// or straddling, and asks about single voxel centres only where the answer was
+// "straddling".
+struct Domain {
+    enum class Kind : uint8_t {
+        Unbounded,   // whatever the range spheres reach
+        Box,         // an axis-aligned envelope
+    };
+    Kind   kind  = Kind::Unbounded;
+    double lo[3] = {0, 0, 0};
+    double hi[3] = {0, 0, 0};
+
+    Overlap testBox(const double blo[3], const double bhi[3]) const {
+        if (kind == Kind::Unbounded) return Overlap::Full;
+        for (int i = 0; i < 3; ++i)
+            if (bhi[i] < lo[i] || blo[i] > hi[i]) return Overlap::None;
+        for (int i = 0; i < 3; ++i)
+            if (blo[i] < lo[i] || bhi[i] > hi[i]) return Overlap::Partial;
+        return Overlap::Full;
+    }
+    bool contains(double x, double y, double z) const {
+        if (kind == Kind::Unbounded) return true;
+        return x >= lo[0] && x <= hi[0] && y >= lo[1] && y <= hi[1] &&
+               z >= lo[2] && z <= hi[2];
+    }
+};
+
 struct Params {
     double voxelSize = 0.05;
     // Half a voxel diagonal. Keeps the voxel holding the measured surface out
@@ -81,6 +130,9 @@ struct Params {
     // Apron voxels are carved but not counted: they belong to the neighbouring
     // tile, and counting them here would tally them twice.
     uint32_t apron = 0;
+
+    // The region being asked about. Unbounded reproduces the range spheres.
+    Domain domain;
 
     double tileMetres() const { return voxelSize * double(tileVoxels); }
 };
