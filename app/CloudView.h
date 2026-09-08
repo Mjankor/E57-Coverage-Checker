@@ -1,21 +1,24 @@
-// MTKView subclass owning the camera, the scene, and all navigation input.
+// MTKView subclass owning the camera, the store, and all navigation input.
 //
-// Bindings, as requested:
+// Bindings:
 //   left drag    pan
 //   right drag   orbit
 //   right click  set the orbit centre to the point under the crosshair
 //   wheel        zoom
 //
-// Control-left is accepted as an alias for right, because on a trackpad
-// "right drag" means holding a two-finger click through a drag, which is
-// awkward. Pinch zooms too.
+// Control-left is an alias for right, because holding a two-finger click
+// through a drag on a trackpad is awkward. Pinch zooms too.
+//
+// The view works in two stages, matching how a large corpus opens: setup
+// markers first, from headers alone, then the point store when it is ready.
 
 #pragma once
 
 #import <MetalKit/MetalKit.h>
 
 #include "../src/camera.h"
-#include "../src/point_cloud.h"
+#include "../src/lod.h"
+#include "../src/point_store.h"
 
 #include <vector>
 
@@ -27,14 +30,21 @@
 
 @property (nonatomic, weak) id<CloudViewDelegate> cloudDelegate;
 
-// Returns NO and fills `error` if Metal could not start.
 - (BOOL)setupRendererReturningError:(NSString **)error;
 
-// Replaces the scene and frames it.
-- (void)setScene:(std::vector<viewer::PointCloud>)clouds;
-- (void)frameAll;
-- (BOOL)hasScene;
+// Stage one: setup positions in the file's coordinate system, flat xyz triples.
+// Drawn immediately, before any point has been decoded.
+- (void)setSetups:(const std::vector<double> &)fileFrameXYZ;
 
-@property (nonatomic) float pointSize;
+// Stage two: the point store. Takes over rendering; setups are re-expressed in
+// the store's origin so the two stay registered.
+- (BOOL)openStore:(NSString *)path error:(NSString **)error;
+- (void)closeAll;
+
+- (void)frameAll;
+- (BOOL)hasStore;
+
+@property (nonatomic) float  pointSize;
+@property (nonatomic) size_t pointBudget;
 
 @end

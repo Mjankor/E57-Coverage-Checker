@@ -1,42 +1,46 @@
 #import "Renderer.h"
 
 #include <algorithm>
+#include <unordered_map>
 
 // ---------------------------------------------------------------------------
 // Shader source
 //
-// Points are drawn as round sprites: a square point sprite reads as a blocky
-// mess at the densities a terrestrial scan produces. Size attenuates with
-// distance so a wall does not turn into a solid sheet when you zoom in, but is
-// clamped so distant structure stays visible rather than vanishing.
+// StorePoint is read straight from the mapping, so the MSL struct must match
+// src/lod.h byte for byte: packed_float3 (12) + uchar4 (4) + 2 ushorts (4).
 
 static NSString *const kShaderSource = @R"METAL(
 #include <metal_stdlib>
 using namespace metal;
 
+struct StorePoint {
+    packed_float3 pos;
+    uchar4        rgba;
+    ushort        scanId;
+    ushort        pad;
+};
+
 struct Uniforms {
     float4x4 viewProj;
-    float3   modelOffset;
     float    pointSize;
-    float4   tint;
     float    attenuationScale;
+    float4   tint;
     uint     useVertexColour;
 };
 
 struct VOut {
-    float4 position [[position]];
+    float4 position  [[position]];
     float  pointSize [[point_size]];
     half4  colour;
 };
 
 vertex VOut pointVS(uint vid [[vertex_id]],
-                    const device packed_float3 *positions [[buffer(0)]],
-                    const device uchar4        *colours   [[buffer(1)]],
-                    constant Uniforms          &u         [[buffer(2)]])
+                    const device StorePoint *pts [[buffer(0)]],
+                    constant Uniforms       &u   [[buffer(1)]])
 {
-    float3 p = float3(positions[vid]) + u.modelOffset;
+    StorePoint p = pts[vid];
     VOut o;
-    o.position = u.viewProj * float4(p, 1.0);
+    o.position = u.viewProj * float4(p.pos, 1.0);
 
     // Clip w is the eye-space distance; sizing by 1/w keeps a point's on-screen
     // footprint roughly constant in world terms.
@@ -44,8 +48,7 @@ vertex VOut pointVS(uint vid [[vertex_id]],
     o.pointSize = clamp(u.pointSize * u.attenuationScale / w, 1.0, 24.0);
 
     if (u.useVertexColour != 0u) {
-        uchar4 c = colours[vid];
-        o.colour = half4(half3(float3(c.r, c.g, c.b) / 255.0), 1.0h);
+        o.colour = half4(half3(float3(p.rgba.r, p.rgba.g, p.rgba.b) / 255.0), 1.0h);
     } else {
         o.colour = half4(u.tint);
     }
@@ -59,7 +62,35 @@ fragment half4 pointFS(VOut in [[stage_in]], float2 pc [[point_coord]])
     return in.colour;
 }
 
-// Overlay: positions supplied directly in clip space, no depth test.
+// Markers and the pivot: positions supplied inline, one per draw.
+struct MarkerOut {
+    float4 position  [[position]];
+    float  pointSize [[point_size]];
+    half4  colour;
+};
+
+vertex MarkerOut markerVS(uint vid [[vertex_id]],
+                          const device packed_float3 *pos [[buffer(0)]],
+                          constant Uniforms          &u   [[buffer(1)]])
+{
+    MarkerOut o;
+    o.position  = u.viewProj * float4(float3(pos[vid]), 1.0);
+    o.pointSize = u.pointSize;
+    o.colour    = half4(u.tint);
+    return o;
+}
+
+fragment half4 markerFS(MarkerOut in [[stage_in]], float2 pc [[point_coord]])
+{
+    float2 d = pc - float2(0.5, 0.5);
+    float r2 = dot(d, d);
+    if (r2 > 0.25) discard_fragment();
+    // A darker rim, so a marker reads against a bright cloud.
+    half k = (r2 > 0.16h) ? 0.45h : 1.0h;
+    return half4(in.colour.rgb * k, in.colour.a);
+}
+
+// Overlay: clip-space positions, no depth test.
 struct OverlayOut {
     float4 position [[position]];
     half4  colour;
@@ -82,34 +113,11 @@ namespace {
 
 struct Uniforms {
     simd_float4x4 viewProj;
-    simd_float3   modelOffset;
     float         pointSize;
-    simd_float4   tint;
     float         attenuationScale;
+    simd_float4   tint;
     uint32_t      useVertexColour;
 };
-
-struct GpuCloud {
-    id<MTLBuffer> positions;
-    id<MTLBuffer> colours;      // nil when the scan carried none
-    NSUInteger    count = 0;
-    simd_float3   offset = {0, 0, 0};
-    simd_float4   tint = {1, 1, 1, 1};
-    simd_float3   setup = {0, 0, 0};
-    bool          hasSetup = false;
-};
-
-// Distinct hues per scan so overlapping setups can be told apart when a file
-// carries no colour of its own.
-simd_float4 tintForIndex(size_t i) {
-    static const simd_float4 palette[] = {
-        {0.55f, 0.78f, 1.00f, 1.0f}, {1.00f, 0.78f, 0.45f, 1.0f},
-        {0.62f, 0.90f, 0.62f, 1.0f}, {0.94f, 0.66f, 0.86f, 1.0f},
-        {0.98f, 0.92f, 0.55f, 1.0f}, {0.70f, 0.70f, 0.95f, 1.0f},
-        {0.55f, 0.92f, 0.90f, 1.0f}, {0.92f, 0.60f, 0.55f, 1.0f},
-    };
-    return palette[i % (sizeof(palette) / sizeof(palette[0]))];
-}
 
 simd_float4x4 toSimd(const m3::Mat4 &m) {
     simd_float4x4 r;
@@ -118,15 +126,29 @@ simd_float4x4 toSimd(const m3::Mat4 &m) {
     return r;
 }
 
+// Bytes held in per-node buffers when the store is too large for one buffer.
+// 2 GB is generous on a 64 GB machine and still far below the working-set
+// limit, leaving room for the visibility grids later.
+constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
+
 } // namespace
 
 @implementation Renderer {
     id<MTLDevice>              _device;
     id<MTLCommandQueue>        _queue;
     id<MTLRenderPipelineState> _pointPipeline;
+    id<MTLRenderPipelineState> _markerPipeline;
     id<MTLRenderPipelineState> _overlayPipeline;
     id<MTLDepthStencilState>   _depthState;
-    std::vector<GpuCloud>      _clouds;
+
+    const store::Reader       *_store;
+    id<MTLBuffer>              _wholeStore;      // zero-copy path
+    std::unordered_map<uint32_t, id<MTLBuffer>> _nodeCache;   // fallback path
+    std::vector<uint32_t>      _cacheOrder;      // least recently used first
+    uint64_t                   _cacheBytes;
+
+    std::vector<simd_float3>   _setups;
+    id<MTLBuffer>              _setupBuffer;
     m3::Vec3                   _pivot;
 }
 
@@ -145,11 +167,11 @@ simd_float4x4 toSimd(const m3::Mat4 &m) {
         return nil;
     }
 
-    view.device                    = device;
-    view.colorPixelFormat          = MTLPixelFormatBGRA8Unorm;
-    view.depthStencilPixelFormat   = MTLPixelFormatDepth32Float;
-    view.clearColor                = MTLClearColorMake(0.09, 0.10, 0.12, 1.0);
-    view.sampleCount               = 1;
+    view.device                  = device;
+    view.colorPixelFormat        = MTLPixelFormatBGRA8Unorm;
+    view.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
+    view.clearColor              = MTLClearColorMake(0.09, 0.10, 0.12, 1.0);
+    view.sampleCount             = 1;
 
     NSError *nsErr = nil;
     id<MTLLibrary> lib = [device newLibraryWithSource:kShaderSource options:nil error:&nsErr];
@@ -159,28 +181,24 @@ simd_float4x4 toSimd(const m3::Mat4 &m) {
         return nil;
     }
 
-    MTLRenderPipelineDescriptor *pd = [[MTLRenderPipelineDescriptor alloc] init];
-    pd.vertexFunction                  = [lib newFunctionWithName:@"pointVS"];
-    pd.fragmentFunction                = [lib newFunctionWithName:@"pointFS"];
-    pd.colorAttachments[0].pixelFormat = view.colorPixelFormat;
-    pd.depthAttachmentPixelFormat      = view.depthStencilPixelFormat;
-    r->_pointPipeline = [device newRenderPipelineStateWithDescriptor:pd error:&nsErr];
-    if (!r->_pointPipeline) {
-        if (error) *error = [NSString stringWithFormat:@"Point pipeline failed: %@",
-                             nsErr.localizedDescription];
-        return nil;
-    }
-
-    MTLRenderPipelineDescriptor *od = [[MTLRenderPipelineDescriptor alloc] init];
-    od.vertexFunction                  = [lib newFunctionWithName:@"overlayVS"];
-    od.fragmentFunction                = [lib newFunctionWithName:@"overlayFS"];
-    od.colorAttachments[0].pixelFormat = view.colorPixelFormat;
-    od.depthAttachmentPixelFormat      = view.depthStencilPixelFormat;
-    r->_overlayPipeline = [device newRenderPipelineStateWithDescriptor:od error:&nsErr];
-    if (!r->_overlayPipeline) {
-        if (error) *error = [NSString stringWithFormat:@"Overlay pipeline failed: %@",
-                             nsErr.localizedDescription];
-        return nil;
+    struct { NSString *vs; NSString *fs; id<MTLRenderPipelineState> __strong *slot; NSString *name; }
+    pipes[] = {
+        {@"pointVS",   @"pointFS",   &r->_pointPipeline,   @"point"},
+        {@"markerVS",  @"markerFS",  &r->_markerPipeline,  @"marker"},
+        {@"overlayVS", @"overlayFS", &r->_overlayPipeline, @"overlay"},
+    };
+    for (auto &p : pipes) {
+        MTLRenderPipelineDescriptor *d = [[MTLRenderPipelineDescriptor alloc] init];
+        d.vertexFunction                  = [lib newFunctionWithName:p.vs];
+        d.fragmentFunction                = [lib newFunctionWithName:p.fs];
+        d.colorAttachments[0].pixelFormat = view.colorPixelFormat;
+        d.depthAttachmentPixelFormat      = view.depthStencilPixelFormat;
+        *p.slot = [device newRenderPipelineStateWithDescriptor:d error:&nsErr];
+        if (!*p.slot) {
+            if (error) *error = [NSString stringWithFormat:@"%@ pipeline failed: %@",
+                                 p.name, nsErr.localizedDescription];
+            return nil;
+        }
     }
 
     MTLDepthStencilDescriptor *dd = [[MTLDepthStencilDescriptor alloc] init];
@@ -196,40 +214,79 @@ simd_float4x4 toSimd(const m3::Mat4 &m) {
 }
 
 - (void)setPivot:(m3::Vec3)pivot { _pivot = pivot; }
+- (BOOL)zeroCopy { return _wholeStore != nil; }
+- (uint64_t)cachedBytes { return _cacheBytes; }
 
-- (void)setClouds:(const std::vector<viewer::PointCloud> &)clouds {
-    _clouds.clear();
-    _clouds.reserve(clouds.size());
+- (void)setStore:(const store::Reader *)reader {
+    _store = reader;
+    _wholeStore = nil;
+    _nodeCache.clear();
+    _cacheOrder.clear();
+    _cacheBytes = 0;
+    if (!reader || !reader->isOpen()) return;
 
-    for (size_t i = 0; i < clouds.size(); ++i) {
-        const viewer::PointCloud &c = clouds[i];
-        if (c.pointCount() == 0) continue;
-
-        GpuCloud g;
-        g.count = c.pointCount();
-        // Shared storage: on Apple silicon the GPU reads the same pages the
-        // loader wrote, so there is no upload step.
-        g.positions = [_device newBufferWithBytes:c.xyz.data()
-                                           length:c.xyz.size() * sizeof(float)
-                                          options:MTLResourceStorageModeShared];
-        if (!c.rgb.empty() && c.rgb.size() == g.count) {
-            g.colours = [_device newBufferWithBytes:c.rgb.data()
-                                             length:c.rgb.size() * sizeof(viewer::Rgb8)
-                                            options:MTLResourceStorageModeShared];
-        }
-        if (!g.positions) continue;   // allocation failed: skip rather than crash
-
-        g.offset   = simd_make_float3(c.sceneOffset[0], c.sceneOffset[1], c.sceneOffset[2]);
-        g.tint     = tintForIndex(i);
-        g.setup    = simd_make_float3(c.originOffset[0] + c.sceneOffset[0],
-                                      c.originOffset[1] + c.sceneOffset[1],
-                                      c.originOffset[2] + c.sceneOffset[2]);
-        g.hasSetup = c.hasSetupPosition;
-        _clouds.push_back(g);
+    // mmap always maps whole pages, so rounding the length up stays inside the
+    // mapping; newBufferWithBytesNoCopy requires a page multiple.
+    const size_t pageSize = size_t(getpagesize());
+    const uint64_t rounded = (reader->mappedSize() + pageSize - 1) / pageSize * pageSize;
+    if (rounded <= _device.maxBufferLength) {
+        _wholeStore = [_device newBufferWithBytesNoCopy:const_cast<void *>(reader->mappedBase())
+                                                 length:rounded
+                                                options:MTLResourceStorageModeShared
+                                            deallocator:nil];
     }
+    // A nil result here is not fatal: the per-node cache below handles it, just
+    // with a copy per node.
 }
 
-- (void)drawInView:(MTKView *)view camera:(const viewer::OrbitCamera &)camera {
+- (void)setSetupMarkers:(const std::vector<simd_float3> &)markers {
+    _setups = markers;
+    _setupBuffer = nil;
+    if (_setups.empty()) return;
+    _setupBuffer = [_device newBufferWithBytes:_setups.data()
+                                        length:_setups.size() * sizeof(simd_float3)
+                                       options:MTLResourceStorageModeShared];
+}
+
+// Per-node buffer for the fallback path, with least-recently-used eviction.
+- (id<MTLBuffer>)bufferForNode:(uint32_t)node {
+    auto it = _nodeCache.find(node);
+    if (it != _nodeCache.end()) {
+        auto pos = std::find(_cacheOrder.begin(), _cacheOrder.end(), node);
+        if (pos != _cacheOrder.end()) {
+            _cacheOrder.erase(pos);
+            _cacheOrder.push_back(node);
+        }
+        return it->second;
+    }
+
+    const uint64_t bytes = _store->payloadBytes(node);
+    if (bytes == 0) return nil;
+
+    while (_cacheBytes + bytes > kNodeCacheBudget && !_cacheOrder.empty()) {
+        const uint32_t victim = _cacheOrder.front();
+        _cacheOrder.erase(_cacheOrder.begin());
+        auto v = _nodeCache.find(victim);
+        if (v != _nodeCache.end()) {
+            _cacheBytes -= _store->payloadBytes(victim);
+            _nodeCache.erase(v);
+        }
+    }
+
+    id<MTLBuffer> buf = [_device newBufferWithBytes:_store->points(node)
+                                             length:bytes
+                                            options:MTLResourceStorageModeShared];
+    if (!buf) return nil;
+    _nodeCache[node] = buf;
+    _cacheOrder.push_back(node);
+    _cacheBytes += bytes;
+    return buf;
+}
+
+- (void)drawInView:(MTKView *)view
+            camera:(const viewer::OrbitCamera &)camera
+              tree:(const lod::Tree &)tree
+         selection:(const lod::Selection &)selection {
     MTLRenderPassDescriptor *rp = view.currentRenderPassDescriptor;
     id<CAMetalDrawable> drawable = view.currentDrawable;
     if (!rp || !drawable) return;
@@ -237,68 +294,71 @@ simd_float4x4 toSimd(const m3::Mat4 &m) {
     id<MTLCommandBuffer> cb = [_queue commandBuffer];
     id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
     [enc setDepthStencilState:_depthState];
-    [enc setRenderPipelineState:_pointPipeline];
 
     const simd_float4x4 vp = toSimd(camera.viewProjection());
-    // Attenuation reference: at the pivot distance a point renders at exactly
-    // `pointSize`, so the control means what it says wherever you are.
+    // At the pivot distance a point renders at exactly `pointSize`, so the
+    // control means what it says wherever the camera is.
     const float atten = std::max(camera.distance(), 1e-3f);
 
-    for (const GpuCloud &g : _clouds) {
+    if (_store && _store->isOpen() && !selection.nodes.empty()) {
+        [enc setRenderPipelineState:_pointPipeline];
         Uniforms u{};
         u.viewProj         = vp;
-        u.modelOffset      = g.offset;
         u.pointSize        = _pointSize;
-        u.tint             = g.tint;
         u.attenuationScale = atten;
-        u.useVertexColour  = g.colours ? 1u : 0u;
+        u.useVertexColour  = 1u;
+        u.tint             = simd_make_float4(1, 1, 1, 1);
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
 
-        [enc setVertexBuffer:g.positions offset:0 atIndex:0];
-        if (g.colours) [enc setVertexBuffer:g.colours offset:0 atIndex:1];
-        else           [enc setVertexBuffer:g.positions offset:0 atIndex:1];  // unread
-        [enc setVertexBytes:&u length:sizeof(u) atIndex:2];
-        [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:g.count];
-    }
+        for (uint32_t node : selection.nodes) {
+            if (node >= tree.nodes.size()) continue;
+            const uint32_t count = tree.nodes[node].pointCount;
+            if (count == 0) continue;
 
-    if (_showSetups) {
-        for (const GpuCloud &g : _clouds) {
-            if (!g.hasSetup) continue;
-            Uniforms u{};
-            u.viewProj         = vp;
-            u.modelOffset      = simd_make_float3(0, 0, 0);
-            u.pointSize        = 40.0f;
-            u.tint             = simd_make_float4(1.0f, 0.35f, 0.2f, 1.0f);
-            u.attenuationScale = atten;
-            u.useVertexColour  = 0u;
-            const simd_float3 p = g.setup;
-            [enc setVertexBytes:&p length:sizeof(p) atIndex:0];
-            [enc setVertexBytes:&p length:sizeof(p) atIndex:1];
-            [enc setVertexBytes:&u length:sizeof(u) atIndex:2];
-            [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1];
+            if (_wholeStore) {
+                [enc setVertexBuffer:_wholeStore
+                              offset:NSUInteger(_store->payloadOffset(node))
+                             atIndex:0];
+            } else {
+                id<MTLBuffer> b = [self bufferForNode:node];
+                if (!b) continue;
+                [enc setVertexBuffer:b offset:0 atIndex:0];
+            }
+            [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:count];
         }
     }
 
-    if (_showPivot) {
+    if (_showSetups && _setupBuffer && !_setups.empty()) {
+        [enc setRenderPipelineState:_markerPipeline];
         Uniforms u{};
         u.viewProj         = vp;
-        u.modelOffset      = simd_make_float3(0, 0, 0);
-        u.pointSize        = 26.0f;
-        u.tint             = simd_make_float4(1.0f, 0.95f, 0.3f, 1.0f);
+        u.pointSize        = 13.0f;
         u.attenuationScale = atten;
+        u.tint             = simd_make_float4(1.0f, 0.35f, 0.2f, 1.0f);
+        u.useVertexColour  = 0u;
+        [enc setVertexBuffer:_setupBuffer offset:0 atIndex:0];
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+        [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:_setups.size()];
+    }
+
+    if (_showPivot) {
+        [enc setRenderPipelineState:_markerPipeline];
+        Uniforms u{};
+        u.viewProj         = vp;
+        u.pointSize        = 16.0f;
+        u.attenuationScale = atten;
+        u.tint             = simd_make_float4(1.0f, 0.95f, 0.3f, 1.0f);
         u.useVertexColour  = 0u;
         const simd_float3 p = simd_make_float3(_pivot.x, _pivot.y, _pivot.z);
         [enc setVertexBytes:&p length:sizeof(p) atIndex:0];
-        [enc setVertexBytes:&p length:sizeof(p) atIndex:1];
-        [enc setVertexBytes:&u length:sizeof(u) atIndex:2];
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
         [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1];
     }
 
     if (_showCrosshair) {
-        // Clip-space cross, sized in NDC against the drawable's aspect so it
-        // stays square.
         const float aspect = (float)view.drawableSize.width /
                              std::max(1.0f, (float)view.drawableSize.height);
-        const float h = 0.018f, v = h * aspect;
+        const float h = 0.018f, v = h / std::max(aspect, 1e-3f);
         const simd_float2 verts[8] = {
             {-v, 0}, {-v * 0.35f, 0}, {v * 0.35f, 0}, {v, 0},
             {0, -h}, {0, -h * 0.35f}, {0, h * 0.35f}, {0, h},

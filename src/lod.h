@@ -25,6 +25,7 @@
 #include "math3d.h"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -98,6 +99,12 @@ struct BuildOptions {
     // Depth limit. 14 levels over a 200 m site puts the finest node at ~12 mm,
     // well past what a 5 cm voxel analysis or a screen pixel can resolve.
     uint8_t  maxLevel = 14;
+    // At the depth limit, keep only what the occupancy grid accepts and spill
+    // the rest. This is what makes the top of a bounded-memory build a proper
+    // LOD rather than a bucket: the top tree keeps one uniform sample per level
+    // and every remaining point goes to a chunk file. Off by default, so a
+    // self-contained in-memory build still keeps everything it is given.
+    bool     spillAtMaxLevel = false;
 };
 
 // Builds a subtree in memory. Used both for the top levels during the
@@ -111,8 +118,14 @@ public:
     bool insert(const StorePoint& p);
 
     // Points that reached the depth limit and were pushed no further. During
-    // the streaming pass these are the ones to spill to a chunk file.
-    void setOverflowSink(std::vector<StorePoint>* sink) { overflow_ = sink; }
+    // the streaming pass these are routed straight to a chunk file, so the
+    // sink is a callback rather than a buffer — at corpus scale the spill is
+    // most of the data and must never accumulate in memory.
+    using OverflowFn = std::function<void(const StorePoint&)>;
+    void setOverflowSink(OverflowFn fn) { overflow_ = std::move(fn); }
+    void setOverflowSink(std::vector<StorePoint>* sink) {
+        overflow_ = [sink](const StorePoint& p) { sink->push_back(p); };
+    }
 
     // Finalises and hands back the tree plus each node's points, indexed by
     // node. Payload offsets are left zero; the store writer assigns them.
@@ -137,7 +150,7 @@ private:
     uint8_t           baseLevel_ = 0;
     size_t            inserted_ = 0;
     size_t            overflowed_ = 0;
-    std::vector<StorePoint>* overflow_ = nullptr;
+    OverflowFn        overflow_;
 };
 
 // ---------------------------------------------------------------------------

@@ -75,4 +75,41 @@ PickResult pickNearest(const std::vector<PointCloud>& clouds,
     return best;
 }
 
+PickResult pickNearestInStore(const store::Reader& reader, const lod::Tree& tree,
+                              const lod::Selection& selection, const OrbitCamera& cam,
+                              float ndcX, float ndcY, float radiusPx) {
+    PickResult best;
+    if (!reader.isOpen()) return best;
+
+    const Mat4  vp = cam.viewProjection();
+    const float rx = 2.0f * radiusPx / float(cam.viewportWidth());
+    const float ry = 2.0f * radiusPx / float(cam.viewportHeight());
+    float bestDepth = 1e30f;
+
+    for (uint32_t node : selection.nodes) {
+        if (node >= tree.nodes.size()) continue;
+        const uint32_t n = tree.nodes[node].pointCount;
+        if (n == 0) continue;
+        const lod::StorePoint* pts = reader.points(node);
+        if (!pts) continue;
+
+        for (uint32_t i = 0; i < n; ++i) {
+            const Vec4 clip = vp * Vec4{pts[i].x, pts[i].y, pts[i].z, 1.0f};
+            if (clip.w <= 1e-6f) continue;
+            const float dx = (clip.x / clip.w - ndcX) / rx;
+            const float dy = (clip.y / clip.w - ndcY) / ry;
+            if (dx * dx + dy * dy > 1.0f) continue;
+            if (clip.w < bestDepth) {
+                bestDepth       = clip.w;
+                best.hit        = true;
+                best.world      = Vec3{pts[i].x, pts[i].y, pts[i].z};
+                best.viewDepth  = clip.w;
+                best.cloudIndex = node;
+                best.pointIndex = i;
+            }
+        }
+    }
+    return best;
+}
+
 } // namespace viewer

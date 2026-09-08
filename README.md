@@ -21,10 +21,10 @@ built yet.**
 | `e57cov info` — format audit CLI | done |
 | structured-vs-merged check | done |
 | viewer app (open, inspect, navigate) | done — **rendering layer unrun**, see below |
-| LOD octree + selection (scale to 1000s of setups) | engine done and tested |
+| LOD octree + selection (scale to 1000s of setups) | done and tested |
 | on-disk point store (mmap, zero-copy) | done and tested |
-| indexer: E57 corpus → store | **not started** |
-| viewer wired to the store | **not started** — still loads whole scans |
+| indexer: E57 corpus → store | done and tested |
+| viewer on the store, two-phase open | done — **rendering layer unrun** |
 | range-image builder | not started |
 | CPU reference visibility pass | not started |
 | Metal gather kernel | not started |
@@ -68,8 +68,34 @@ actually emit rather than the whole standard:
 
 ## The viewer
 
-`E57CoverageChecker.app` opens one or more E57 files, checks each scan, and
-draws the ones that pass.
+`E57CoverageChecker.app` opens an E57 corpus, checks each scan, and draws it.
+**File ▸ Open Folder** takes a whole directory, which is the shape a
+thousand-setup job actually arrives in.
+
+### Opening is two-stage
+
+A thousand files cannot be decoded before showing anything, and decoding them
+in the foreground would beachball for minutes. So:
+
+1. **Survey — headers only.** Pose, prototype, declared extent, metadata
+   classification. No point decoding, so a thousand files take seconds. The
+   setup layout is drawn immediately and the list fills in — enough to see the
+   shape of the job and spot a stray setup.
+2. **Index — the octree build**, in the background with progress and a
+   cancel. The result is cached, keyed by the file list plus each file's size
+   and modification time, so reopening the same corpus goes straight to the
+   store. Edit or replace a scan and the key changes, so a stale store is
+   never shown.
+
+Once the store is open the viewer never holds the corpus in memory. It draws a
+cut through the octree chosen by projected size under a hard point budget, so
+**per-frame cost is set by the budget and the visible node count, not by how
+much data exists** — a 5-setup store and a 5000-setup store cost the same to
+draw. Where the store fits inside the device's maximum buffer length, the whole
+mapping is wrapped once with `newBufferWithBytesNoCopy` and nodes are drawn at
+their byte offsets, so the GPU reads the page cache directly and the kernel
+pages nodes in and out as the view moves. Larger stores fall back to a
+byte-budgeted LRU of per-node buffers.
 
 **Navigation**
 
@@ -99,16 +125,16 @@ already-transformed points *with* a non-identity pose contradict the standard;
 those are detected rather than assumed, flagged `⚠︎ frame`, and left
 untransformed instead of being displaced twice.
 
-**Merged clouds are rejected on load.** Every scan is classified and the reason
+**Merged clouds are excluded.** Every scan is classified and the reason
 shown in the list: green for usable, red for rejected, amber for ambiguous.
-Rejected scans stay listed with their reason on hover — they are just not drawn
-and will not be fed to the visibility pipeline. See `src/scan_check.h` for how
+Excluded scans stay listed with their reason on hover — they are simply not
+indexed. Ambiguous scans ARE indexed: "no gridding metadata, and too few
 the decision is made; it uses metadata *and* a geometric test of whether the
-scan actually behaves like a range image, because metadata alone is not
-decisive in either direction.
+a terse writer, and dropping those would discard most of a corpus. Only a
+positive merged-cloud finding excludes a scan. See `src/scan_check.h`.
 
-Scans are decimated to a point budget (4 M each by default) on load. The list
-shows kept-vs-total, so it is always clear you are looking at a subsample.
+The status line reports how many points are drawn out of how many the store
+holds, and says when the budget cut the detail short.
 
 ## Auditing a corpus
 
@@ -147,7 +173,7 @@ keeps the reader buildable and testable off the target platform.
 open E57CoverageChecker.xcodeproj
 ```
 
-Five targets, all C++20 with shared schemes:
+Six targets, all C++20 with shared schemes:
 
 | target | kind | what it is |
 |---|---|---|
@@ -156,6 +182,7 @@ Five targets, all C++20 with shared schemes:
 | `test_e57` | tool | reader tests |
 | `test_viewer` | tool | camera / classifier / picker tests |
 | `test_lod` | tool | LOD octree, selection and point store tests |
+| `test_indexer` | tool | survey, bounded-memory build, store round trip |
 
 ⌘R on a test scheme runs that suite in the console.
 
@@ -191,6 +218,9 @@ on the CMake side but a failed build.
 src/e57.{h,cpp}             ASTM E2807 reader
 src/scan_check.{h,cpp}      structured-vs-merged classification
 src/point_cloud.{h,cpp}     decode + decimate for display
+src/lod.{h,cpp}             LOD octree: additive build and view selection
+src/point_store.{h,cpp}     on-disk store, mmap'd and zero-copy
+src/indexer.{h,cpp}         corpus survey and bounded-memory build
 src/camera.{h,cpp}          orbit camera
 src/picker.{h,cpp}          screen-space point picking (orbit centre)
 src/math3d.h                vectors and matrices
@@ -199,6 +229,8 @@ app/                        macOS app: AppKit window, Metal renderer
 tests/e57_fixture.h         E57 writer used to generate test files
 tests/test_e57.cpp          reader round-trip tests
 tests/test_viewer.cpp       camera, classifier, picker, decimation tests
+tests/test_lod.cpp          octree, selection, store tests
+tests/test_indexer.cpp      survey and build tests
 tools/validate_xcodeproj.py pbxproj structural validator
 E57CoverageChecker.xcodeproj
 DESIGN.md                   design and rationale

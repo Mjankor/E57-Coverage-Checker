@@ -13,7 +13,9 @@
 #pragma once
 
 #include "camera.h"
+#include "lod.h"
 #include "point_cloud.h"
+#include "point_store.h"
 
 #include <vector>
 
@@ -42,5 +44,14 @@ struct PickResult {
 PickResult pickNearest(const std::vector<PointCloud>& clouds,
                        const OrbitCamera& cam,
                        float ndcX, float ndcY, float radiusPx);
+
+// The same pick against an mmap'd store, restricted to the nodes currently
+// selected for drawing. Bounded by the point budget rather than by the store's
+// size, so it costs the same on a 5-setup store and a 5000-setup one — and it
+// picks only from what is actually on screen, which is what the crosshair
+// means. `pointIndex` is the index within `cloudIndex`, which here is a node.
+PickResult pickNearestInStore(const store::Reader& reader, const lod::Tree& tree,
+                              const lod::Selection& selection, const OrbitCamera& cam,
+                              float ndcX, float ndcY, float radiusPx);
 
 } // namespace viewer

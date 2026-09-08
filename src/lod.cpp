@@ -108,16 +108,23 @@ bool Builder::insert(const StorePoint& p) {
         const bool atLimit = c.node.level >= opt_.maxLevel;
         const bool room    = c.points.size() < opt_.maxPointsPerNode;
 
-        if (room && (claimCell(c, p) || atLimit)) {
-            c.points.push_back(p);
-            ++inserted_;
+        // claimCell has a side effect, so it is only called when its answer is
+        // going to be used.
+        if (atLimit) {
+            const bool keep = room && (opt_.spillAtMaxLevel ? claimCell(c, p) : true);
+            if (keep) {
+                c.points.push_back(p);
+                ++inserted_;
+                return true;
+            }
+            // Nothing below this level to push into: spill rather than drop.
+            ++overflowed_;
+            if (overflow_) overflow_(p);
             return true;
         }
-        if (atLimit) {
-            // Deepest level and this node is full: hand the point to the
-            // spill sink rather than dropping it silently.
-            if (overflow_) { overflow_->push_back(p); ++overflowed_; return true; }
-            ++overflowed_;
+        if (room && claimCell(c, p)) {
+            c.points.push_back(p);
+            ++inserted_;
             return true;
         }
 

@@ -1,44 +1,51 @@
-// Metal point-cloud renderer.
+// Metal point-cloud renderer, drawing from an mmap'd LOD store.
 //
-// Shaders are compiled from a source string at runtime rather than built from a
-// .metal file into default.metallib. That follows the house pattern from
-// CartesianCapture (ICPGpu.swift, PoissonGpu.swift) and, more practically here,
-// removes a dependency on Xcode's .metal build rule firing correctly in a
-// hand-maintained project — something that cannot be verified without Xcode.
-// The cost is two tiny shaders compiled at launch.
+// Nothing is uploaded per frame. Where the store fits inside the device's
+// maximum buffer length — the common case, since that is tens of gigabytes on
+// Apple silicon — the whole mapping is wrapped once with
+// `newBufferWithBytesNoCopy` and each node is drawn straight out of it at its
+// own byte offset. The GPU then reads the page cache directly, and the kernel
+// pages nodes in and out as the view moves. A store larger than that falls back
+// to a byte-budgeted LRU of per-node buffers.
 //
-// Every failure path leaves the renderer unusable rather than half-initialised,
-// and `lastError` says why, so the window can show a message instead of a blank
-// view.
+// Shaders are compiled from a source string at runtime, following the house
+// pattern and removing any dependency on Xcode's .metal build rule.
 
 #pragma once
 
 #import <MetalKit/MetalKit.h>
 
 #include "../src/camera.h"
-#include "../src/point_cloud.h"
+#include "../src/lod.h"
+#include "../src/point_store.h"
 
-#include <string>
 #include <vector>
 
 @interface Renderer : NSObject
 
-// Returns nil if Metal is unavailable or the shaders fail to compile.
 + (instancetype)rendererWithView:(MTKView *)view error:(NSString **)error;
 
-// Replaces the GPU-resident scene. Safe to call with an empty vector.
-- (void)setClouds:(const std::vector<viewer::PointCloud> &)clouds;
+// The store to draw. Pass nullptr to clear. The reader must outlive the call.
+- (void)setStore:(const store::Reader *)reader;
 
-- (void)drawInView:(MTKView *)view camera:(const viewer::OrbitCamera &)camera;
+// Setup positions in the store's local frame, drawn as markers. Available from
+// headers alone, so these are shown while the store is still being built.
+- (void)setSetupMarkers:(const std::vector<simd_float3> &)markers;
 
-// Point size in pixels; distance attenuation is applied on top of this.
+- (void)drawInView:(MTKView *)view
+            camera:(const viewer::OrbitCamera &)camera
+              tree:(const lod::Tree &)tree
+         selection:(const lod::Selection &)selection;
+
 @property (nonatomic) float pointSize;
-// Draws a marker at each scan's setup position.
-@property (nonatomic) BOOL showSetups;
-// Centre crosshair, marking where a right-click will pick the orbit centre.
-@property (nonatomic) BOOL showCrosshair;
-// World-space orbit centre, drawn as a marker so the pivot is visible.
-@property (nonatomic) BOOL showPivot;
+@property (nonatomic) BOOL  showSetups;
+@property (nonatomic) BOOL  showCrosshair;
+@property (nonatomic) BOOL  showPivot;
 - (void)setPivot:(m3::Vec3)pivot;
+
+// True when the whole store is addressed by one zero-copy buffer.
+@property (nonatomic, readonly) BOOL zeroCopy;
+// Bytes currently held in per-node buffers; zero on the zero-copy path.
+@property (nonatomic, readonly) uint64_t cachedBytes;
 
 @end

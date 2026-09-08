@@ -49,6 +49,7 @@ public:
     // Pixel coordinates, origin bottom-left, to normalised device coordinates.
     void pixelToNdc(float px, float pyUp, float& ndcX, float& ndcY) const;
 
+    float    fovY() const { return fovY_; }
     int      viewportWidth()  const { return vpW_; }
     int      viewportHeight() const { return vpH_; }
 

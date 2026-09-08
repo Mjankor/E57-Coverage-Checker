@@ -1,52 +1,81 @@
-// Window, file list, and loading.
+// Window, scan list, and the two-phase open.
 //
-// Loading is on a background queue: a structured scan is tens of millions of
-// points and decoding several files would otherwise beachball the app for
-// minutes with no indication of progress.
+// Opening a corpus happens in two stages, because at a thousand files the two
+// have wildly different costs:
 //
-// Scans that fail the structured check are listed with their reason but are
-// not added to the scene. The visibility method needs a single known origin per
-// scan; a merged cloud silently produces nonsense rather than failing, so the
-// place to stop it is here, on load.
+//   1. Survey — headers only. Pose, prototype, declared extent, metadata
+//      classification. No point decoding, so a thousand files take seconds.
+//      The setup layout is drawn immediately and the list is populated, which
+//      is enough to see the shape of the job and spot a stray setup.
+//
+//   2. Index — the octree build. Minutes on a large corpus, and cached: a
+//      store is keyed by the file list and their sizes and modification times,
+//      so reopening the same corpus skips straight to stage two's result.
+//
+// Waiting for stage 2 before showing anything would mean a blank window for
+// minutes. Doing stage 2 in the foreground would mean a beachball.
 
 #import <Cocoa/Cocoa.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #import "CloudView.h"
 
-#include "../src/e57.h"
-#include "../src/frame.h"
-#include "../src/picker.h"
-#include "../src/point_cloud.h"
+#include "../src/indexer.h"
+#include "../src/point_store.h"
 #include "../src/scan_check.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 namespace {
-
-struct Entry {
-    std::string file;        // display name only
-    std::string path;
-    std::string scan;
-    check::Kind kind = check::Kind::Ambiguous;
-    std::string status;
-    std::string detail;
-    uint64_t    sourcePoints = 0;
-    size_t      loadedPoints = 0;
-    bool        rendered = false;
-    bool        frameWarning = false;   // non-conformant pose handling
-};
 
 NSString *ns(const std::string &s) { return [NSString stringWithUTF8String:s.c_str()]; }
 
 std::string humanCount(uint64_t n) {
     char buf[64];
-    if (n >= 1000000ull) std::snprintf(buf, sizeof(buf), "%.1f M", double(n) / 1e6);
+    if (n >= 1000000000ull) std::snprintf(buf, sizeof(buf), "%.2f G", double(n) / 1e9);
+    else if (n >= 1000000ull) std::snprintf(buf, sizeof(buf), "%.1f M", double(n) / 1e6);
     else if (n >= 1000ull) std::snprintf(buf, sizeof(buf), "%.1f k", double(n) / 1e3);
     else std::snprintf(buf, sizeof(buf), "%llu", (unsigned long long)n);
     return buf;
+}
+
+// Identifies a corpus by its file list plus each file's size and mtime, so an
+// edited or replaced scan invalidates the cached store rather than silently
+// showing stale geometry.
+std::string corpusKey(const std::vector<std::string> &paths) {
+    std::vector<std::string> sorted = paths;
+    std::sort(sorted.begin(), sorted.end());
+    uint64_t h = 1469598103934665603ull;              // FNV-1a
+    auto mix = [&h](const void *data, size_t n) {
+        const uint8_t *p = static_cast<const uint8_t *>(data);
+        for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+    };
+    for (const auto &p : sorted) {
+        mix(p.data(), p.size());
+        struct stat st{};
+        if (::stat(p.c_str(), &st) == 0) {
+            const uint64_t size = uint64_t(st.st_size);
+            const uint64_t time = uint64_t(st.st_mtime);
+            mix(&size, sizeof(size));
+            mix(&time, sizeof(time));
+        }
+    }
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "%016llx", (unsigned long long)h);
+    return buf;
+}
+
+const char *kindLabel(check::Kind k) {
+    switch (k) {
+    case check::Kind::Structured: return "structured";
+    case check::Kind::Unified:    return "merged — not indexed";
+    case check::Kind::Ambiguous:  return "ambiguous";
+    }
+    return "?";
 }
 
 } // namespace
@@ -56,14 +85,16 @@ std::string humanCount(uint64_t n) {
 @end
 
 @implementation AppDelegate {
-    NSWindow        *_window;
-    CloudView       *_cloudView;
-    NSTableView     *_table;
-    NSTextField     *_status;
+    NSWindow            *_window;
+    CloudView           *_cloudView;
+    NSTableView         *_table;
+    NSTextField         *_status;
+    NSTextField         *_progress;
     NSProgressIndicator *_spinner;
-    std::vector<Entry>              _entries;
-    std::vector<viewer::PointCloud> _clouds;
-    BOOL                            _loading;
+
+    indexer::Survey      _survey;
+    BOOL                 _busy;
+    BOOL                 _cancelRequested;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
@@ -85,17 +116,15 @@ std::string humanCount(uint64_t n) {
     split.dividerStyle = NSSplitViewDividerStyleThin;
     split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    // --- left: scan list ---
     _table = [[NSTableView alloc] initWithFrame:NSZeroRect];
     _table.dataSource = self;
     _table.delegate = self;
     _table.usesAlternatingRowBackgroundColors = YES;
-    _table.rowHeight = 34;
-
+    _table.rowHeight = 30;
     struct { NSString *ident; NSString *title; CGFloat width; } cols[] = {
-        {@"scan",   @"Scan",   210},
-        {@"status", @"Status", 190},
-        {@"points", @"Points", 110},
+        {@"scan",   @"Setup",  230},
+        {@"status", @"Status", 170},
+        {@"points", @"Points", 90},
     };
     for (auto &c : cols) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:c.ident];
@@ -103,37 +132,35 @@ std::string humanCount(uint64_t n) {
         col.width = c.width;
         [_table addTableColumn:col];
     }
-
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, 520, 900)];
     scroll.documentView = _table;
     scroll.hasVerticalScroller = YES;
     scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    // --- right: viewer + status bar ---
     NSView *rightPane = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 880, 900)];
     rightPane.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    _cloudView = [[CloudView alloc] initWithFrame:NSMakeRect(0, 28, 880, 872)];
+    _cloudView = [[CloudView alloc] initWithFrame:NSMakeRect(0, 44, 880, 856)];
     _cloudView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _cloudView.cloudDelegate = self;
     [rightPane addSubview:_cloudView];
 
-    _status = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 4, 700, 20)];
-    _status.bezeled = NO;
-    _status.editable = NO;
-    _status.drawsBackground = NO;
-    _status.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
-    _status.textColor = [NSColor secondaryLabelColor];
-    _status.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
-    _status.stringValue = @"File ▸ Open to load structured E57 scans.   "
-                          @"left drag pan · right drag orbit · right click sets orbit centre · wheel zoom · F frames all";
-    [rightPane addSubview:_status];
+    _status = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 22, 830, 18)];
+    _progress = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 4, 830, 18)];
+    for (NSTextField *f in @[_status, _progress]) {
+        f.bezeled = NO; f.editable = NO; f.drawsBackground = NO;
+        f.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+        f.textColor = [NSColor secondaryLabelColor];
+        f.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
+        [rightPane addSubview:f];
+    }
+    _status.stringValue = @"File ▸ Open to load E57 scans.   left drag pan · right drag orbit · "
+                          @"right click sets orbit centre · wheel zoom · F frames all";
 
-    _spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(0, 0, 18, 18)];
+    _spinner = [[NSProgressIndicator alloc] initWithFrame:NSMakeRect(852, 12, 18, 18)];
     _spinner.style = NSProgressIndicatorStyleSpinning;
     _spinner.hidden = YES;
     _spinner.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
-    _spinner.frame = NSMakeRect(852, 5, 18, 18);
     [rightPane addSubview:_spinner];
 
     [split addSubview:scroll];
@@ -145,8 +172,6 @@ std::string humanCount(uint64_t n) {
 
     NSString *err = nil;
     if (![_cloudView setupRendererReturningError:&err]) {
-        // Without Metal there is nothing to show, and pretending otherwise
-        // leaves an empty black window with no explanation.
         NSAlert *a = [[NSAlert alloc] init];
         a.messageText = @"Could not start Metal";
         a.informativeText = err ?: @"Unknown error.";
@@ -157,8 +182,7 @@ std::string humanCount(uint64_t n) {
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
-    (void)sender;
-    return YES;
+    (void)sender; return YES;
 }
 
 - (void)buildMenu {
@@ -176,6 +200,9 @@ std::string humanCount(uint64_t n) {
     NSMenuItem *fileItem = [[NSMenuItem alloc] init];
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
     [fileMenu addItemWithTitle:@"Open…" action:@selector(openDocument:) keyEquivalent:@"o"];
+    [fileMenu addItemWithTitle:@"Open Folder…" action:@selector(openFolder:) keyEquivalent:@"O"];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+    [fileMenu addItemWithTitle:@"Cancel Indexing" action:@selector(cancelIndexing:) keyEquivalent:@"."];
     [fileMenu addItemWithTitle:@"Close All" action:@selector(closeAll:) keyEquivalent:@"w"];
     fileItem.submenu = fileMenu;
     [bar addItem:fileItem];
@@ -195,13 +222,13 @@ std::string humanCount(uint64_t n) {
 
 - (void)openDocument:(id)sender {
     (void)sender;
-    if (_loading) return;
+    if (_busy) return;
     NSOpenPanel *panel = [NSOpenPanel openPanel];
     panel.allowsMultipleSelection = YES;
     panel.canChooseDirectories = NO;
     UTType *e57Type = [UTType typeWithFilenameExtension:@"e57"];
     if (e57Type) panel.allowedContentTypes = @[e57Type];
-    panel.message = @"Choose one or more structured E57 scans.";
+    panel.message = @"Choose E57 scans.";
     if ([panel runModal] != NSModalResponseOK) return;
 
     NSMutableArray<NSString *> *paths = [NSMutableArray array];
@@ -209,173 +236,225 @@ std::string humanCount(uint64_t n) {
     [self loadPaths:paths];
 }
 
+// A thousand-setup job is a directory, not a multi-select.
+- (void)openFolder:(id)sender {
+    (void)sender;
+    if (_busy) return;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.message = @"Choose a folder of E57 scans.";
+    if ([panel runModal] != NSModalResponseOK) return;
+
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    for (NSURL *dir in panel.URLs) {
+        NSDirectoryEnumerator *e = [NSFileManager.defaultManager enumeratorAtPath:dir.path];
+        for (NSString *rel in e)
+            if ([rel.pathExtension caseInsensitiveCompare:@"e57"] == NSOrderedSame)
+                [paths addObject:[dir.path stringByAppendingPathComponent:rel]];
+    }
+    if (paths.count == 0) {
+        _status.stringValue = @"No .e57 files in that folder.";
+        return;
+    }
+    [self loadPaths:paths];
+}
+
+- (void)cancelIndexing:(id)sender { (void)sender; _cancelRequested = YES; }
+
 - (void)closeAll:(id)sender {
     (void)sender;
-    if (_loading) return;
-    _entries.clear();
-    _clouds.clear();
+    if (_busy) return;
+    _survey = indexer::Survey{};
     [_table reloadData];
-    [_cloudView setScene:std::vector<viewer::PointCloud>{}];
-    _status.stringValue = @"Closed all scans.";
+    [_cloudView closeAll];
+    _status.stringValue = @"Closed.";
+    _progress.stringValue = @"";
 }
 
 - (void)frameAll:(id)sender { (void)sender; [_cloudView frameAll]; }
 - (void)biggerPoints:(id)sender { (void)sender; _cloudView.pointSize = _cloudView.pointSize + 0.5f; }
 - (void)smallerPoints:(id)sender { (void)sender; _cloudView.pointSize = _cloudView.pointSize - 0.5f; }
 
-- (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename {
-    (void)sender;
-    [self loadPaths:@[filename]];
-    return YES;
-}
-
 - (void)application:(NSApplication *)sender openFiles:(NSArray<NSString *> *)filenames {
-    (void)sender;
     [self loadPaths:filenames];
     [sender replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
 }
 
-// --- loading --------------------------------------------------------------
+// --- the two-phase open ---------------------------------------------------
+
+- (NSString *)storePathForKey:(const std::string &)key {
+    NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
+    NSString *base = dirs.count ? dirs[0] : NSTemporaryDirectory();
+    NSString *dir = [base stringByAppendingPathComponent:@"E57CoverageChecker"];
+    [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES
+                                             attributes:nil error:nil];
+    return [dir stringByAppendingPathComponent:ns(key + ".lod")];
+}
 
 - (void)loadPaths:(NSArray<NSString *> *)paths {
-    if (_loading || paths.count == 0) return;
-    _loading = YES;
+    if (_busy || paths.count == 0) return;
+    _busy = YES;
+    _cancelRequested = NO;
     _spinner.hidden = NO;
     [_spinner startAnimation:nil];
+    _status.stringValue = [NSString stringWithFormat:@"Reading headers from %lu file%s…",
+                           (unsigned long)paths.count, paths.count == 1 ? "" : "s"];
+
+    std::vector<std::string> cpaths;
+    for (NSString *p in paths) cpaths.push_back(p.UTF8String);
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        std::vector<Entry>              newEntries;
-        std::vector<viewer::PointCloud> newClouds;
-
-        for (NSString *path in paths) {
-            const std::string p = path.UTF8String;
-            const std::string base = [path lastPathComponent].UTF8String;
-
-            dispatch_async(dispatch_get_main_queue(), ^{
-                self->_status.stringValue = [NSString stringWithFormat:@"Reading %@…", [path lastPathComponent]];
+        // --- stage 1: headers only ---
+        indexer::SurveyOptions so;      // classify off: no point decoding
+        indexer::Survey s = indexer::survey(cpaths, so,
+            [&](const std::string &stage, uint64_t done, uint64_t total) {
+                if (done % 25 == 0) {
+                    NSString *line = [NSString stringWithFormat:@"%s  %llu / %llu",
+                                      stage.c_str(), (unsigned long long)done,
+                                      (unsigned long long)total];
+                    dispatch_async(dispatch_get_main_queue(), ^{ self->_progress.stringValue = line; });
+                }
+                return !self->_cancelRequested;
             });
 
-            e57::Reader reader;
-            std::string err;
-            if (!reader.open(p, err)) {
-                Entry e;
-                e.file = base; e.path = p; e.scan = "—";
-                e.kind = check::Kind::Unified;
-                e.status = "unreadable";
-                e.detail = err;
-                newEntries.push_back(e);
-                continue;
-            }
+        std::vector<double> setups;
+        setups.reserve(s.scans.size() * 3);
+        for (const auto &sc : s.scans)
+            if (sc.usable) for (int k = 0; k < 3; ++k) setups.push_back(sc.setup[k]);
 
-            for (size_t i = 0; i < reader.scanCount(); ++i) {
-                Entry e;
-                e.file = base;
-                e.path = p;
-                e.scan = reader.scan(i).name.empty()
-                       ? ("scan " + std::to_string(i)) : reader.scan(i).name;
-                e.sourcePoints = reader.scan(i).recordCount;
+        const std::string key = corpusKey(cpaths);
+        __block indexer::Survey surveyCopy = s;
 
-                const check::Result res = check::classify(reader, i);
-                e.kind   = res.kind;
-                e.status = res.summary;
-                for (const auto &line : res.evidence) {
-                    if (!e.detail.empty()) e.detail += "\n";
-                    e.detail += line;
-                }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_survey = surveyCopy;
+            [self->_table reloadData];
+            [self->_cloudView setSetups:setups];
+            self->_status.stringValue = [NSString stringWithFormat:
+                @"%zu setups from %zu files   ·   %s declared points   ·   indexing…",
+                surveyCopy.usableCount(), surveyCopy.filesRead,
+                humanCount(surveyCopy.totalPoints()).c_str()];
+        });
 
-                if (res.usable()) {
-                    viewer::PointCloud pc;
-                    std::string lerr;
-                    if (viewer::loadCloud(reader, i, viewer::LoadOptions{}, pc, lerr)) {
-                        e.loadedPoints = pc.pointCount();
-                        e.rendered = true;
-                        // How the scan was placed. A scan drawn in the wrong
-                        // frame looks plausible on its own and is only obvious
-                        // against its neighbours, so it is always reported.
-                        e.detail += "\n\nplacement: ";
-                        e.detail += viewer::conventionName(pc.frameConvention);
-                        e.detail += "\n";
-                        e.detail += pc.frameNote;
-                        if (pc.frameConvention == viewer::FrameConvention::AlreadyGlobal)
-                            e.frameWarning = true;
-                        newClouds.push_back(std::move(pc));
-                    } else {
-                        e.kind = check::Kind::Unified;
-                        e.status = "decode failed";
-                        e.detail = lerr;
+        if (self->_cancelRequested) { [self finishBusy:@"Cancelled."]; return; }
+
+        // --- stage 2: the point store ---
+        NSString *storePath = [self storePathForKey:key];
+        const BOOL cached = [NSFileManager.defaultManager fileExistsAtPath:storePath];
+
+        if (!cached) {
+            // The build needs the full structured check, which decodes a sample
+            // per scan; the fast survey deliberately skipped it.
+            indexer::SurveyOptions full;
+            full.classify = true;
+            s = indexer::survey(cpaths, full,
+                [&](const std::string &, uint64_t done, uint64_t total) {
+                    if (done % 10 == 0) {
+                        NSString *line = [NSString stringWithFormat:@"checking scans  %llu / %llu",
+                                          (unsigned long long)done, (unsigned long long)total];
+                        dispatch_async(dispatch_get_main_queue(), ^{ self->_progress.stringValue = line; });
                     }
-                }
-                newEntries.push_back(e);
+                    return !self->_cancelRequested;
+                });
+            __block indexer::Survey checked = s;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self->_survey = checked;
+                [self->_table reloadData];
+            });
+
+            indexer::BuildOptions bo;
+            indexer::BuildStats stats;
+            std::string err;
+            const bool ok = indexer::build(s, storePath.UTF8String, bo, stats,
+                [&](const std::string &stage, uint64_t done, uint64_t total) {
+                    NSString *line = [NSString stringWithFormat:@"%s  %llu / %llu",
+                                      stage.c_str(), (unsigned long long)done,
+                                      (unsigned long long)total];
+                    dispatch_async(dispatch_get_main_queue(), ^{ self->_progress.stringValue = line; });
+                    return !self->_cancelRequested;
+                }, err);
+
+            if (!ok) {
+                // A partial store must not be left where the cache key would
+                // find it and present it as complete.
+                [NSFileManager.defaultManager removeItemAtPath:storePath error:nil];
+                NSString *msg = [NSString stringWithFormat:@"Indexing failed: %s", err.c_str()];
+                [self finishBusy:msg];
+                return;
+            }
+            if (stats.outsideRoot || stats.dropped) {
+                NSString *warn = [NSString stringWithFormat:
+                    @"indexed with losses: %llu outside bounds, %llu dropped at depth limit",
+                    (unsigned long long)stats.outsideRoot, (unsigned long long)stats.dropped];
+                dispatch_async(dispatch_get_main_queue(), ^{ self->_progress.stringValue = warn; });
             }
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            for (auto &e : newEntries) self->_entries.push_back(e);
-            for (auto &c : newClouds)  self->_clouds.push_back(std::move(c));
-
-            [self->_table reloadData];
-            [self->_cloudView setScene:self->_clouds];
-
-            size_t usable = 0, rejected = 0, pts = 0;
-            uint64_t src = 0;
-            for (const auto &e : self->_entries) {
-                if (e.rendered) { ++usable; pts += e.loadedPoints; src += e.sourcePoints; }
-                else ++rejected;
+            NSString *err = nil;
+            if (![self->_cloudView openStore:storePath error:&err]) {
+                self->_status.stringValue = [NSString stringWithFormat:@"Could not open store: %@", err];
+            } else {
+                self->_status.stringValue = [NSString stringWithFormat:
+                    @"%zu setups   ·   store %@   ·   drag to navigate",
+                    self->_survey.usableCount(), cached ? @"reused from cache" : @"built"];
             }
-            self->_status.stringValue = [NSString stringWithFormat:
-                @"%zu scan%s shown (%s of %s points)   ·   %zu rejected", usable,
-                usable == 1 ? "" : "s",
-                humanCount(pts).c_str(), humanCount(src).c_str(), rejected];
-
-            self->_loading = NO;
+            self->_progress.stringValue = @"";
+            self->_busy = NO;
             [self->_spinner stopAnimation:nil];
             self->_spinner.hidden = YES;
         });
     });
 }
 
-// --- viewer callbacks -----------------------------------------------------
+- (void)finishBusy:(NSString *)message {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->_status.stringValue = message;
+        self->_progress.stringValue = @"";
+        self->_busy = NO;
+        [self->_spinner stopAnimation:nil];
+        self->_spinner.hidden = YES;
+    });
+}
+
+// --- viewer callback ------------------------------------------------------
 
 - (void)cloudViewDidChangeView:(NSString *)status {
-    // Only overwrite the transient half of the status line; the load summary
-    // stays useful while navigating.
-    if (!_loading) _status.stringValue = status;
+    if (!_busy) _status.stringValue = status;
 }
 
 // --- table ----------------------------------------------------------------
 
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
     (void)tableView;
-    return (NSInteger)_entries.size();
+    return (NSInteger)_survey.scans.size();
 }
 
 - (NSView *)tableView:(NSTableView *)tableView
    viewForTableColumn:(NSTableColumn *)column
                   row:(NSInteger)row {
     (void)tableView;
-    if (row < 0 || (size_t)row >= _entries.size()) return nil;
-    const Entry &e = _entries[(size_t)row];
+    if (row < 0 || (size_t)row >= _survey.scans.size()) return nil;
+    const indexer::ScanRef &e = _survey.scans[(size_t)row];
 
-    NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, column.width, 30)];
+    NSTextField *label = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, column.width, 26)];
     label.bezeled = NO; label.editable = NO; label.drawsBackground = NO;
     label.lineBreakMode = NSLineBreakByTruncatingMiddle;
     label.font = [NSFont systemFontOfSize:11];
 
     if ([column.identifier isEqualToString:@"scan"]) {
-        label.stringValue = ns(e.file + "  ▸  " + e.scan);
+        label.stringValue = ns(e.name);
         label.toolTip = ns(e.path);
     } else if ([column.identifier isEqualToString:@"status"]) {
-        label.stringValue = ns(e.frameWarning ? (e.status + "  ⚠︎ frame") : e.status);
-        label.toolTip = ns(e.detail.empty() ? e.status : e.detail);
+        label.stringValue = ns(e.status.empty() ? kindLabel(e.kind) : e.status);
+        label.toolTip = ns(e.status);
         switch (e.kind) {
-        case check::Kind::Structured: label.textColor = [NSColor systemGreenColor]; break;
-        case check::Kind::Unified:    label.textColor = [NSColor systemRedColor];   break;
-        case check::Kind::Ambiguous:  label.textColor = [NSColor systemOrangeColor];break;
+        case check::Kind::Structured: label.textColor = [NSColor systemGreenColor];  break;
+        case check::Kind::Unified:    label.textColor = [NSColor systemRedColor];    break;
+        case check::Kind::Ambiguous:  label.textColor = [NSColor systemOrangeColor]; break;
         }
     } else {
-        label.stringValue = e.rendered
-            ? ns(humanCount(e.loadedPoints) + " / " + humanCount(e.sourcePoints))
-            : ns("—");
+        label.stringValue = ns(humanCount(e.recordCount));
         label.alignment = NSTextAlignmentRight;
         label.textColor = [NSColor secondaryLabelColor];
     }

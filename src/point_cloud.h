@@ -1,4 +1,10 @@
-// Decimated point cloud for display.
+// Decimated point cloud for a single scan.
+//
+// The viewer no longer uses this: at thousands of setups it draws from the LOD
+// store instead (see lod.h and point_store.h). It stays because it is the
+// simplest correct path from one scan to points in the file frame — the
+// forthcoming CPU reference visibility pass wants exactly that — and because
+// its precision handling is covered by tests.
 //
 // Two things this has to get right:
 //

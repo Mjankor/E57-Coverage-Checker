@@ -18,7 +18,8 @@ add_library(e57cov_core STATIC
   src/picker.cpp
   src/frame.cpp
   src/lod.cpp
-  src/point_store.cpp)
+  src/point_store.cpp
+  src/indexer.cpp)
 target_include_directories(e57cov_core PUBLIC src)
 target_compile_options(e57cov_core PRIVATE -Wall -Wextra)
 
@@ -41,3 +42,8 @@ add_executable(test_lod tests/test_lod.cpp)
 target_link_libraries(test_lod PRIVATE e57cov_core)
 target_compile_options(test_lod PRIVATE -Wall -Wextra)
 add_test(NAME lod COMMAND test_lod)
+
+add_executable(test_indexer tests/test_indexer.cpp)
+target_link_libraries(test_indexer PRIVATE e57cov_core)
+target_compile_options(test_indexer PRIVATE -Wall -Wextra)
+add_test(NAME indexer COMMAND test_indexer)

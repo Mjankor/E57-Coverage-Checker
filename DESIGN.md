@@ -238,9 +238,15 @@ earlier without either tree being resident. Nodes carry explicit child indices
 rather than a base-plus-mask precisely so a stitch never has to repair a
 contiguity invariant.
 
-**Two-phase open** (planned): scan headers are cheap — pose and metadata need
-no point decoding — so opening a thousand files should draw the setup layout in
-seconds, with the point store built or opened in the background.
+**Two-phase open**: scan headers are cheap — pose and metadata need no point
+decoding — so opening a thousand files draws the setup layout in seconds, with
+the store built in the background and cached against the file list and each
+file's size and modification time.
+
+All of this is implemented: `src/lod.{h,cpp}` (build and selection),
+`src/point_store.{h,cpp}` (format), `src/indexer.{h,cpp}` (survey and build),
+with the viewer drawing from the store. What is **not** exercised is the Metal
+layer, which cannot be compiled in the development environment.
 
 ---
 

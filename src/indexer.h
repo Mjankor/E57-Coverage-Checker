@@ -1,0 +1,149 @@
+// Building a point store from an E57 corpus.
+//
+// Two entry points, matching the two things the app has to do with a thousand
+// files:
+//
+//   survey()  Headers only — pose, prototype, declared bounds, metadata
+//             classification. No point decoding, so a thousand files take
+//             seconds and the setup layout can be drawn immediately while the
+//             real work happens behind it.
+//
+//   build()   The bounded-memory octree build. Memory stays flat regardless of
+//             corpus size, which is the whole point: the store this produces is
+//             routinely larger than RAM.
+//
+// How build() stays bounded:
+//
+//   1. A top tree is built in memory over levels 0..chunkLevel-1, with
+//      `spillAtMaxLevel` set so each node keeps only its occupancy-grid sample
+//      and everything else spills.
+//   2. Spilled points are appended to one file per occupied cell at
+//      chunkLevel, through small write buffers. This is the bulk of the data
+//      and it never accumulates in memory.
+//   3. Each chunk is then built into a subtree on its own and appended to the
+//      store, linked under the top tree node it belongs to. Only one chunk is
+//      resident at a time.
+//
+// chunkLevel is chosen so a chunk is roughly `targetPointsPerChunk`, so peak
+// memory is bounded by that rather than by the corpus.
+
+#pragma once
+
+#include "e57.h"
+#include "frame.h"
+#include "lod.h"
+#include "point_store.h"
+#include "scan_check.h"
+
+#include <functional>
+#include <string>
+#include <vector>
+
+namespace indexer {
+
+// Return false from a progress callback to cancel. Cancellation is checked
+// between scans and between chunks, so it is prompt without leaving a
+// half-written store presented as complete.
+using ProgressFn = std::function<bool(const std::string& stage, uint64_t done,
+                                      uint64_t total)>;
+
+struct ScanRef {
+    std::string path;          // file it came from
+    size_t      scanIndex = 0; // index within that file
+    std::string name;
+    std::string guid;
+
+    e57::Pose pose;
+    bool      hasPose = false;
+    uint64_t  recordCount = 0;
+
+    check::Kind kind = check::Kind::Ambiguous;
+    std::string status;
+    // Indexed and drawn. Ambiguous scans are included: "no gridding metadata,
+    // and too few populated direction bins to judge" is the normal verdict for
+    // a perfectly good scan from a terse writer, and dropping those would
+    // silently discard most of a corpus. Only a positive merged-cloud finding
+    // excludes a scan. The store flags ambiguity so the UI can say so.
+    bool        usable = false;
+
+    // The setup position in the file's coordinate system. Available from
+    // headers alone, which is what makes the fast open possible.
+    double setup[3] = {0, 0, 0};
+
+    // Declared extent, transformed into the file frame. Absent for scans whose
+    // files omit cartesianBounds, in which case build() samples for bounds.
+    bool   hasExtent = false;
+    double lo[3] = {0, 0, 0};
+    double hi[3] = {0, 0, 0};
+};
+
+struct Survey {
+    std::vector<ScanRef>     scans;
+    std::vector<std::string> errors;      // one per unreadable file
+    size_t                   filesRead = 0;
+
+    // Union of declared extents and setup positions. `extentComplete` is false
+    // when any usable scan lacked declared bounds.
+    bool   hasBounds = false;
+    bool   extentComplete = true;
+    double lo[3] = {0, 0, 0};
+    double hi[3] = {0, 0, 0};
+
+    size_t usableCount() const;
+    uint64_t totalPoints() const;
+};
+
+struct SurveyOptions {
+    // Run the geometric merged-cloud test. Decodes a sample per scan, so it is
+    // far slower than a header read — off for the fast open, on for the build.
+    bool classify = false;
+};
+
+Survey survey(const std::vector<std::string>& paths, const SurveyOptions& opt,
+              const ProgressFn& progress);
+
+// ---------------------------------------------------------------------------
+
+struct BuildOptions {
+    lod::BuildOptions tree;
+    // Where spill files go. Defaults to the store's directory.
+    std::string chunkDir;
+    // Peak memory during the per-chunk phase is roughly this many points.
+    // 20 M points is ~400 MB of StorePoint.
+    uint64_t targetPointsPerChunk = 20000000;
+    // 0 picks a level from the corpus size.
+    uint8_t  chunkLevel = 0;
+    // 0 means every point. Set it to cap a store's size on disk.
+    uint64_t maxPointsPerScan = 0;
+};
+
+struct BuildStats {
+    uint64_t pointsRead = 0;
+    uint64_t pointsStored = 0;
+    uint64_t spilled = 0;
+    // Points discarded because a node was full at the depth limit. Should be
+    // zero at any sane depth; reported rather than hidden, because silently
+    // losing points would look like missing coverage.
+    uint64_t dropped = 0;
+    // Points that fell outside the root bounds and are therefore absent from
+    // the store. Should be zero; reported rather than fatal, because failing a
+    // whole corpus over a stray point is worse than saying how many were lost.
+    uint64_t outsideRoot = 0;
+    uint64_t nodes = 0;
+    size_t   chunks = 0;
+    uint8_t  chunkLevel = 0;
+    uint64_t storeBytes = 0;
+};
+
+bool build(const Survey& s, const std::string& storePath, const BuildOptions& opt,
+           BuildStats& stats, const ProgressFn& progress, std::string& err);
+
+// Chooses the chunk level so a chunk holds about `targetPointsPerChunk`.
+uint8_t chooseChunkLevel(uint64_t totalPoints, uint64_t targetPointsPerChunk);
+
+// The cell index at `level` containing a point, and optionally that cell's
+// bounds. The index packs three bits per level, most significant first.
+uint32_t cellIndexOf(const lod::Aabb& root, uint8_t level,
+                     float x, float y, float z, lod::Aabb* outBounds = nullptr);
+
+} // namespace indexer

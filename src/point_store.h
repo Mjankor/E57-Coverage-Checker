@@ -76,6 +76,7 @@ enum ScanFlags : uint32_t {
     kScanStructured  = 1u << 0,   // passed the structured check
     kScanPoseApplied = 1u << 1,   // pose was applied to its points
     kScanFrameWarned = 1u << 2,   // non-conformant frame handling
+    kScanAmbiguous   = 1u << 3,   // no gridding metadata and geometry inconclusive
 };
 
 // ---------------------------------------------------------------------------
