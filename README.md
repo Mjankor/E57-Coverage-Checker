@@ -125,13 +125,17 @@ already-transformed points *with* a non-identity pose contradict the standard;
 those are detected rather than assumed, flagged `⚠︎ frame`, and left
 untransformed instead of being displaced twice.
 
-**Merged clouds are excluded.** Every scan is classified and the reason
-shown in the list: green for usable, red for rejected, amber for ambiguous.
-Excluded scans stay listed with their reason on hover — they are simply not
-indexed. Ambiguous scans ARE indexed: "no gridding metadata, and too few
-the decision is made; it uses metadata *and* a geometric test of whether the
-a terse writer, and dropping those would discard most of a corpus. Only a
-positive merged-cloud finding excludes a scan. See `src/scan_check.h`.
+**Merged clouds are excluded.** Every scan is classified and the verdict shown
+in the list: green structured, amber ambiguous, red excluded, with the reasoning
+on hover. `src/scan_check.h` uses metadata *and* a geometric test of whether the
+scan actually behaves like a range image, because metadata alone is not decisive
+in either direction.
+
+Only a positive merged-cloud finding excludes a scan. **Ambiguous scans are
+indexed and drawn**: "no gridding metadata, and too few populated direction bins
+to judge" is the ordinary verdict for a perfectly good scan from a terse writer,
+and treating it as disqualifying would discard most of a corpus. The store
+records the ambiguity so it stays visible rather than being quietly forgotten.
 
 The status line reports how many points are drawn out of how many the store
 holds, and says when the budget cut the detail short.
