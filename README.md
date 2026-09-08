@@ -21,6 +21,10 @@ built yet.**
 | `e57cov info` — format audit CLI | done |
 | structured-vs-merged check | done |
 | viewer app (open, inspect, navigate) | done — **rendering layer unrun**, see below |
+| LOD octree + selection (scale to 1000s of setups) | engine done and tested |
+| on-disk point store (mmap, zero-copy) | done and tested |
+| indexer: E57 corpus → store | **not started** |
+| viewer wired to the store | **not started** — still loads whole scans |
 | range-image builder | not started |
 | CPU reference visibility pass | not started |
 | Metal gather kernel | not started |
@@ -143,7 +147,7 @@ keeps the reader buildable and testable off the target platform.
 open E57CoverageChecker.xcodeproj
 ```
 
-Four targets, all C++20 with shared schemes:
+Five targets, all C++20 with shared schemes:
 
 | target | kind | what it is |
 |---|---|---|
@@ -151,6 +155,7 @@ Four targets, all C++20 with shared schemes:
 | `e57cov` | tool | the format-audit CLI |
 | `test_e57` | tool | reader tests |
 | `test_viewer` | tool | camera / classifier / picker tests |
+| `test_lod` | tool | LOD octree, selection and point store tests |
 
 ⌘R on a test scheme runs that suite in the console.
 

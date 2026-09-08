@@ -195,6 +195,55 @@ min/max pyramid — the reduction must be hand-rolled.
 
 ---
 
+## 4a. Viewing thousands of setups
+
+The viewer is not a side attraction — judging coverage means looking at the
+site, and the corpus this tool exists for is thousands of setups. That scale
+breaks the obvious design outright, so it is settled here rather than treated
+as an optimisation to add later.
+
+**Why per-scan decimation is not enough.** 2000 setups × 20 M points is
+4 × 10¹⁰ points; at 16 bytes each that is 640 GB. A per-scan budget does not
+rescue it — 2000 scans at 4 M points each is still 8 × 10⁹ points, and
+decimating hard enough to fit in memory destroys exactly the local detail the
+tool is for. Neither does drawing less: submitting every loaded point every
+frame makes cost scale with the corpus rather than with the view.
+
+**One octree over the whole corpus, on disk, streamed by view.** Built once by
+the indexer, stored in a single file, mmap'd at runtime.
+
+- **Additive LOD** (`src/lod.h`), the scheme Potree uses: a node keeps a point
+  only if no point already in that node occupies the same cell of the node's
+  occupancy grid; otherwise the point is pushed down. The root is therefore a
+  uniform coarse sample of the entire site, each level roughly halves the
+  spacing, and a set of nodes is drawn as their union with no duplication.
+- **Selection by projected size**, front to back, under a hard point budget.
+  Work per frame is bounded by the budget and the number of visible nodes, not
+  by how much data exists — a 5-setup store and a 5000-setup store cost the
+  same to draw.
+- **Scan identity per point.** Every point carries a `scanId`, because "which
+  setups cover this space" is the question the tool answers. `uint16` caps a
+  store at 65 535 setups, which is well past the intended scale; exceeding it
+  is a hard error rather than a silent wrap.
+- **Zero-copy payloads.** Node points are read straight out of the mapping and
+  can be wrapped with `newBufferWithBytesNoCopy` on Apple silicon, so the GPU
+  reads the page cache directly and the kernel evicts cold nodes on its own.
+  This is the same unified-memory argument as §3, applied to the viewer.
+
+**Bounded-memory build.** The tree cannot be built by loading the corpus. The
+indexer streams: points that reach the depth limit of the in-memory top tree
+spill to a per-cell chunk file on disk, then each chunk is built into a subtree
+on its own and stitched in. `store::Writer::linkChild` joins a subtree written
+earlier without either tree being resident. Nodes carry explicit child indices
+rather than a base-plus-mask precisely so a stitch never has to repair a
+contiguity invariant.
+
+**Two-phase open** (planned): scan headers are cheap — pose and metadata need
+no point decoding — so opening a thousand files should draw the setup layout in
+seconds, with the point store built or opened in the background.
+
+---
+
 ## 5. Grid representation
 
 VISIBLE is stored **positively and sparsely**: 8³ bricks (512 bits = 64 bytes =
