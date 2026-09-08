@@ -222,10 +222,41 @@ int info(const std::string& path, bool verifyCrc, double maxRange) {
                                     "measured\n                  surfaces sit beyond where "
                                     "no-return rays stop clearing\n");
                     }
-                    std::printf("      raster    : %s (residuals %.5f rad row, %.5f rad col)\n",
-                                img.map.valid ? "uniform, lookups exact"
-                                              : "*** NOT UNIFORM — lookups unreliable ***",
+                    std::printf("      raster    : %s\n"
+                                "                  residuals %.5f rad row, %.5f rad col\n",
+                                img.map.valid ? "uniform"
+                                              : "*** REFUSED — lookups would reach the wrong "
+                                                "direction ***",
                                 img.map.elResidualRad, img.map.azResidualRad);
+                    // The mapping itself, and the field of view it implies. A
+                    // vertical span near 360 degrees means the mirror covers
+                    // each column twice and a single line cannot describe it.
+                    std::printf("      mapping   : el = %+.6f %+.8f * row   "
+                                "(%.1f deg over %u rows)\n"
+                                "                  az = %+.6f %+.8f * col   "
+                                "(%.1f deg over %u cols)\n",
+                                img.map.el0, img.map.dElPerRow,
+                                std::fabs(img.map.dElPerRow) * img.rows * 57.29577951308232,
+                                img.rows,
+                                img.map.az0, img.map.dAzPerCol,
+                                std::fabs(img.map.dAzPerCol) * img.cols * 57.29577951308232,
+                                img.cols);
+                    // The check that matters: the scan's own points put back
+                    // through the mapping. A low figure here with low residuals
+                    // means lookups land in the wrong place while the fit looks
+                    // healthy, which is how sky comes back unobserved and
+                    // building interiors come back clear.
+                    if (img.map.roundTripFraction >= 0.0) {
+                        const double rt = 100.0 * img.map.roundTripFraction;
+                        std::printf("      round trip: %.2f%% of this scan's own points land back "
+                                    "on their own cell  %s\n", rt,
+                                    img.map.roundTripFraction >= 0.90 ? "OK"
+                                                                      : "*** BROKEN ***");
+                    } else {
+                        std::printf("      round trip: not measured\n");
+                    }
+                    if (!img.diag.note.empty())
+                        std::printf("      note      : %s\n", img.diag.note.c_str());
                     if (!img.map.valid) ++failures;
                     if (img.diag.emptyLeadingRows || img.diag.emptyTrailingRows) {
                         // Either an all-sky band or a part of the grid the
@@ -341,18 +372,130 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
     std::printf("  occupied  %llu  (%.1f%%) — some setup measured a surface%s\n",
                 (unsigned long long)st.occupied, double(st.occupied) * pct,
                 bounds ? "   [lower bound]" : "");
-    std::printf("  unknown   %llu  (%.1f%%, %.1f m^3) — neither: the candidate voids\n",
+    std::printf("  unknown   %llu  (%.1f%%, %.1f m^3) — neither: nobody observed it\n",
                 (unsigned long long)st.unknown, double(st.unknown) * pct,
                 double(st.unknown) * voxelVolume);
+
+    if (res.classified) {
+        const voids::Report& v = res.voidReport;
+        std::printf("\nvoids     : %llu enclosed void(s), %.1f m^3 in total\n"
+                    "            largest %.1f m^3   ·   %.1f m^3 of the unobserved space\n"
+                    "            reaches the outside world and is not a finding\n",
+                    (unsigned long long)v.components, res.enclosedVolume(),
+                    double(v.largestComponent) * voxelVolume, res.exteriorVolume());
+    } else if (!res.classifySkipped.empty()) {
+        std::printf("\nvoids     : not classified — %s\n", res.classifySkipped.c_str());
+    }
     std::printf("\ndrawable  : %zu voxels%s%s\n", res.voxels.size(),
                 opt.solid ? " (solid)" : " on the observed frontier",
                 res.keptFraction < 1.0 ? ", sampled to fit the display cap" : "");
     if (!res.note.empty()) std::printf("note      : %s\n", res.note.c_str());
 
-    std::printf("\nThe unknown set still mixes three things: shadows inside the site,\n"
-                "material behind measured surfaces, and space outside the building\n"
-                "that no setup could ever see. Separating them is the next stage\n"
-                "(DESIGN.md) — this number is not yet the answer.\n");
+    if (!res.classified) {
+        std::printf("\nWithout the connectivity pass the unknown figure mixes three things:\n"
+                    "shadows inside the site, material behind measured surfaces, and space\n"
+                    "outside the building that no setup could ever see. Over any region\n"
+                    "containing a building the third dominates, so read `unknown` as\n"
+                    "\"everything nobody looked at\" rather than as a finding.\n");
+    }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// probe — why does one point come out the way it does?
+//
+// Aggregate figures cannot answer "the house interior is being cleared, why?".
+// This can: it names the setup that cleared it, the direction, the raster cell
+// that direction lands on, and what that cell holds. Every wrong answer this
+// tool has produced was diagnosable from those five things, and none of them was
+// visible from the statistics.
+
+int probePoint(const std::vector<std::string>& paths, const vis::Options& opt,
+               const double world[3]) {
+    std::vector<std::unique_ptr<e57::Reader>> readers;
+    std::vector<std::unique_ptr<rimg::RangeImage>> images;
+    std::vector<carve::SetupView> setups;
+
+    rimg::Options ro;
+    ro.maxRange         = opt.maxRange;
+    ro.noReturnRadius   = opt.skyRadius;
+    ro.noReturnFraction = opt.skyFraction;
+
+    for (const std::string& path : paths) {
+        auto r = std::make_unique<e57::Reader>();
+        std::string err;
+        if (!r->open(path, err)) { std::printf("%s: %s\n", path.c_str(), err.c_str()); return 1; }
+        for (size_t i = 0; i < r->scanCount(); ++i) {
+            auto img = std::make_unique<rimg::RangeImage>();
+            std::string rerr;
+            if (!rimg::build(*r, i, ro, *img, rerr)) continue;
+            images.push_back(std::move(img));
+            setups.push_back(carve::makeSetupView(*images.back()));
+        }
+        readers.push_back(std::move(r));
+    }
+    if (setups.empty()) { std::printf("no usable scans\n"); return 1; }
+
+    carve::Params p;
+    p.voxelSize     = opt.voxelSize;
+    p.surfaceMargin = 0.5 * opt.voxelSize * 1.7320508075688772;
+    p.maxRange      = opt.maxRange;
+
+    std::printf("probe (%.3f, %.3f, %.3f)   voxel %.3f m   max range %.1f m\n\n",
+                world[0], world[1], world[2], p.voxelSize, p.maxRange);
+
+    uint8_t total = 0;
+    for (size_t i = 0; i < setups.size(); ++i) {
+        const carve::SetupView& s = setups[i];
+        const rimg::RangeImage& im = *s.image;
+
+        const double dx = world[0] - s.origin[0];
+        const double dy = world[1] - s.origin[1];
+        const double dz = world[2] - s.origin[2];
+        const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+        std::printf("  setup %zu at (%.3f, %.3f, %.3f)   %.2f m away\n",
+                    i, s.origin[0], s.origin[1], s.origin[2], dist);
+        if (dist > p.maxRange) {
+            std::printf("      out of range — contributes nothing\n\n");
+            continue;
+        }
+
+        double x = world[0], y = world[1], z = world[2];
+        s.worldToScanner.apply(x, y, z);
+        double az, el, r;
+        rimg::toSpherical(x, y, z, az, el, r);
+        std::printf("      direction   az %7.3f rad (%7.2f deg)   el %7.3f rad (%7.2f deg)\n",
+                    az, az * 57.29577951308232, el, el * 57.29577951308232);
+        std::printf("      raster      row %.2f of %u   col %.2f of %u\n",
+                    im.rowCoord(el), im.rows, im.colCoord(az), im.cols);
+
+        uint32_t row, col;
+        if (!im.cellOf(az, el, row, col)) {
+            std::printf("      cell        NONE — this direction is off the raster%s\n",
+                        im.map.valid ? "" : " (the mapping was refused)");
+            std::printf("      verdict     says nothing\n\n");
+            continue;
+        }
+        const rimg::Status st = im.statusAt(row, col);
+        const double surface  = im.rangeAt(row, col);
+        std::printf("      cell        [%u, %u]  %s", row, col, rimg::statusName(st));
+        if (st == rimg::Status::Hit)      std::printf("  surface at %.3f m", surface);
+        if (st == rimg::Status::NoReturn) std::printf("  clears to %.3f m", surface);
+        std::printf("\n");
+
+        const uint8_t bits = carve::evidenceAt(s, p, world[0], world[1], world[2]);
+        total |= bits;
+        std::printf("      verdict     %s\n\n",
+                    (bits & carve::kVisible)  ? "VISIBLE — this setup saw through it"
+                  : (bits & carve::kOccupied) ? "OCCUPIED — a surface is measured here"
+                                              : "says nothing");
+    }
+
+    std::printf("combined    : %s\n",
+                (total & carve::kVisible) ? "VISIBLE"
+              : (total & carve::kOccupied) ? "OCCUPIED"
+                                           : "UNOBSERVED — no setup said anything about it");
     return 0;
 }
 
@@ -362,6 +505,7 @@ void usage() {
         "\n"
         "usage: e57cov info  [--crc] [--max-range <m>] <file.e57> [more.e57 ...]\n"
         "       e57cov carve [options] <file.e57> [more.e57 ...]\n"
+        "       e57cov probe <x> <y> <z> <file.e57> [more.e57 ...]\n"
         "\n"
         "  info    Inspect scans and audit format conventions. Reports how each\n"
         "          file represents no-return rays and which coordinate frame its\n"
@@ -372,6 +516,11 @@ void usage() {
         "          actually observed. This is the CPU reference: correct, single\n"
         "          threaded, and slow — it exists to be the oracle the GPU path\n"
         "          is checked against. Use --max-tiles to sample a large site.\n"
+        "\n"
+        "  probe   Explain one point: for every setup, the direction to it, the\n"
+        "          raster cell that direction lands on, what that cell holds, and\n"
+        "          the verdict. This is the tool for \"why is the inside of the\n"
+        "          house being cleared?\" — a question no aggregate can answer.\n"
         "\n"
         "  --crc   (info) Also verify every page checksum (costs a full pass).\n"
         "  --max-range <m>\n"
@@ -409,6 +558,11 @@ void usage() {
         "          clears a pencil of space to --max-range through solid\n"
         "          geometry. Raise the fraction if a scan drops heavily; set the\n"
         "          radius to 0 to believe every empty cell, as before.\n"
+        "  --classify\n"
+        "          (carve) Keep only unobserved space you cannot reach from\n"
+        "          outside without crossing observed space. Off by default: it\n"
+        "          also excludes a building interior whose walls were only ever\n"
+        "          seen from one side, which is usually the space you wanted.\n"
         "  --threads <n>\n"
         "          (carve) Worker threads over the tile list. Default 0, the\n"
         "          machine's count. The answer is identical at any count.\n"
@@ -424,7 +578,7 @@ int main(int argc, char** argv) {
 
     const std::string cmd = argv[1];
     if (cmd == "-h" || cmd == "--help" || cmd == "help") { usage(); return 0; }
-    if (cmd != "info" && cmd != "carve") {
+    if (cmd != "info" && cmd != "carve" && cmd != "probe") {
         std::printf("unknown command '%s'\n\n", cmd.c_str());
         usage();
         return 2;
@@ -456,6 +610,7 @@ int main(int argc, char** argv) {
             continue;
         }
         if (std::strcmp(argv[i], "--solid") == 0) { co.solid = true; continue; }
+        if (std::strcmp(argv[i], "--classify") == 0) { co.classifyVoids = true; continue; }
         if (std::strcmp(argv[i], "--sky-radius") == 0 && i + 1 < argc) {
             co.skyRadius = uint32_t(std::strtoul(argv[++i], nullptr, 10));
             continue;
@@ -497,6 +652,17 @@ int main(int argc, char** argv) {
     }
     if (paths.empty()) { usage(); return 2; }
 
+    if (cmd == "probe") {
+        if (paths.size() < 4) {
+            std::printf("usage: e57cov probe <x> <y> <z> <file.e57> [more.e57 ...]\n");
+            return 2;
+        }
+        const double world[3] = {std::strtod(paths[0].c_str(), nullptr),
+                                 std::strtod(paths[1].c_str(), nullptr),
+                                 std::strtod(paths[2].c_str(), nullptr)};
+        const std::vector<std::string> files(paths.begin() + 3, paths.end());
+        return probePoint(files, co, world);
+    }
     if (cmd == "carve") return carveCorpus(paths, co);
 
     int failures = 0;

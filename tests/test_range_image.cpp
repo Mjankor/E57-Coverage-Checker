@@ -56,6 +56,7 @@ struct Lcg {
 static constexpr int    kRows = 60;
 static constexpr int    kCols = 120;
 static constexpr double kTau  = 6.28318530717958648;
+static constexpr double kPi   = 3.14159265358979323846;
 static double azOf(int col) { return double(col) * kTau / double(kCols); }
 static double elOf(int row) { return -0.5 + double(row) * (1.0 / double(kRows)); }
 static double rangeOf(double az, double el) {
@@ -129,14 +130,14 @@ static void testGridPath() {
     // This is the whole point: the misses are known exactly, not inferred.
     CHECK(img.diag.hits == records, "every stored record became a hit");
     CHECK(img.diag.hits + img.diag.noReturns + img.diag.outsideFov == img.cellCount(),
-          "every cell is a hit, a believed no-return, or an unsampled direction");
-    // The fixture drops a scattered 10% of returns, which is what a scanner does
-    // on dark or glancing surfaces. Those cells are empty in the file and
-    // indistinguishable from sky, and they must NOT be believed: each one would
-    // otherwise clear a pencil of space to maxRange straight through the scene.
-    CHECK(img.diag.isolatedNoReturns > 0, "scattered drops are found");
-    CHECK(img.diag.outsideFov == img.diag.isolatedNoReturns,
-          "and are the only cells treated as unsampled");
+          "every cell is a hit, a no-return, or an unsampled direction");
+    // A ray either returned or it did not. An empty cell is a ray that came back
+    // with nothing, and it clears along its path whatever it passed through —
+    // sky, a window, or a surface too dark to register. The only cells not
+    // believed are the unsampled band under the tripod, and this fixture's
+    // empty band is at the sky end.
+    CHECK(img.diag.isolatedNoReturns == 0,
+          "no cell is second-guessed: the neighbourhood filter is off by default");
     CHECK_NEAR(img.diag.fillFraction, double(records) / double(kRows * kCols), 1e-9,
                "fill fraction reported correctly");
 
@@ -360,7 +361,7 @@ static void testPyramid() {
 // dropped return and clears nothing. Nothing in the file tells them apart, so
 // this is the only thing that does.
 static void testSkyVersusDroppedReturns() {
-    std::printf("range image: sky is believed, scattered drops are not\n");
+    std::printf("range image: the optional drop filter, when asked for\n");
 
     rimg::RangeImage im;
     im.rows = 120; im.cols = 240;
@@ -392,7 +393,12 @@ static void testSkyVersusDroppedReturns() {
             }
     CHECK(drops > 100, "the fixture scattered some drops");
 
+    // The filter is off by default now — a ray either returned or it did not.
+    // It is switched on here because the machinery is still wanted for scans
+    // that genuinely drop, and it still has to work when asked for.
     rimg::Options opt;
+    opt.noReturnRadius   = 2;
+    opt.noReturnFraction = 0.75;
     rimg::filterIsolatedNoReturns(im, opt);
 
     // The sky band survives, apart from a couple of rows of erosion at its
@@ -435,10 +441,188 @@ static void testSkyVersusDroppedReturns() {
     rimg::RangeImage plain;
     plain.rows = 20; plain.cols = 20;
     plain.cells.assign(400, rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)});
-    rimg::Options off;
-    off.noReturnRadius = 0;
+    rimg::Options off;      // the default
     rimg::filterIsolatedNoReturns(plain, off);
+    CHECK(off.noReturnRadius == 0, "and radius 0 is the default");
     CHECK(plain.diag.isolatedNoReturns == 0, "radius 0 switches the filter off");
+}
+
+// The failure the round-trip check exists to catch, and the one the residual
+// alone cannot.
+//
+// Many terrestrial scanners turn the head through 180 degrees while the mirror
+// sweeps a full 360. Each column is then a complete vertical circle: rows in the
+// first half look forward at descending elevation, rows in the second half look
+// BACKWARD — azimuth plus 180 degrees — at ascending elevation. Elevation
+// against row is a triangle wave, not a line.
+//
+// Fitting a line to it produces a mapping that is confidently wrong. A voxel
+// overhead is sent to a row holding ground and comes back unknown; a voxel
+// inside a building is sent to a row holding sky and gets cleared to maxRange.
+// That is sky uncarved and building interiors carved away, which is exactly what
+// the field reported.
+static void testDoubleCoveredMirrorIsRefused() {
+    std::printf("range image: a double-covered mirror sweep is refused\n");
+
+    const int rows = 200, cols = 100;
+    const std::string path = tmpPath("doublecover");
+
+    fixture::Scan sc;
+    sc.name = "double cover";
+    sc.hasPose = true;
+    sc.q[0] = 1.0;
+    sc.hasIndexBounds = true;
+    sc.rowMin = 0; sc.rowMax = rows - 1;
+    sc.colMin = 0; sc.colMax = cols - 1;
+    sc.fields = {
+        {"cartesianX",  e57::FieldType::FloatDouble},
+        {"cartesianY",  e57::FieldType::FloatDouble},
+        {"cartesianZ",  e57::FieldType::FloatDouble},
+        {"rowIndex",    e57::FieldType::Integer, 0, rows - 1},
+        {"columnIndex", e57::FieldType::Integer, 0, cols - 1},
+    };
+    sc.data.assign(5, {});
+    for (int r = 0; r < rows; ++r) {
+        // Mirror angle sweeps a full turn over the rows.
+        const double theta = double(r) * kTau / double(rows);
+        for (int c = 0; c < cols; ++c) {
+            // Head sweeps only half a turn over the columns.
+            const double head = double(c) * kPi / double(cols);
+            double az, el;
+            if (theta <= kPi * 0.5 || theta > kPi * 1.5) {
+                az = head;
+                el = (theta <= kPi * 0.5) ? (kPi * 0.5 - theta) : (kPi * 2.5 - theta) - kPi;
+            } else {
+                az = head + kPi;              // looking out the back
+                el = theta - kPi * 1.5;
+            }
+            el = std::max(-1.4, std::min(1.4, el));
+            const double rr = 10.0;
+            const double ce = std::cos(el);
+            sc.data[0].push_back(rr * ce * std::cos(az));
+            sc.data[1].push_back(rr * ce * std::sin(az));
+            sc.data[2].push_back(rr * std::sin(el));
+            sc.data[3].push_back(double(r));
+            sc.data[4].push_back(double(c));
+        }
+    }
+    CHECK(fixture::write(path, {sc}, 512), "double-cover fixture written");
+
+    e57::Reader rd;
+    std::string err;
+    CHECK(rd.open(path, err), err.empty() ? "opened" : err.c_str());
+
+    rimg::Options opt;
+    rimg::RangeImage img;
+    const bool built = rimg::build(rd, 0, opt, img, err);
+    CHECK(built, "the image still builds — the raster is there, the model is not");
+    if (!built) return;
+
+    CHECK(img.map.roundTripFraction >= 0.0,
+          "the round-trip check ran, even though the residual had already condemned the fit");
+    CHECK(img.map.roundTripFraction < 0.9,
+          "and most of the scan's own points do not land on their own cell");
+    CHECK(!img.map.valid,
+          "so the mapping is refused rather than used to produce confident nonsense");
+    CHECK(!img.diag.note.empty(), "and the reason is recorded");
+
+    // Refused means every lookup says OutsideFov, which clears nothing. A carve
+    // over this scan reports everything unobserved — useless, but honest, and
+    // very obviously wrong rather than quietly wrong.
+    rimg::Status st; double range;
+    CHECK(!img.sample(0.3, 0.2, st, range), "a refused mapping answers nothing");
+    CHECK(st == rimg::Status::OutsideFov, "and says so");
+}
+
+// The counterpart: an ordinary single-sweep raster must sail through, or the
+// check is just a way of rejecting good data.
+static void testOrdinaryRasterRoundTrips() {
+    std::printf("range image: an ordinary raster round-trips\n");
+    const std::string path = tmpPath("roundtrip");
+    uint64_t records = 0;
+    CHECK(writeGridScan(path, 4, 0.05, records), "fixture written");
+
+    e57::Reader rd;
+    std::string err;
+    CHECK(rd.open(path, err), err.empty() ? "opened" : err.c_str());
+    rimg::Options opt;
+    rimg::RangeImage img;
+    CHECK(rimg::build(rd, 0, opt, img, err), err.empty() ? "built" : err.c_str());
+    CHECK(img.map.valid, "the mapping is accepted");
+    CHECK(img.map.roundTripFraction > 0.99,
+          "and essentially every point lands back on its own cell");
+}
+
+// The blind cone under the tripod is the one empty region that does not mean
+// "the ray came back with nothing" — no ray was fired there at all. Believed as
+// a no-return it clears a cone to maxRange straight down through the ground
+// under every setup.
+static void testNadirBandIsUnsampled() {
+    std::printf("range image: the blind cone under the tripod clears nothing\n");
+
+    rimg::RangeImage im;
+    im.rows = 100; im.cols = 200;
+    im.cells.assign(im.cellCount(), rimg::Cell{});
+    auto at = [&](uint32_t r, uint32_t c) -> rimg::Cell& {
+        return im.cells[size_t(r) * im.cols + c];
+    };
+    for (uint32_t r = 0; r < im.rows; ++r)
+        for (uint32_t c = 0; c < im.cols; ++c)
+            at(r, c) = rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+    // Returns everywhere except a band at each end: rows 0..11 look down into
+    // the tripod's shadow and were never fired; rows 88..99 are sky.
+    for (uint32_t r = 12; r < 88; ++r)
+        for (uint32_t c = 0; c < im.cols; ++c)
+            at(r, c) = rimg::Cell{1000, uint8_t(rimg::Status::Hit)};
+    // Elevation rises with row, so row 0 is the nadir end.
+    im.map.el0 = -1.3; im.map.dElPerRow = 0.026;
+    im.map.az0 = 0.0;  im.map.dAzPerCol = kTau / 200.0;
+    im.map.valid = true;
+    im.diag.noReturns = 12 * 200 + 12 * 200;
+
+    rimg::Options opt;
+    rimg::markNadirBand(im, opt);
+
+    CHECK(im.diag.nadirBandRows == 12, "the twelve unsampled rows are found");
+    CHECK(im.diag.nadirBandCells == 12u * 200u, "and all their cells");
+    CHECK(im.statusAt(0, 0) == rimg::Status::OutsideFov, "the blind cone clears nothing");
+    CHECK(im.statusAt(11, 5) == rimg::Status::OutsideFov, "all the way to its edge");
+    CHECK(im.rangeAt(0, 0) == 0.0, "and carries no range to be mistaken for one");
+    // The sky band at the other end is a no-return like any other and still
+    // clears: it is what carves the volume above a site.
+    CHECK(im.statusAt(99, 0) == rimg::Status::NoReturn, "sky is untouched");
+    CHECK(im.rangeAt(99, 0) > 40.0, "and still clears to the rated range");
+
+    // With the mapping the other way up, the band is found at the other end.
+    rimg::RangeImage flip = im;
+    for (uint32_t r = 0; r < flip.rows; ++r)
+        for (uint32_t c = 0; c < flip.cols; ++c)
+            flip.cells[size_t(r) * flip.cols + c] =
+                rimg::Cell{uint16_t(r >= 12 && r < 88 ? 1000 : 4500),
+                           uint8_t(r >= 12 && r < 88 ? rimg::Status::Hit
+                                                     : rimg::Status::NoReturn)};
+    flip.map.dElPerRow = -0.026;      // elevation falls with row: nadir is last
+    flip.diag = rimg::Diagnostics{};
+    rimg::markNadirBand(flip, opt);
+    CHECK(flip.diag.nadirBandRows == 12, "the band is found at the far end too");
+    CHECK(flip.statusAt(99, 0) == rimg::Status::OutsideFov, "which is now the nadir end");
+    CHECK(flip.statusAt(0, 0) == rimg::Status::NoReturn, "and row 0 is now the sky");
+
+    // A hole in the middle of the field of view is a measurement, not a blind
+    // cone, and must not be swallowed.
+    rimg::RangeImage holed = im;
+    for (uint32_t r = 0; r < holed.rows; ++r)
+        for (uint32_t c = 0; c < holed.cols; ++c)
+            holed.cells[size_t(r) * holed.cols + c] =
+                rimg::Cell{1000, uint8_t(rimg::Status::Hit)};
+    for (uint32_t r = 40; r < 50; ++r)
+        for (uint32_t c = 40; c < 50; ++c)
+            holed.cells[size_t(r) * holed.cols + c] =
+                rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+    holed.diag = rimg::Diagnostics{};
+    rimg::markNadirBand(holed, opt);
+    CHECK(holed.diag.nadirBandRows == 0, "a hole in the middle is not a blind cone");
+    CHECK(holed.statusAt(45, 45) == rimg::Status::NoReturn, "and still clears");
 }
 
 int main() {
@@ -446,6 +630,9 @@ int main() {
     testGridPath();
     testPyramid();
     testSkyVersusDroppedReturns();
+    testNadirBandIsUnsampled();
+    testDoubleCoveredMirrorIsRefused();
+    testOrdinaryRasterRoundTrips();
     testMappingAndLookup();
     testDownsampleIsConservative();
     testRefusesWhatItCannotIdentify();

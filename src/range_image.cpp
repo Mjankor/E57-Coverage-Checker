@@ -73,6 +73,13 @@ struct Sample {
     double   az, el;
 };
 
+// How many points to hold back for the round-trip check, and how widely to
+// space them. Spread across the whole scan rather than taken from its start,
+// because a mapping can be right for one band of rows and wrong for another —
+// which is exactly the failure a double-covered mirror sweep produces.
+constexpr uint64_t kRoundTripStride  = 37;
+constexpr size_t   kRoundTripSamples = 200000;
+
 } // namespace
 
 bool RangeImage::cellOf(double az, double el, uint32_t& row, uint32_t& col) const {
@@ -175,6 +182,62 @@ void filterIsolatedNoReturns(RangeImage& im, const Options& opt) {
     if (demoted) {
         im.diag.noReturns  -= std::min<uint64_t>(demoted, im.diag.noReturns);
         im.diag.outsideFov += demoted;
+    }
+}
+
+// Marks the unsampled band at the nadir end of the raster as a direction the
+// scanner never looked.
+//
+// This is the one place where an empty cell does not mean "the ray came back
+// with nothing". Every terrestrial scanner has a blind cone beneath it where the
+// tripod is; those rows were never fired. Believed as no-returns they clear a
+// cone to maxRange straight down through the ground under every setup.
+//
+// Only a contiguous band running off the end of the raster counts. A hole in the
+// middle of the field of view is not a blind cone, it is a measurement, and this
+// does not touch it.
+void markNadirBand(RangeImage& im, const Options& opt) {
+    im.diag.nadirBandRows  = 0;
+    im.diag.nadirBandCells = 0;
+    if (!opt.nadirBandUnsampled || im.rows == 0 || im.cols == 0) return;
+    if (std::fabs(im.map.dElPerRow) < 1e-12) return;
+
+    // Which end of the raster looks down. The mapping's sign says it: row 0 is
+    // the nadir end when elevation increases with row.
+    const bool nadirIsFirstRow = im.map.dElPerRow > 0;
+
+    auto rowIsEmpty = [&](uint32_t r) {
+        const Cell* row = &im.cells[size_t(r) * im.cols];
+        for (uint32_t c = 0; c < im.cols; ++c)
+            if (Status(row[c].status) == Status::Hit) return false;
+        return true;
+    };
+
+    uint32_t band = 0;
+    if (nadirIsFirstRow) {
+        while (band < im.rows && rowIsEmpty(band)) ++band;
+    } else {
+        while (band < im.rows && rowIsEmpty(im.rows - 1 - band)) ++band;
+    }
+    // A raster with no returns at all is a different problem; do not swallow it
+    // whole as a blind cone.
+    if (band == 0 || band >= im.rows) return;
+
+    for (uint32_t i = 0; i < band; ++i) {
+        const uint32_t r = nadirIsFirstRow ? i : (im.rows - 1 - i);
+        Cell* row = &im.cells[size_t(r) * im.cols];
+        for (uint32_t c = 0; c < im.cols; ++c) {
+            if (Status(row[c].status) == Status::NoReturn) {
+                row[c].status  = uint8_t(Status::OutsideFov);
+                row[c].rangeCm = 0;
+                ++im.diag.nadirBandCells;
+            }
+        }
+    }
+    im.diag.nadirBandRows = band;
+    if (im.diag.nadirBandCells) {
+        im.diag.noReturns  -= std::min<uint64_t>(im.diag.nadirBandCells, im.diag.noReturns);
+        im.diag.outsideFov += im.diag.nadirBandCells;
     }
 }
 
@@ -438,6 +501,13 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
             const uint32_t c = uint32_t(cc) / step;
             const size_t   i = size_t(r) * out.cols + c;
 
+            // Every so often, remember where this point came from. Once the
+            // mapping is fitted these get put back through it: a model of the
+            // raster that cannot reproduce the raster's own points is not a
+            // model of anything.
+            if ((decoded % kRoundTripStride) == 0 && samples.size() < kRoundTripSamples)
+                samples.push_back({r, c, float(range), az, el});
+
             const uint32_t cm = uint32_t(std::min(range * 100.0, 65535.0));
             // Minimum range wins: several source cells can land in one binned
             // cell, and clearing to the nearest of them never over-clears.
@@ -498,17 +568,62 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     if (fitLine(azByCol, colN, a, b, res)) {
         out.map.az0 = a; out.map.dAzPerCol = b; out.map.azResidualRad = res;
     }
+    // The check the residual is not a substitute for: put the scan's own points
+    // back through the mapping and see whether they land where they came from.
+    //
+    // Computed before the verdict rather than after it, and with the mapping
+    // applied directly rather than through cellOf, so the number is reported
+    // even when the residual has already condemned the fit. It is the more
+    // informative of the two — a residual says a line fits the per-row means, a
+    // round trip says lookups reach the right cell — and a diagnostic that
+    // vanishes exactly when something is wrong is no use to anyone.
+    if (!samples.empty() && std::fabs(out.map.dElPerRow) > 1e-12 &&
+        std::fabs(out.map.dAzPerCol) > 1e-12) {
+        uint64_t landed = 0;
+        for (const Sample& sm : samples) {
+            const long ri = std::lround((sm.el - out.map.el0) / out.map.dElPerRow);
+            if (ri < 0 || ri >= long(out.rows)) continue;
+            long ci = std::lround(angleDiff(sm.az, out.map.az0) / out.map.dAzPerCol);
+            ci %= long(out.cols);
+            if (ci < 0) ci += long(out.cols);
+            // One cell of slack on each axis: a direction on a cell boundary can
+            // legitimately round either way, and binning down puts several
+            // source cells into one.
+            const long dr = ri - long(sm.row);
+            long dc = ci - long(sm.col);
+            if (dc >  long(out.cols) / 2) dc -= long(out.cols);
+            if (dc < -long(out.cols) / 2) dc += long(out.cols);
+            if (dr >= -1 && dr <= 1 && dc >= -1 && dc <= 1) ++landed;
+        }
+        out.map.roundTripFraction = double(landed) / double(samples.size());
+    }
+
     out.map.valid = out.map.elResidualRad >= 0 && out.map.azResidualRad >= 0 &&
                     out.map.elResidualRad <= opt.maxMappingResidualRad &&
                     out.map.azResidualRad <= opt.maxMappingResidualRad &&
                     std::fabs(out.map.dElPerRow) > 1e-12 &&
-                    std::fabs(out.map.dAzPerCol) > 1e-12;
+                    std::fabs(out.map.dAzPerCol) > 1e-12 &&
+                    out.map.roundTripFraction >= opt.minRoundTripFraction;
+
     if (!out.map.valid) {
-        char buf[192];
-        std::snprintf(buf, sizeof(buf),
-                      "angular mapping does not fit a uniform raster "
-                      "(residuals %.4f rad row, %.4f rad col)",
-                      out.map.elResidualRad, out.map.azResidualRad);
+        char buf[420];
+        if (out.map.roundTripFraction >= 0.0 &&
+            out.map.roundTripFraction < opt.minRoundTripFraction) {
+            std::snprintf(buf, sizeof(buf),
+                          "the fitted angular mapping does not describe this raster: only "
+                          "%.1f%% of the scan's own points land back on their own cell when "
+                          "put through it (residuals %.4f rad row, %.4f rad col). Lookups "
+                          "would reach the wrong direction — sky read as ground, and "
+                          "building interiors read as clear space",
+                          100.0 * out.map.roundTripFraction,
+                          out.map.elResidualRad, out.map.azResidualRad);
+        } else {
+            std::snprintf(buf, sizeof(buf),
+                          "angular mapping does not fit a uniform raster "
+                          "(residuals %.4f rad row, %.4f rad col, round trip %.1f%%)",
+                          out.map.elResidualRad, out.map.azResidualRad,
+                          100.0 * std::max(0.0, out.map.roundTripFraction));
+        }
         out.diag.note = buf;
     }
 
@@ -530,11 +645,23 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         out.cells[i].rangeCm = uint16_t(std::min(opt.maxRange * 100.0, 65535.0));
         ++out.diag.noReturns;
     }
-    // Before the fill, every empty cell is a no-return. This is what decides
-    // which of them are believed.
+    // The blind cone under the tripod: never sampled, so it establishes nothing.
+    // Everything else empty is a ray that was fired and came back with nothing,
+    // and clears along its path — whatever it passed through on the way.
+    markNadirBand(out, opt);
+    // Off by default; see rimg::Options.
     filterIsolatedNoReturns(out, opt);
 
     out.diag.fillFraction = double(out.diag.hits) / double(out.cellCount());
+    if (out.diag.nadirBandRows) {
+        char buf[220];
+        std::snprintf(buf, sizeof(buf),
+                      "%u unsampled rows at the nadir end (%llu cells) treated as the blind "
+                      "cone under the tripod rather than as clear space",
+                      out.diag.nadirBandRows, (unsigned long long)out.diag.nadirBandCells);
+        if (!out.diag.note.empty()) out.diag.note += "; ";
+        out.diag.note += buf;
+    }
     if (out.diag.isolatedNoReturns) {
         char buf[220];
         std::snprintf(buf, sizeof(buf),

@@ -60,36 +60,46 @@ struct Options {
     // A residual above this means the row/column grid is not a uniform raster
     // and the linear angular model would misplace lookups.
     double   maxMappingResidualRad = 0.02;   // ~1.15 degrees
+    // The share of a scan's own points that must land back on their own cell
+    // when put through the mapping. Below this the mapping is not describing the
+    // raster and the image is refused rather than used to produce confident
+    // nonsense. Not 1.0: a point on a cell boundary can legitimately round to
+    // its neighbour, and binning down puts several source cells into one.
+    double   minRoundTripFraction = 0.90;
 
-    // A no-return is only believed when its neighbourhood is mostly no-return.
+    // OFF by default, and deliberately so.
     //
-    // The file cannot tell a ray that saw sky from a ray that hit something and
-    // came back empty — dark paint, glossy tile, wet ground, grazing incidence.
-    // Both are an absent record in the grid. Believing them all is catastrophic:
-    // a dropped return in the middle of a wall clears a pencil of space to
-    // maxRange straight through the building, and a scan with a few per cent of
-    // them threads those pencils through every occluded volume.
+    // The rule this instrument actually follows is simple: a ray either returned
+    // or it did not, and one that did not returned nothing because there was
+    // nothing within range along it. That holds whether it went to the sky, out
+    // of a window, or into a dark surface that reflected too little to register.
+    // The carve clears along it either way. Second-guessing that from the shape
+    // of the empty region — treating a scattered empty cell as a dropped return
+    // rather than as a measurement — substitutes a guess about the instrument
+    // for what the instrument reported.
     //
-    // What separates the two is company. Sky comes in large connected regions;
-    // a dropped return is surrounded by neighbours that hit something. So a
-    // no-return is trusted only when most of a small window around it is also
-    // no-return, and is otherwise treated as a direction the scanner said
-    // nothing about — which clears nothing, the conservative reading.
+    // The machinery is kept because the guess is sometimes wanted: a scan of
+    // dark or wet surfaces does drop returns, and each one then clears a pencil
+    // of space to maxRange. On a fixture with a scattered 5% of returns removed,
+    // believing them all took the drawn frontier from 42,192 voxels to
+    // 4,035,105. Set a radius to switch it on; leave it at 0 for what the file
+    // says.
     //
-    // Radius 2 is a 5x5 window: large enough that a scattered drop cannot
-    // muster the required share, small enough that genuine sky is only eroded by
-    // about two cells at its silhouette edges.
-    //
-    // Three quarters rather than a bare majority, because a bare majority is not
-    // robust to a scan that drops heavily: at a 40% drop rate, chance clusters
-    // reach a majority often enough to matter, and 0.6 let 2.1 M spurious
-    // frontier voxels through where 0.75 let 0.22 M. It costs nothing at low
-    // drop rates — at 0% the two are identical to the voxel.
-    //
-    // Set the radius to 0 to believe every empty cell, which is what this did
-    // before the filter existed.
-    uint32_t noReturnRadius   = 2;
+    // The one exception, and it is not a guess: the blind cone under the tripod,
+    // handled separately below. Those directions were never sampled at all.
+    uint32_t noReturnRadius   = 0;
     double   noReturnFraction = 0.75;
+
+    // Treat the unsampled band at the nadir end of the raster as a direction the
+    // scanner never looked, rather than as a no-return.
+    //
+    // Every terrestrial scanner has a blind cone beneath it where the tripod is.
+    // Those rows are empty in the grid for a completely different reason from
+    // sky: no ray was fired, so nothing was established. Believed as no-returns
+    // they clear a cone to maxRange straight down through the ground under every
+    // setup — DESIGN.md's original trap, and the only place where an empty cell
+    // genuinely does not mean what the others mean.
+    bool     nadirBandUnsampled = true;
 };
 
 // az(col) = az0 + col * dAzPerCol, el(row) = el0 + row * dElPerRow.
@@ -98,6 +108,22 @@ struct Mapping {
     double el0 = 0, dElPerRow = 0;
     double azResidualRad = -1;   // max deviation of the measured table from the line
     double elResidualRad = -1;
+    // The fraction of the scan's own points that, put back through cellOf,
+    // land on the cell they were decoded from.
+    //
+    // This is the check that matters, and the residual above is not a substitute
+    // for it. A small residual says a line fits the per-row means; it says
+    // nothing about whether a lookup in a given direction reaches the right
+    // cell. The two come apart whenever the raster is not what the linear model
+    // assumes — a scanner that sweeps the mirror through more than 180 degrees
+    // covers each column twice, and the fitted line through half of a triangle
+    // wave can look perfectly good while sending every lookup in the upper half
+    // of the scan to a cell in the lower half.
+    //
+    // A voxel looking at the sky then samples a cell containing ground and comes
+    // out unknown; a voxel inside a building samples a cell containing sky and
+    // gets cleared. Both were observed in the field before this was measured.
+    double roundTripFraction = -1.0;
     bool   valid = false;
 };
 
@@ -129,7 +155,10 @@ struct Diagnostics {
     // OutsideFov. A large number here means the scan drops returns, which is
     // worth knowing about the instrument and the surfaces, not just about this
     // run: every one of them would otherwise have cleared space to maxRange.
-    uint64_t isolatedNoReturns = 0;
+    // No-returns demoted to OutsideFov, and why.
+    uint64_t isolatedNoReturns = 0;   // by the optional neighbourhood filter
+    uint64_t nadirBandCells    = 0;   // the blind cone under the tripod
+    uint32_t nadirBandRows     = 0;
     bool   hasReturnBounds = false;
     double returnMin[3] = {0, 0, 0};
     double returnMax[3] = {0, 0, 0};
@@ -257,8 +286,9 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
 // no use for it and should not pay the memory.
 void buildPyramid(RangeImage& im);
 
-// Exposed for testing: the sky-versus-dropped-return decision.
+// Exposed for testing.
 void filterIsolatedNoReturns(RangeImage& im, const Options& opt);
+void markNadirBand(RangeImage& im, const Options& opt);
 
 const char* statusName(Status s);
 

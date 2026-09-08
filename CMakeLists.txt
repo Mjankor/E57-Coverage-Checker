@@ -22,6 +22,7 @@ add_library(e57cov_core STATIC
   src/indexer.cpp
   src/range_image.cpp
   src/carve.cpp
+  src/voids.cpp
   src/visibility.cpp)
 target_include_directories(e57cov_core PUBLIC src)
 # The tile loop is parallel; the standard library needs the platform's thread
@@ -69,3 +70,8 @@ add_executable(test_visibility tests/test_visibility.cpp)
 target_link_libraries(test_visibility PRIVATE e57cov_core)
 target_compile_options(test_visibility PRIVATE -Wall -Wextra)
 add_test(NAME visibility COMMAND test_visibility)
+
+add_executable(test_voids tests/test_voids.cpp)
+target_link_libraries(test_voids PRIVATE e57cov_core)
+target_compile_options(test_voids PRIVATE -Wall -Wextra)
+add_test(NAME voids COMMAND test_voids)

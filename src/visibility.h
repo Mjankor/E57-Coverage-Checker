@@ -35,6 +35,7 @@
 #include "carve.h"
 #include "lod.h"
 #include "range_image.h"
+#include "voids.h"
 
 #include <cstdint>
 #include <functional>
@@ -82,16 +83,27 @@ struct Options {
     // so it is in metres rather than derived from the voxel size.
     double   domainMargin = 2.0;
 
-    // Total range-image cells across the whole corpus, which is what actually
-    // bounds memory: one 2500 x 5280 scan is 40 MB, so a thousand of them at
-    // full resolution is not a thing that fits. The per-scan cap is this
-    // divided by the scan count, and binning down takes the minimum range per
-    // bin, which clears less rather than more.
     // Passed through to rimg::Options — how much company a no-return needs
-    // before it is believed to be sky rather than a dropped return. The single
-    // most consequential setting after the domain: see rimg::Options.
+    // before it is believed to be sky rather than a dropped return. See
+    // rimg::Options; believing a dropped return clears a pencil of space to
+    // maxRange straight through the building.
     uint32_t skyRadius   = 2;
     double   skyFraction = 0.75;
+
+    // Separate voids from the rest of the world — see voids.h.
+    //
+    // OFF by default. It answers a narrower question than the one usually being
+    // asked: it keeps only unobserved space you cannot reach from outside
+    // without crossing observed space, which excludes a building interior whose
+    // walls were only ever seen from one side. That is often exactly the space
+    // you wanted reported, so this hides more than it helps until the enclosure
+    // it depends on is actually there.
+    //
+    // Useful when the site is genuinely enclosed and the question is "what did I
+    // miss inside it". Needs one byte per voxel of the whole domain at once,
+    // because connectivity cannot be answered tile by tile.
+    bool     classifyVoids = false;
+    uint64_t classifyBudgetBytes = 6ull << 30;
 
     uint64_t totalImageCells = 512ull << 20;
     uint32_t minImageCells   = 1u << 20;   // never bin below this per scan
@@ -138,6 +150,11 @@ struct Result {
     uint64_t carverDisagreements = 0;
     uint64_t carverVoxelsCompared = 0;
 
+    // What the connectivity pass found, when it ran.
+    bool         classified = false;
+    voids::Report voidReport;
+    std::string  classifySkipped;      // why not, when it did not run
+
     // The region actually asked about, and how much smaller it made the job.
     carve::Domain domain;
     double        domainVolume = 0;      // m^3 of the domain box, 0 when unbounded
@@ -157,9 +174,12 @@ struct Result {
 
     std::string note;
 
-    double unknownVolume() const {
-        return double(stats.unknown) * voxelSize * voxelSize * voxelSize;
-    }
+    double voxelVolume() const { return voxelSize * voxelSize * voxelSize; }
+    double unknownVolume() const { return double(stats.unknown) * voxelVolume(); }
+    // The deliverable when the classification ran: space enclosed by what the
+    // scanners saw, and therefore genuinely missed rather than merely elsewhere.
+    double enclosedVolume() const { return double(voidReport.enclosed) * voxelVolume(); }
+    double exteriorVolume() const { return double(voidReport.exterior) * voxelVolume(); }
 };
 
 // The whole job: open each file, build a range image per scan, carve, reduce.

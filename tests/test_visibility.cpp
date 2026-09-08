@@ -45,9 +45,11 @@ static std::string tmpPath(const char* name) {
 static constexpr double kTau = 6.28318530717958648;
 static constexpr int    kRows = 90, kCols = 180;
 
-// A room 10 x 8 x 3 with an interior wall at x = 1 spanning y in [-4, 0], so
-// the region behind it is shadowed from a setup at negative x and open to one
-// at positive x. Rays that escape the room are no-returns.
+// A room 10 x 8 x 3 with an interior wall at x = 1 spanning y in [-4, 0], so the
+// region behind it is shadowed from a setup at negative x and open to one at
+// positive x. It also contains a sealed cupboard, 2 x 2 x 2, whose inside no ray
+// can enter: that is the one thing in the scene that is genuinely a coverage
+// failure, and the classification has to find it and nothing else.
 static bool hitRoom(double ox, double oy, double oz,
                     double dx, double dy, double dz, double& t) {
     t = 1e300;
@@ -66,7 +68,18 @@ static bool hitRoom(double ox, double oy, double oz,
     plane(dy,  4 - oy, -5, 5, 0, 3, 0, 2);
     plane(dz,  0 - oz, -5, 5, -4, 4, 0, 1);
     plane(dz,  3 - oz, -5, 5, -4, 4, 0, 1);
-    plane(dx,  1 - ox, -4, 0, 0, 3, 1, 2);
+    plane(dx,  1 - ox, -4, 0, 0, 3, 1, 2);   // interior wall
+
+    // A sealed cupboard in the far corner: x in [-4,-2], y in [-3,-1], and up to
+    // z = 2, standing on the floor. Five faces plus the floor, so every ray stops
+    // on its outside and its interior is unobservable from anywhere. Placed well
+    // away from both setups — a setup standing inside it would see its interior
+    // and there would be nothing to find.
+    plane(dx, -4 - ox, -3, -1, 0, 2, 1, 2);
+    plane(dx, -2 - ox, -3, -1, 0, 2, 1, 2);
+    plane(dy, -3 - oy, -4, -2, 0, 2, 0, 2);
+    plane(dy, -1 - oy, -4, -2, 0, 2, 0, 2);
+    plane(dz,  2 - oz, -4, -2, -3, -1, 0, 1);
     return t < 1e299;
 }
 
@@ -245,7 +258,37 @@ static void testEndToEnd() {
     CHECK(frontier.stats.visible > 0, "the room was seen");
     CHECK(frontier.stats.occupied > 0, "its surfaces were measured");
     CHECK(frontier.stats.unknown > 0, "and there is unobserved space in range");
+
+    CHECK(!frontier.classified, "the connectivity pass is off by default");
     CHECK(!frontier.voxels.empty(), "there are voxels to draw");
+
+    // Asked for explicitly, the connectivity pass runs — and on this scene it
+    // finds nothing, which is the result worth recording rather than one to
+    // engineer away.
+    //
+    // The scene contains a sealed cupboard whose interior no ray enters. It is
+    // still not "enclosed", because it stands on the floor and the floor
+    // underneath it was never observed either: the interior connects downward
+    // through unobserved floor into the unobserved ground and out to the world.
+    // Nothing here is wrong. It is what enclosure by observation means, and it
+    // is why the pass is off by default — in real data almost nothing is sealed
+    // by observation on all sides, including the building interiors that are
+    // usually the whole point of the survey.
+    {
+        vis::Options cls = opt;
+        cls.classifyVoids = true;
+        vis::Result cr;
+        CHECK(vis::run({path}, cls, nullptr, cr, err), "ran with classification");
+        CHECK(cr.classified, "the connectivity pass ran when asked");
+        CHECK(statsEqual(cr.stats, frontier.stats),
+              "classifying changes what is reported, never what was carved");
+        CHECK(cr.exteriorVolume() > 100.0,
+              "and nearly all the unobserved space reaches the outside world");
+        CHECK(cr.voidReport.enclosed + cr.voidReport.exterior == cr.stats.unknown,
+              "every unobserved voxel is accounted for as one or the other");
+        CHECK(cr.voxels.size() < frontier.voxels.size(),
+              "so classifying draws less than not classifying");
+    }
     CHECK(!frontier.partial && !frontier.cancelled, "the whole domain was carved");
 
     // The room is about 240 m^3 and the visible set should be most of it.

@@ -321,6 +321,44 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             origin[i] = 0.5 * (double(lo[i]) + double(hi[i]) + 1.0) * p.tileMetres();
     }
 
+    // The classification grid. One byte per voxel of the whole domain at once,
+    // because connectivity cannot be answered tile by tile: a void that spans a
+    // seam is one void, and a void with a way out through a neighbouring tile is
+    // not a void at all.
+    voids::Grid grid;
+    bool useGrid = false;
+    if (opt.classifyVoids && !keys.empty()) {
+        int64_t klo[3] = {keys[0].x, keys[0].y, keys[0].z};
+        int64_t khi[3] = {keys[0].x, keys[0].y, keys[0].z};
+        for (const carve::TileKey& k : keys) {
+            const int64_t v[3] = {k.x, k.y, k.z};
+            for (int i = 0; i < 3; ++i) {
+                klo[i] = std::min(klo[i], v[i]);
+                khi[i] = std::max(khi[i], v[i]);
+            }
+        }
+        uint64_t cells = 1;
+        bool overflow = false;
+        for (int i = 0; i < 3; ++i) {
+            grid.lo[i]  = klo[i] * int64_t(p.tileVoxels);
+            const int64_t span = (khi[i] - klo[i] + 1) * int64_t(p.tileVoxels);
+            if (span <= 0 || span > int64_t(UINT32_MAX)) { overflow = true; break; }
+            grid.dim[i] = uint32_t(span);
+            cells *= uint64_t(span);
+            if (cells > (1ull << 62)) { overflow = true; break; }
+        }
+        grid.voxelSize = p.voxelSize;
+        if (overflow || cells > opt.classifyBudgetBytes) {
+            out.classifySkipped = fmt("the domain is %.1f G voxels, over the %.1f G byte "
+                                      "budget for the connectivity pass",
+                                      double(cells) / 1e9,
+                                      double(opt.classifyBudgetBytes) / 1e9);
+        } else {
+            grid.state.assign(size_t(cells), 0);
+            useGrid = true;
+        }
+    }
+
     unsigned nthreads = opt.threads ? opt.threads : std::thread::hardware_concurrency();
     if (nthreads == 0) nthreads = 1;
     // A carver is the parallelism; a pool of threads feeding it would only
@@ -400,19 +438,40 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             }
 
             const carve::Tile& tile = w.tile;
-            for (uint32_t z = tile.interiorBegin(); z < tile.interiorEnd(); ++z) {
-                for (uint32_t y = tile.interiorBegin(); y < tile.interiorEnd(); ++y) {
-                    for (uint32_t x = tile.interiorBegin(); x < tile.interiorEnd(); ++x) {
-                        // Exactly kReachable: in the domain, and nothing
-                        // observed it. Anything else is either outside the
-                        // question or was seen by something.
-                        if (tile.state[tile.index(x, y, z)] != carve::kReachable) continue;
-                        if (!opt.solid && !touchesVisible(tile, x, y, z)) continue;
-                        double c[3];
-                        tile.centre(x, y, z, p.voxelSize, c);
-                        int64_t gi[3];
-                        tile.globalIndex(x, y, z, gi);
-                        w.col.add(c, gi);
+            if (useGrid) {
+                // Tiles are disjoint, so workers write to disjoint regions of
+                // the grid and need no lock between them.
+                for (uint32_t z = tile.interiorBegin(); z < tile.interiorEnd(); ++z) {
+                    for (uint32_t y = tile.interiorBegin(); y < tile.interiorEnd(); ++y) {
+                        for (uint32_t x = tile.interiorBegin(); x < tile.interiorEnd(); ++x) {
+                            int64_t gi[3];
+                            tile.globalIndex(x, y, z, gi);
+                            const int64_t gx = gi[0] - grid.lo[0];
+                            const int64_t gy = gi[1] - grid.lo[1];
+                            const int64_t gz = gi[2] - grid.lo[2];
+                            if (gx < 0 || gy < 0 || gz < 0 ||
+                                gx >= int64_t(grid.dim[0]) || gy >= int64_t(grid.dim[1]) ||
+                                gz >= int64_t(grid.dim[2])) continue;
+                            grid.state[grid.index(uint32_t(gx), uint32_t(gy), uint32_t(gz))] =
+                                tile.state[tile.index(x, y, z)];
+                        }
+                    }
+                }
+            } else {
+                for (uint32_t z = tile.interiorBegin(); z < tile.interiorEnd(); ++z) {
+                    for (uint32_t y = tile.interiorBegin(); y < tile.interiorEnd(); ++y) {
+                        for (uint32_t x = tile.interiorBegin(); x < tile.interiorEnd(); ++x) {
+                            // Exactly kReachable: in the domain, and nothing
+                            // observed it. Anything else is either outside the
+                            // question or was seen by something.
+                            if (tile.state[tile.index(x, y, z)] != carve::kReachable) continue;
+                            if (!opt.solid && !touchesVisible(tile, x, y, z)) continue;
+                            double c[3];
+                            tile.centre(x, y, z, p.voxelSize, c);
+                            int64_t gi[3];
+                            tile.globalIndex(x, y, z, gi);
+                            w.col.add(c, gi);
+                        }
                     }
                 }
             }
@@ -457,6 +516,30 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         col.absorb(w.col);
     }
     col.filterToThreshold();
+
+    if (useGrid) {
+        if (!tick("classifying voids", 0, 0)) { out.cancelled = true; out.partial = true; }
+        out.voidReport = voids::classify(grid);
+        out.classified = true;
+
+        // Only enclosed voids are drawn now. Everything else unobserved is the
+        // rest of the world arriving by some route, and drawing it buries the
+        // finding under the whole planet.
+        for (uint32_t z = 0; z < grid.dim[2]; ++z) {
+            for (uint32_t y = 0; y < grid.dim[1]; ++y) {
+                for (uint32_t x = 0; x < grid.dim[0]; ++x) {
+                    const uint8_t bits = grid.state[grid.index(x, y, z)];
+                    if (!voids::isEnclosedVoid(bits)) continue;
+                    if (!opt.solid && !voids::touchesObserved(grid, x, y, z)) continue;
+                    double c[3];
+                    grid.centre(x, y, z, c);
+                    const int64_t gi[3] = {grid.lo[0] + x, grid.lo[1] + y, grid.lo[2] + z};
+                    col.add(c, gi);
+                }
+            }
+        }
+    }
+
     while (col.cap && col.out.size() > col.cap) col.halve();
 
     out.voxels = std::move(col.out);
@@ -490,6 +573,16 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         note += fmt("%llu empty cells looked like dropped returns rather than sky and "
                     "cleared nothing (%llu were believed); ",
                     (unsigned long long)isolated, (unsigned long long)believedSky);
+    }
+    if (out.classified) {
+        note += fmt("%llu enclosed void(s), %.1f m^3, largest %.1f m^3; the other %.0f m^3 "
+                    "of unobserved space reaches the outside world; ",
+                    (unsigned long long)out.voidReport.components,
+                    out.enclosedVolume(),
+                    double(out.voidReport.largestComponent) * out.voxelVolume(),
+                    out.exteriorVolume());
+    } else if (!out.classifySkipped.empty()) {
+        note += "voids not classified: " + out.classifySkipped + "; ";
     }
     if (out.domain.kind == carve::Domain::Kind::Box && out.sphereVolume > 0)
         note += fmt("domain narrowed to the surveyed extent, %.0f m^3 instead of %.0f; ",

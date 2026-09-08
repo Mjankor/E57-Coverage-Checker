@@ -157,10 +157,14 @@ For each scan it reports the pose, the prototype with per-field bit widths, and:
   `sphericalInvalidState` field, or nothing at all. This decides whether the
   field of view has to be recovered from angular extent, and getting it wrong
   carves a cone straight through the floor beneath every tripod (DESIGN.md §4).
-- **how many of those empty cells are dropped returns rather than sky** — the
-  file cannot tell them apart, and believing a dropped return clears a pencil of
-  space to the maximum range straight through the building. A high figure here
-  means the scan drops heavily and `--sky-fraction` is worth raising.
+- **whether the fitted angular mapping actually describes the raster** — the
+  scan's own points are put back through it, and the percentage that land on the
+  cell they came from is reported. A low figure with healthy residuals means
+  lookups reach the wrong direction, which shows up as sky read as ground and
+  building interiors read as clear space.
+- **the unsampled band under the tripod** — the one empty region that does not
+  mean "the ray came back with nothing". Believed as no-returns those rows clear
+  a cone to the maximum range straight down through the ground.
 - **which coordinate frame the points are in** — scanner-local with a
   meaningful pose, or already transformed to global. Both conventions appear in
   the wild, sometimes within one corpus.
@@ -223,6 +227,18 @@ the voxel lattice is global and anchored at the world origin, so a voxel's
 verdict never depends on which tile carried it. The test suite asserts this
 directly, because a carve whose answer depended on how space was partitioned
 could not be validated against anything.
+
+## Explaining one point — `e57cov probe`
+
+```sh
+e57cov probe <x> <y> <z> /path/to/*.e57
+```
+
+For every setup: the distance and direction to the point, the raster cell that
+direction lands on, what that cell holds, and the verdict. Aggregate figures
+cannot answer "the inside of the house is being cleared, why?"; this can, and
+every wrong answer this tool has produced was diagnosable from those five things
+and invisible in the statistics.
 
 ## Build and test
 
