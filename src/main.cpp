@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -59,7 +60,7 @@ void accumulate(Stats& st, double x, double y, double z) {
     st.any = true;
 }
 
-int info(const std::string& path, bool verifyCrc) {
+int info(const std::string& path, bool verifyCrc, double maxRange) {
     e57::Reader r;
     std::string err;
     if (!r.open(path, err)) {
@@ -187,6 +188,7 @@ int info(const std::string& path, bool verifyCrc) {
             if (hasGrid) {
                 rimg::RangeImage img;
                 rimg::Options ro;
+                ro.maxRange = maxRange;
                 std::string rerr;
                 if (rimg::build(r, i, ro, img, rerr)) {
                     std::printf("      grid      : %u x %u = %.2f M cells, %.1f%% filled\n",
@@ -196,8 +198,14 @@ int info(const std::string& path, bool verifyCrc) {
                                 "(these are what clear space)\n",
                                 (unsigned long long)img.diag.hits,
                                 (unsigned long long)img.diag.noReturns);
-                    std::printf("      range     : %.2f m to %.2f m — suggested maxRange %.0f m\n",
-                                img.diag.minRange, img.diag.maxRange, img.diag.suggestedMaxRange);
+                    std::printf("      range     : returns from %.2f m to %.2f m; "
+                                "no-returns clear to %.0f m\n",
+                                img.diag.nearestReturn, img.diag.furthestReturn, ro.maxRange);
+                    if (img.diag.furthestReturn > ro.maxRange * 1.05) {
+                        std::printf("                  note: returns reach past --max-range, so some "
+                                    "measured\n                  surfaces sit beyond where "
+                                    "no-return rays stop clearing\n");
+                    }
                     std::printf("      raster    : %s (residuals %.5f rad row, %.5f rad col)\n",
                                 img.map.valid ? "uniform, lookups exact"
                                               : "*** NOT UNIFORM — lookups unreliable ***",
@@ -252,6 +260,9 @@ void usage() {
         "          own recordCount and cartesianBounds.\n"
         "\n"
         "  --crc   Also verify every page checksum (costs a full pass).\n"
+        "  --max-range <m>\n"
+        "          How far a no-return ray clears. Default 45 m, the scanner's\n"
+        "          rated maximum.\n"
         "\n"
         "The visibility pipeline (index / carve) is not built yet; see DESIGN.md.\n");
 }
@@ -270,15 +281,21 @@ int main(int argc, char** argv) {
     }
 
     bool                     crc = false;
+    double                   maxRange = 45.0;
     std::vector<std::string> paths;
     for (int i = 2; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--crc") == 0) crc = true;
-        else                                    paths.push_back(argv[i]);
+        if (std::strcmp(argv[i], "--crc") == 0) { crc = true; continue; }
+        if (std::strcmp(argv[i], "--max-range") == 0 && i + 1 < argc) {
+            maxRange = std::strtod(argv[++i], nullptr);
+            if (!(maxRange > 0.0)) { std::printf("--max-range must be positive\n"); return 2; }
+            continue;
+        }
+        paths.push_back(argv[i]);
     }
     if (paths.empty()) { usage(); return 2; }
 
     int failures = 0;
-    for (const auto& p : paths) failures += info(p, crc);
+    for (const auto& p : paths) failures += info(p, crc, maxRange);
     if (failures)
         std::printf("%d file(s) reported problems.\n", failures);
     return failures == 0 ? 0 : 1;

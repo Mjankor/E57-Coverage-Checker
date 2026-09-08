@@ -45,12 +45,14 @@ enum class Status : uint8_t {
 };
 
 struct Options {
-    // How far a no-return ray clears. Note this is a property of the job, not
-    // of the scanner: a setup whose returns reach 59 m has been clearing space
-    // to at least that, so a shorter value silently stops sky rays before they
-    // have done their work. Derived from the corpus rather than assumed —
-    // `suggestedMaxRange` reports what the data supports.
-    double   maxRange = 60.0;
+    // How far a no-return ray clears. This is the scanner's rated maximum:
+    // past it a return is unlikely to be meaningful, so treating the ray as
+    // clearing further would assert emptiness the instrument never established.
+    //
+    // A setting, not a constant — a different instrument or a job that trusts
+    // longer returns changes it, and `Diagnostics::furthestReturn` reports what
+    // each scan actually produced so the choice can be checked against the data.
+    double   maxRange = 45.0;
     // Cells above this are binned down, taking the MINIMUM range in each bin.
     // Minimum is the conservative direction: it clears less, never more, so a
     // downsampled image cannot carve through a surface it should have kept.
@@ -75,8 +77,12 @@ struct Diagnostics {
     uint64_t noReturns = 0;
     uint64_t outsideFov = 0;
     double   fillFraction = 0;
-    double   minRange = 0, maxRange = 0;
-    double   suggestedMaxRange = 0;     // furthest return seen, rounded up
+    // What this scan actually measured. Named apart from Options::maxRange on
+    // purpose: that is a setting about how far to trust an empty ray, these are
+    // observations, and conflating the two is how a setting quietly becomes a
+    // conclusion.
+    double   nearestReturn = 0;
+    double   furthestReturn = 0;
     // Rows at the very top or bottom of the grid holding no points at all.
     // Ambiguous by nature: either an all-sky band (genuine no-returns, and the
     // grid path treats them as such) or part of the grid the scanner never

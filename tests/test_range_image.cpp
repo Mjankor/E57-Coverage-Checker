@@ -149,8 +149,11 @@ static void testGridPath() {
 
     CHECK(img.hasPose, "the setup pose is carried through");
     CHECK_NEAR(img.pose.t[0], 3.0, 1e-9, "pose translation preserved");
-    CHECK(img.diag.suggestedMaxRange >= img.diag.maxRange,
-          "the suggested clearing distance covers the furthest return");
+    // Observations are reported separately from the maxRange setting, so a
+    // scan reaching past it is visible rather than silently clamped.
+    CHECK(img.diag.furthestReturn > img.diag.nearestReturn, "return extent reported");
+    CHECK(img.diag.furthestReturn < opt.maxRange,
+          "this fixture's returns sit inside the clearing distance");
 }
 
 static void testMappingAndLookup() {

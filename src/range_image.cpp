@@ -230,9 +230,8 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     if (decoded == 0) { err = "no valid points decoded"; return false; }
 
     out.diag.usedGrid          = gridPath;
-    out.diag.minRange          = (nearest < 1e299) ? nearest : 0.0;
-    out.diag.maxRange          = farthest;
-    out.diag.suggestedMaxRange = std::ceil(farthest / 5.0) * 5.0;
+    out.diag.nearestReturn     = (nearest < 1e299) ? nearest : 0.0;
+    out.diag.furthestReturn    = farthest;
 
     if (!gridPath) {
         // Angular fallback: bin by direction, and take the field of view from
