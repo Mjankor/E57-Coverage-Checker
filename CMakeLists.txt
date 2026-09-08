@@ -19,7 +19,8 @@ add_library(e57cov_core STATIC
   src/frame.cpp
   src/lod.cpp
   src/point_store.cpp
-  src/indexer.cpp)
+  src/indexer.cpp
+  src/range_image.cpp)
 target_include_directories(e57cov_core PUBLIC src)
 target_compile_options(e57cov_core PRIVATE -Wall -Wextra)
 
@@ -47,3 +48,8 @@ add_executable(test_indexer tests/test_indexer.cpp)
 target_link_libraries(test_indexer PRIVATE e57cov_core)
 target_compile_options(test_indexer PRIVATE -Wall -Wextra)
 add_test(NAME indexer COMMAND test_indexer)
+
+add_executable(test_range_image tests/test_range_image.cpp)
+target_link_libraries(test_range_image PRIVATE e57cov_core)
+target_compile_options(test_range_image PRIVATE -Wall -Wextra)
+add_test(NAME range_image COMMAND test_range_image)

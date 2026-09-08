@@ -68,6 +68,11 @@ struct Field {
 struct Scan {
     std::string                      name = "Scan";
     bool                             hasPose = false;
+    // indexBounds: the scan's sampling grid. Real structured scans declare
+    // this, and it is what identifies no-return rays — a cell inside the grid
+    // with no record is a ray that came back empty.
+    bool                             hasIndexBounds = false;
+    long long                        rowMin = 0, rowMax = 0, colMin = 0, colMax = 0;
     double                           q[4] = {1, 0, 0, 0};
     double                           t[3] = {0, 0, 0};
     std::vector<Field>               fields;
@@ -235,6 +240,18 @@ inline bool write(const std::string& path,
             "   <guid type=\"String\"><![CDATA[{scan-%zu}]]></guid>\n"
             "   <name type=\"String\"><![CDATA[%s]]></name>\n", i, s.name.c_str());
         xml += buf;
+
+        if (s.hasIndexBounds) {
+            std::snprintf(buf, sizeof(buf),
+                "   <indexBounds type=\"Structure\">\n"
+                "    <rowMinimum type=\"Integer\">%lld</rowMinimum>\n"
+                "    <rowMaximum type=\"Integer\">%lld</rowMaximum>\n"
+                "    <columnMinimum type=\"Integer\">%lld</columnMinimum>\n"
+                "    <columnMaximum type=\"Integer\">%lld</columnMaximum>\n"
+                "   </indexBounds>\n",
+                s.rowMin, s.rowMax, s.colMin, s.colMax);
+            xml += buf;
+        }
 
         if (s.hasPose) {
             std::snprintf(buf, sizeof(buf),

@@ -20,6 +20,7 @@
 
 #include "e57.h"
 #include "frame.h"
+#include "range_image.h"
 
 #include <algorithm>
 #include <cmath>
@@ -142,18 +143,26 @@ int info(const std::string& path, bool verifyCrc) {
                     countOk ? "OK" : "*** MISMATCH ***");
         if (!countOk) ++failures;
 
-        // Question 1: how are no-returns represented?
+        // Question 1: how are no-returns represented? A declared sampling grid
+        // answers it outright, and supersedes anything the invalid-state field
+        // does or does not say.
+        const bool hasGrid = s.hasIndexBounds && s.field("rowIndex") && s.field("columnIndex");
         if (invName) {
             const double pct = s.recordCount ? 100.0 * double(st.invalid) / double(s.recordCount) : 0.0;
             std::printf("      no-return : %s present — %llu of %llu records (%.2f%%)\n",
                         invName, (unsigned long long)st.invalid,
                         (unsigned long long)s.recordCount, pct);
             if (st.invalid == 0)
-                std::printf("                  field present but never set: treat as NOT storing no-returns\n");
+                std::printf("                  field present but never set: no misses are stored as records\n");
         } else {
-            std::printf("      no-return : NO invalid-state field — no-returns are not stored.\n"
-                        "                  Field of view must be recovered from angular extent\n"
-                        "                  (DESIGN.md §4, resolution path 2).\n");
+            std::printf("      no-return : no invalid-state field — no misses are stored as records\n");
+        }
+        if (hasGrid) {
+            std::printf("                  the declared grid identifies them exactly: every cell\n"
+                        "                  with no record is a ray that came back empty\n");
+        } else {
+            std::printf("                  and without a declared grid they cannot be identified\n"
+                        "                  exactly — see DESIGN.md §4\n");
         }
 
         if (cartesian && st.any) {
@@ -172,6 +181,48 @@ int info(const std::string& path, bool verifyCrc) {
             } else {
                 std::printf("      declared  : no cartesianBounds — cross-check unavailable\n");
             }
+            // The range image is what the visibility pass consumes, so report
+            // what this scan would actually yield: how many rays came back
+            // empty, and whether the raster is regular enough to look up.
+            if (hasGrid) {
+                rimg::RangeImage img;
+                rimg::Options ro;
+                std::string rerr;
+                if (rimg::build(r, i, ro, img, rerr)) {
+                    std::printf("      grid      : %u x %u = %.2f M cells, %.1f%% filled\n",
+                                img.rows, img.cols,
+                                double(img.cellCount()) / 1e6, 100.0 * img.diag.fillFraction);
+                    std::printf("      rays      : %llu returns, %llu no-returns "
+                                "(these are what clear space)\n",
+                                (unsigned long long)img.diag.hits,
+                                (unsigned long long)img.diag.noReturns);
+                    std::printf("      range     : %.2f m to %.2f m — suggested maxRange %.0f m\n",
+                                img.diag.minRange, img.diag.maxRange, img.diag.suggestedMaxRange);
+                    std::printf("      raster    : %s (residuals %.5f rad row, %.5f rad col)\n",
+                                img.map.valid ? "uniform, lookups exact"
+                                              : "*** NOT UNIFORM — lookups unreliable ***",
+                                img.map.elResidualRad, img.map.azResidualRad);
+                    if (!img.map.valid) ++failures;
+                    if (img.diag.emptyLeadingRows || img.diag.emptyTrailingRows) {
+                        // Either an all-sky band or a part of the grid the
+                        // scanner never sampled. Treated as no-returns; only
+                        // the corpus can say whether that is right.
+                        std::printf("      note      : %u leading and %u trailing grid rows hold no\n"
+                                    "                  returns. Treated as no-returns (all-sky). If\n"
+                                    "                  either band is really outside the field of\n"
+                                    "                  view — a nadir blind cone, say — it would\n"
+                                    "                  wrongly clear space. Check against the scan.\n",
+                                    img.diag.emptyLeadingRows, img.diag.emptyTrailingRows);
+                    }
+                } else {
+                    std::printf("      grid      : range image failed — %s\n", rerr.c_str());
+                    ++failures;
+                }
+            } else {
+                std::printf("      grid      : no indexBounds + row/column index — no-return rays\n"
+                            "                  cannot be identified exactly (DESIGN.md §4)\n");
+            }
+
             // Question 2: which coordinate frame, and is the pose applied?
             const viewer::FrameDecision fd = viewer::decideFrame(r, i);
             std::printf("      frame     : %s\n", viewer::conventionName(fd.convention));

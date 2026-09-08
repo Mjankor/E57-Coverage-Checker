@@ -25,30 +25,22 @@ built yet.**
 | on-disk point store (mmap, zero-copy) | done and tested |
 | indexer: E57 corpus → store | done and tested |
 | viewer on the store, two-phase open | done — **rendering layer unrun** |
-| range-image builder | not started |
+| **range-image builder** | done and tested |
 | CPU reference visibility pass | not started |
 | Metal gather kernel | not started |
 | void extraction, classification, export | not started |
 
-### Known caveat
+### Reader validation
 
-The reader has **not been validated against real scanner files.** Its tests
-round-trip fixtures produced by an encoder in this same repo, which proves
-self-consistency but not conformance: the fixture writer and the reader share
-one reading of the standard, so any misreading common to both passes every
-test.
+The reader **has now been run against real scanner output** and passes both
+checks that would expose a mis-decoded bit stream: on a 5,646,018-point scan
+with 32-bit packed `ScaledInteger` coordinates it decoded exactly
+5,646,018 records and its decoded bounds matched the file's own
+`cartesianBounds`. A drifting bit cursor cannot produce either result, so the
+continuous-bit-stream reading of the standard is confirmed in practice.
 
-The load-bearing assumption is that a field's bit stream is *continuous across
-packet boundaries* rather than each packet's chunk being independently
-byte-aligned. If that is wrong, the reader decodes the first packet of every
-scan correctly and then drifts — plausible-looking but wrong geometry, not a
-crash.
-
-First checks to run against real files:
-
-- decoded point count matches the file's declared `recordCount` exactly (a
-  drifting bit cursor usually truncates or overruns)
-- decoded bounds match the file's own `cartesianBounds` element
+`e57cov info` runs both checks and exits nonzero on failure, so a whole
+directory can be swept as a smoke test before indexing it.
 
 ## What the reader handles
 
@@ -177,7 +169,7 @@ keeps the reader buildable and testable off the target platform.
 open E57CoverageChecker.xcodeproj
 ```
 
-Six targets, all C++20 with shared schemes:
+Seven targets, all C++20 with shared schemes:
 
 | target | kind | what it is |
 |---|---|---|
@@ -187,6 +179,7 @@ Six targets, all C++20 with shared schemes:
 | `test_viewer` | tool | camera / classifier / picker tests |
 | `test_lod` | tool | LOD octree, selection and point store tests |
 | `test_indexer` | tool | survey, bounded-memory build, store round trip |
+| `test_range_image` | tool | grid path, angular mapping, conservative binning |
 
 ⌘R on a test scheme runs that suite in the console.
 
@@ -225,6 +218,7 @@ src/point_cloud.{h,cpp}     decode + decimate for display
 src/lod.{h,cpp}             LOD octree: additive build and view selection
 src/point_store.{h,cpp}     on-disk store, mmap'd and zero-copy
 src/indexer.{h,cpp}         corpus survey and bounded-memory build
+src/range_image.{h,cpp}     structured scan -> range image (visibility stage 1)
 src/camera.{h,cpp}          orbit camera
 src/picker.{h,cpp}          screen-space point picking (orbit centre)
 src/math3d.h                vectors and matrices
@@ -235,6 +229,7 @@ tests/test_e57.cpp          reader round-trip tests
 tests/test_viewer.cpp       camera, classifier, picker, decimation tests
 tests/test_lod.cpp          octree, selection, store tests
 tests/test_indexer.cpp      survey and build tests
+tests/test_range_image.cpp  range image tests
 tools/validate_xcodeproj.py pbxproj structural validator
 E57CoverageChecker.xcodeproj
 DESIGN.md                   design and rationale

@@ -149,17 +149,33 @@ Both appear in the file as absent data, and they mean opposite things. Every
 terrestrial scanner has a blind cone under the tripod; treating those bins as
 `NO_RETURN` carves a cone through the floor beneath all 1000 setups.
 
-Resolution order:
-1. If the scan stores explicit invalid points (`cartesianInvalidState` /
-   `sphericalInvalidState` ≠ 0), use them — those bins are `NO_RETURN`.
-2. Otherwise derive the field of view from the observed angular extent of the
-   returned points (and `indexBounds` where present), and mark empty bins
-   `NO_RETURN` inside it, `OUTSIDE_FOV` outside it.
+Resolution order, as implemented in `src/range_image.cpp`:
 
-Many writers drop invalid points entirely rather than storing them, so path 2
-is the common case, not the fallback. `e57cov index --report` prints which
-convention each file uses; **audit a sample of the real corpus before trusting
-the defaults.**
+1. **The declared sampling grid** — `indexBounds` plus `rowIndex`/`columnIndex`
+   per point. The grid states what the scanner sampled, so a cell inside it
+   with no record is a ray that came back empty. Nothing is inferred.
+   **This is what real files do**, and it is better than either option
+   originally planned here. A measured corpus scan declares a 2500 × 5280 grid
+   holding 5.65 M records: 7.55 M no-returns, mostly sky, identified exactly.
+2. Explicit invalid points (`cartesianInvalidState` ≠ 0), where a writer stores
+   them. Observed in the wild as *present but never set* — the field exists and
+   every record is valid — so its absence of signal must not be read as an
+   absence of misses.
+3. Angular fallback: bin by direction and recover the field of view from the
+   angular extent of the returns. **Not implemented, and deliberately so.** A
+   band of sky returns nothing, so the extent understates the true field of
+   view and that band is marked `OUTSIDE_FOV` instead of `NO_RETURN` — the
+   volume above the site then never clears. A scan offering nothing better is
+   refused with a reason rather than quietly mishandled.
+
+`e57cov info` reports which path a file affords, the grid fill, the no-return
+count, and whether the raster is regular enough for exact lookups.
+
+The `(row, col)` → `(azimuth, elevation)` mapping is declared nowhere, so it is
+**measured**: mean elevation per row, circular-mean azimuth per column, then a
+line fitted through each. The maximum deviation from that line is reported, so
+a scanner that is not a uniform raster shows up as a large residual rather than
+as quietly misplaced lookups.
 
 ### Other construction details
 
