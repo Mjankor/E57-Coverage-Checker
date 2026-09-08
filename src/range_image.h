@@ -93,6 +93,56 @@ struct Diagnostics {
     std::string note;
 };
 
+// A min/max pyramid over the raster, so a question about a whole region can be
+// answered without reading every cell in it.
+//
+// This is what turns the carve from "test every voxel" into "test the ones that
+// matter". A brick of voxels projects to a rectangle of cells; if every surface
+// in that rectangle is nearer than the brick's closest corner, the whole brick
+// is behind everything and no setup evidence can reach it. If every surface is
+// further than the brick's furthest corner, the whole brick is in clear view.
+// Either way 512 voxels are settled by one lookup.
+//
+// It must be a true min and max, not an average — the tests above are only
+// conservative if the bounds really bound. (This is the trap in reaching for a
+// hardware mipmap generator: those box-filter, and a box filter here would claim
+// surfaces at distances nothing measured.)
+//
+// Level 0 aggregates kPyramidBase^2 cells and each level after halves both axes,
+// so the whole pyramid costs about 5/16 of one byte per cell — a third of what a
+// level-0-is-the-image pyramid would, and the fine levels it skips are finer
+// than any brick ever asks for.
+constexpr uint32_t kPyramidBase = 4;
+
+// Which statuses occur somewhere in a node's region.
+enum StatusBits : uint8_t {
+    kHasHit        = 1u << 0,
+    kHasNoReturn   = 1u << 1,
+    kHasOutsideFov = 1u << 2,
+};
+
+struct PyramidLevel {
+    uint32_t rows = 0, cols = 0;   // nodes, not cells
+    uint32_t block = 0;            // cells per node edge
+    std::vector<uint16_t> minCm, maxCm;
+    std::vector<uint8_t>  statuses;
+};
+
+struct RangePyramid {
+    std::vector<PyramidLevel> levels;
+    bool empty() const { return levels.empty(); }
+};
+
+// The answer to a region query: the extreme surface distances anywhere in it,
+// and which statuses appear. Always a conservative superset of the requested
+// rectangle — a wider answer can only make the caller more cautious.
+struct RangeSpan {
+    double  minRange = 0;
+    double  maxRange = 0;
+    uint8_t statuses = 0;
+    bool    valid = false;
+};
+
 // One raster cell: what the scanner did in this direction, and how far away the
 // answer was. Range is in centimetres, which is well under a 5 cm voxel.
 //
@@ -135,6 +185,21 @@ struct RangeImage {
     // The visibility test's primitive: what did this setup see in this
     // direction? `range` is meaningful for Hit and NoReturn.
     bool sample(double az, double el, Status& st, double& range) const;
+
+    // Unclamped, unwrapped raster coordinates for an angle. Used to bound a
+    // region rather than to look a single direction up, so they deliberately
+    // return values outside the raster instead of failing.
+    double rowCoord(double el) const;
+    double colCoord(double az) const;
+
+    // Built on demand; empty until then, and everything still works without it.
+    RangePyramid pyramid;
+
+    // Extremes over an inclusive rectangle of cells. Rows are clamped to the
+    // raster. Columns are a raw range that may run negative or past `cols`, and
+    // wrap is handled by widening to the whole circle — bricks near the seam are
+    // rare and a wider answer is still a safe one.
+    RangeSpan span(int64_t row0, int64_t row1, int64_t col0, int64_t col1) const;
 };
 
 // Converts a scanner-frame position to (azimuth, elevation, range). Elevation
@@ -143,6 +208,11 @@ void toSpherical(double x, double y, double z, double& az, double& el, double& r
 
 bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
            RangeImage& out, std::string& err);
+
+// Builds the min/max pyramid. Not done inside build() because it is an
+// accelerator, not part of the image: a caller that only samples directions has
+// no use for it and should not pay the memory.
+void buildPyramid(RangeImage& im);
 
 const char* statusName(Status s);
 

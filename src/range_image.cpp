@@ -104,6 +104,137 @@ bool RangeImage::sample(double az, double el, Status& st, double& range) const {
     return true;
 }
 
+double RangeImage::rowCoord(double el) const {
+    if (std::fabs(map.dElPerRow) < 1e-12) return 0.0;
+    return (el - map.el0) / map.dElPerRow;
+}
+
+double RangeImage::colCoord(double az) const {
+    if (std::fabs(map.dAzPerCol) < 1e-12) return 0.0;
+    return angleDiff(az, map.az0) / map.dAzPerCol;
+}
+
+void buildPyramid(RangeImage& im) {
+    im.pyramid = RangePyramid{};
+    if (im.rows == 0 || im.cols == 0 || im.cells.empty()) return;
+
+    auto statusBit = [](uint8_t s) -> uint8_t {
+        switch (Status(s)) {
+        case Status::Hit:        return kHasHit;
+        case Status::NoReturn:   return kHasNoReturn;
+        case Status::OutsideFov: return kHasOutsideFov;
+        }
+        return kHasOutsideFov;
+    };
+
+    // Level 0: kPyramidBase x kPyramidBase cells per node.
+    PyramidLevel l0;
+    l0.block = kPyramidBase;
+    l0.rows  = (im.rows + kPyramidBase - 1) / kPyramidBase;
+    l0.cols  = (im.cols + kPyramidBase - 1) / kPyramidBase;
+    l0.minCm.assign(size_t(l0.rows) * l0.cols, 0xFFFF);
+    l0.maxCm.assign(size_t(l0.rows) * l0.cols, 0);
+    l0.statuses.assign(size_t(l0.rows) * l0.cols, 0);
+    for (uint32_t r = 0; r < im.rows; ++r) {
+        const size_t nodeRow = size_t(r / kPyramidBase) * l0.cols;
+        const Cell*  src     = &im.cells[size_t(r) * im.cols];
+        for (uint32_t c = 0; c < im.cols; ++c) {
+            const size_t n = nodeRow + c / kPyramidBase;
+            const uint16_t v = src[c].rangeCm;
+            if (v < l0.minCm[n]) l0.minCm[n] = v;
+            if (v > l0.maxCm[n]) l0.maxCm[n] = v;
+            l0.statuses[n] |= statusBit(src[c].status);
+        }
+    }
+    im.pyramid.levels.push_back(std::move(l0));
+
+    // Each level after halves both axes. Stop at a single node.
+    while (im.pyramid.levels.back().rows > 1 || im.pyramid.levels.back().cols > 1) {
+        const PyramidLevel& prev = im.pyramid.levels.back();
+        PyramidLevel lv;
+        lv.block = prev.block * 2;
+        lv.rows  = (prev.rows + 1) / 2;
+        lv.cols  = (prev.cols + 1) / 2;
+        lv.minCm.assign(size_t(lv.rows) * lv.cols, 0xFFFF);
+        lv.maxCm.assign(size_t(lv.rows) * lv.cols, 0);
+        lv.statuses.assign(size_t(lv.rows) * lv.cols, 0);
+        for (uint32_t r = 0; r < prev.rows; ++r) {
+            for (uint32_t c = 0; c < prev.cols; ++c) {
+                const size_t src = size_t(r) * prev.cols + c;
+                const size_t dst = size_t(r / 2) * lv.cols + (c / 2);
+                if (prev.minCm[src] < lv.minCm[dst]) lv.minCm[dst] = prev.minCm[src];
+                if (prev.maxCm[src] > lv.maxCm[dst]) lv.maxCm[dst] = prev.maxCm[src];
+                lv.statuses[dst] |= prev.statuses[src];
+            }
+        }
+        im.pyramid.levels.push_back(std::move(lv));
+    }
+}
+
+RangeSpan RangeImage::span(int64_t row0, int64_t row1, int64_t col0, int64_t col1) const {
+    RangeSpan out;
+    if (pyramid.empty() || rows == 0 || cols == 0) return out;
+    if (row1 < row0 || col1 < col0) return out;
+
+    // Rows outside the raster contribute nothing to any lookup, so clamping is
+    // not a loss of information — a voxel projecting there gets OutsideFov,
+    // which is what a caller reading `statuses` has to allow for anyway.
+    row0 = std::max<int64_t>(row0, 0);
+    row1 = std::min<int64_t>(row1, int64_t(rows) - 1);
+    if (row1 < row0) return out;
+
+    // Columns wrap. Rather than split the query, a range that crosses the seam
+    // widens to the whole circle: it is a superset, so still conservative, and
+    // it only costs precision for bricks lying along one particular bearing.
+    bool allCols = false;
+    if (col1 - col0 + 1 >= int64_t(cols)) allCols = true;
+    else {
+        int64_t lo = col0 % int64_t(cols);
+        if (lo < 0) lo += int64_t(cols);
+        const int64_t hi = lo + (col1 - col0);
+        if (hi >= int64_t(cols)) allCols = true;
+        else { col0 = lo; col1 = hi; }
+    }
+
+    // The coarsest level at which the rectangle spans few enough nodes to read
+    // them all. Reading a superset of the rectangle is safe, so a level that is
+    // too coarse costs sharpness, never correctness.
+    size_t L = 0;
+    for (; L + 1 < pyramid.levels.size(); ++L) {
+        const PyramidLevel& lv = pyramid.levels[L];
+        const int64_t rSpan = row1 / lv.block - row0 / lv.block + 1;
+        const int64_t cSpan = allCols ? int64_t(lv.cols)
+                                      : col1 / lv.block - col0 / lv.block + 1;
+        if (rSpan <= 3 && cSpan <= 3) break;
+    }
+
+    const PyramidLevel& lv = pyramid.levels[L];
+    const int64_t r0 = std::min<int64_t>(row0 / lv.block, int64_t(lv.rows) - 1);
+    const int64_t r1 = std::min<int64_t>(row1 / lv.block, int64_t(lv.rows) - 1);
+    const int64_t c0 = allCols ? 0 : std::min<int64_t>(col0 / lv.block, int64_t(lv.cols) - 1);
+    const int64_t c1 = allCols ? int64_t(lv.cols) - 1
+                               : std::min<int64_t>(col1 / lv.block, int64_t(lv.cols) - 1);
+
+    uint16_t lo = 0xFFFF, hi = 0;
+    uint8_t  st = 0;
+    for (int64_t r = r0; r <= r1; ++r) {
+        const size_t base = size_t(r) * lv.cols;
+        for (int64_t c = c0; c <= c1; ++c) {
+            const size_t n = base + size_t(c);
+            if (lv.minCm[n] < lo) lo = lv.minCm[n];
+            if (lv.maxCm[n] > hi) hi = lv.maxCm[n];
+            st |= lv.statuses[n];
+        }
+    }
+    if (lo > hi) return out;              // no populated node in range
+
+    out.minRange = double(lo) * 0.01;
+    out.maxRange = double(hi) * 0.01;
+    out.statuses = st;
+    out.valid = true;
+    return out;
+}
+
 bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
            RangeImage& out, std::string& err) {
     if (scanIndex >= reader.scanCount()) { err = "scan index out of range"; return false; }

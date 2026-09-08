@@ -287,9 +287,72 @@ static void testRefusesWhatItCannotIdentify() {
     CHECK(err.find("indexBounds") != std::string::npos, "and the reason names what is missing");
 }
 
+// The pyramid is only safe to cull with if it really bounds. A single cell that
+// the pyramid reports as nearer than it is would let the carve declare a brick
+// in clear view of a surface that is actually in front of it.
+static void testPyramid() {
+    std::printf("range image: min/max pyramid bounds every cell it covers\n");
+
+    rimg::RangeImage im;
+    im.rows = 77; im.cols = 133;          // deliberately not powers of two
+    im.cells.assign(im.cellCount(), rimg::Cell{});
+    Lcg rng;
+    for (uint32_t r = 0; r < im.rows; ++r) {
+        for (uint32_t c = 0; c < im.cols; ++c) {
+            rimg::Cell& cell = im.cells[size_t(r) * im.cols + c];
+            cell.rangeCm = uint16_t(100 + rng.next() * 4000);
+            cell.status  = uint8_t(rng.next() < 0.2 ? rimg::Status::NoReturn
+                                                    : rimg::Status::Hit);
+        }
+    }
+    im.map.valid = true;
+    im.map.dElPerRow = 0.01; im.map.dAzPerCol = 0.01;
+    rimg::buildPyramid(im);
+    CHECK(!im.pyramid.empty(), "a pyramid was built");
+    CHECK(im.pyramid.levels.front().block == rimg::kPyramidBase, "level 0 aggregates the base");
+    CHECK(im.pyramid.levels.back().rows == 1 && im.pyramid.levels.back().cols == 1,
+          "the top is a single node");
+
+    // Every query must contain the true extremes of its rectangle. It may be
+    // wider — the pyramid answers with a superset — but never narrower.
+    uint64_t tooNarrow = 0, tooTight = 0, missedStatus = 0, checked = 0;
+    for (int trial = 0; trial < 400; ++trial) {
+        const int64_t r0 = int64_t(rng.next() * im.rows);
+        const int64_t r1 = std::min<int64_t>(im.rows - 1, r0 + int64_t(rng.next() * 30));
+        const int64_t c0 = int64_t(rng.next() * im.cols);
+        const int64_t c1 = std::min<int64_t>(im.cols - 1, c0 + int64_t(rng.next() * 30));
+        const rimg::RangeSpan sp = im.span(r0, r1, c0, c1);
+        if (!sp.valid) continue;
+        ++checked;
+
+        double lo = 1e300, hi = -1e300;
+        uint8_t st = 0;
+        for (int64_t r = r0; r <= r1; ++r) {
+            for (int64_t c = c0; c <= c1; ++c) {
+                const rimg::Cell& cell = im.cells[size_t(r) * im.cols + size_t(c)];
+                const double v = double(cell.rangeCm) * 0.01;
+                lo = std::min(lo, v); hi = std::max(hi, v);
+                st |= (rimg::Status(cell.status) == rimg::Status::Hit) ? rimg::kHasHit
+                                                                       : rimg::kHasNoReturn;
+            }
+        }
+        if (sp.minRange > lo + 1e-9) ++tooNarrow;    // claimed nothing nearer than it is
+        if (sp.maxRange < hi - 1e-9) ++tooNarrow;    // or nothing further
+        if ((st & ~sp.statuses) != 0) ++missedStatus;
+        if (sp.minRange == lo && sp.maxRange == hi) ++tooTight;
+    }
+    CHECK(checked > 300, "the sweep actually queried");
+    CHECK(tooNarrow == 0, "no query ever reports a tighter range than the truth");
+    CHECK(missedStatus == 0, "and never omits a status that occurs in the rectangle");
+    // A pyramid that answered exactly every time would mean it is reading cells
+    // rather than nodes, which is not what it is for.
+    CHECK(tooTight < checked, "the answers really are aggregated, not per-cell");
+}
+
 int main() {
     std::printf("E57 Coverage Checker — range image tests\n\n");
     testGridPath();
+    testPyramid();
     testMappingAndLookup();
     testDownsampleIsConservative();
     testRefusesWhatItCannotIdentify();

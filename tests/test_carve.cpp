@@ -427,6 +427,11 @@ static void testFastPathMatchesReference() {
     setPose(c, -2.1, -3.4, 1.2, -2.2);
     makeNoReturnColumns(a, 40, 60, 6.0);
     makeNoReturnColumns(c, 100, 150, 6.0);
+    // With the pyramid built, carveTile takes the culling path; without it,
+    // every brick falls through. Both have to match the reference, so the
+    // comparison runs twice.
+    rimg::buildPyramid(a);
+    rimg::buildPyramid(b);
 
     std::vector<carve::SetupView> setups{carve::makeSetupView(a), carve::makeSetupView(b),
                                          carve::makeSetupView(c)};

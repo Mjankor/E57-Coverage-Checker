@@ -191,6 +191,10 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             auto img = std::make_unique<rimg::RangeImage>();
             std::string rerr;
             if (rimg::build(*r, i, ro, *img, rerr)) {
+                // The accelerator the carve culls with. About 5/16 of a byte
+                // per cell, and it settles most bricks with one lookup instead
+                // of 512 voxel tests.
+                rimg::buildPyramid(*img);
                 images.push_back(std::move(img));
                 setups.push_back(carve::makeSetupView(*images.back()));
             } else {

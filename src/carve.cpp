@@ -206,6 +206,124 @@ void tallyTile(const Tile& t, Stats& stats) {
 
 } // namespace
 
+namespace {
+
+// What one pyramid query says about a whole brick.
+enum class BrickVerdict {
+    Fallthrough,   // mixed: test each voxel
+    AllVisible,    // every voxel is in clear line of sight from this setup
+    NoEvidence,    // every voxel is behind every surface: reachable, nothing seen
+};
+
+// Bounds the directions a brick occupies, seen from the setup, using its
+// bounding sphere. The cone of half-angle alpha around the brick's centre
+// direction is contained in a latitude/longitude box, which is what the raster
+// is indexed by.
+//
+// Deliberately loose. Every widening of this box weakens the two tests below
+// and costs speed; none of them can make an answer wrong, because a wider
+// region can only report a wider range of surfaces.
+struct AngularBox {
+    double elLo = 0, elHi = 0;
+    double azLo = 0, azHi = 0;
+    double rMin = 0, rMax = 0;
+    bool   valid = false;
+    bool   rowsInside = false;   // the whole box is within the raster's rows
+};
+
+AngularBox boundBrick(const SetupView& s, const double blo[3], const double bhi[3]) {
+    AngularBox b;
+
+    // Centre and bounding-sphere radius, in the scanner's frame.
+    double cx = 0.5 * (blo[0] + bhi[0]);
+    double cy = 0.5 * (blo[1] + bhi[1]);
+    double cz = 0.5 * (blo[2] + bhi[2]);
+    const double hx = 0.5 * (bhi[0] - blo[0]);
+    const double hy = 0.5 * (bhi[1] - blo[1]);
+    const double hz = 0.5 * (bhi[2] - blo[2]);
+    const double rho = std::sqrt(hx * hx + hy * hy + hz * hz);
+
+    s.worldToScanner.apply(cx, cy, cz);
+    const double d = std::sqrt(cx * cx + cy * cy + cz * cz);
+    // The setup inside or on the brick: every direction is possible.
+    if (d <= rho + 1e-9) return b;
+
+    b.rMin = d - rho;
+    b.rMax = d + rho;
+
+    const double alpha = std::asin(std::clamp(rho / d, -1.0, 1.0));
+    const double elC   = std::asin(std::clamp(cz / d, -1.0, 1.0));
+    b.elLo = elC - alpha;
+    b.elHi = elC + alpha;
+
+    // A cone reaching a pole has no bounded azimuth: every bearing is inside it.
+    constexpr double kHalfPi = 1.5707963267948966;
+    if (b.elLo <= -kHalfPi + 1e-6 || b.elHi >= kHalfPi - 1e-6) return b;
+
+    // On a small circle at elevation e, an angular radius alpha spans an
+    // azimuth half-width of asin(sin alpha / cos e). Taking the extreme
+    // elevation of the box rather than its centre widens it, which is the safe
+    // direction.
+    const double elAbs = std::max(std::fabs(b.elLo), std::fabs(b.elHi));
+    const double denom = std::cos(elAbs);
+    if (denom <= 1e-9) return b;
+    const double sinHalf = std::sin(alpha) / denom;
+    if (sinHalf >= 1.0) return b;
+
+    const double azC = std::atan2(cy, cx);
+    const double half = std::asin(sinHalf);
+    b.azLo = azC - half;
+    b.azHi = azC + half;
+    b.valid = true;
+    return b;
+}
+
+BrickVerdict judgeBrick(const SetupView& s, const Params& p,
+                        const double blo[3], const double bhi[3], bool allInRange) {
+    const rimg::RangeImage& im = *s.image;
+    if (im.pyramid.empty()) return BrickVerdict::Fallthrough;
+
+    const AngularBox b = boundBrick(s, blo, bhi);
+    if (!b.valid) return BrickVerdict::Fallthrough;
+
+    // dElPerRow and dAzPerCol can be negative, so the raster coordinates of the
+    // two ends are not ordered.
+    const double ra = im.rowCoord(b.elLo), rb = im.rowCoord(b.elHi);
+    const double ca = im.colCoord(b.azLo), cb = im.colCoord(b.azHi);
+    // One cell of slack on every side, because cellOf rounds to the nearest
+    // cell rather than truncating: a direction just outside the box can still
+    // land on the neighbouring cell.
+    const int64_t row0 = int64_t(std::floor(std::min(ra, rb))) - 1;
+    const int64_t row1 = int64_t(std::ceil(std::max(ra, rb))) + 1;
+    const int64_t col0 = int64_t(std::floor(std::min(ca, cb))) - 1;
+    const int64_t col1 = int64_t(std::ceil(std::max(ca, cb))) + 1;
+
+    const rimg::RangeSpan span = im.span(row0, row1, col0, col1);
+    if (!span.valid) return BrickVerdict::Fallthrough;
+
+    // Every voxel is further than every surface in the region, so no cell can
+    // report anything: a hit is behind it, a no-return has stopped clearing, and
+    // a direction outside the raster says nothing either. Voxels are still in
+    // the domain — they just have no evidence — so this skips the range image,
+    // not the voxels.
+    if (b.rMin > span.maxRange + p.surfaceMargin) return BrickVerdict::NoEvidence;
+
+    // Every voxel is nearer than every surface, so every one is in clear line of
+    // sight. This needs the whole brick inside the raster and inside the rated
+    // range: a direction the scanner never sampled proves nothing, and neither
+    // does one past where it can measure.
+    if (allInRange && b.rMax <= p.maxRange &&
+        b.rMax < span.minRange - p.surfaceMargin &&
+        !(span.statuses & rimg::kHasOutsideFov)) {
+        const double rowLo = std::min(ra, rb) - 1.0, rowHi = std::max(ra, rb) + 1.0;
+        if (rowLo >= 0.0 && rowHi <= double(im.rows) - 1.0) return BrickVerdict::AllVisible;
+    }
+
+    return BrickVerdict::Fallthrough;
+}
+
+} // namespace
+
 // The fast path. Same arithmetic as the reference, reordered for the machine:
 // one setup at a time so a single range image is resident, and within that in
 // bricks, so the patch of image a brick projects onto stays in cache while all
@@ -241,6 +359,47 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                                            out.origin[1] + y1 * p.voxelSize,
                                            out.origin[2] + z1 * p.voxelSize};
                     if (distSqPointBox(s.origin, blo, bhi) > R2) continue;
+
+                    // Whether every voxel in the brick is inside the rated
+                    // range, which decides whether the per-voxel distance test
+                    // can be skipped as well.
+                    double far = 0;
+                    for (int k = 0; k < 3; ++k) {
+                        const double a = std::fabs(blo[k] - s.origin[k]);
+                        const double b = std::fabs(bhi[k] - s.origin[k]);
+                        const double m = std::max(a, b);
+                        far += m * m;
+                    }
+                    const bool allInRange = far <= R2;
+
+                    const BrickVerdict verdict = judgeBrick(s, p, blo, bhi, allInRange);
+
+                    if (verdict != BrickVerdict::Fallthrough) {
+                        // One pyramid lookup settled the whole brick. All that
+                        // is left is to write the bits and keep the tally
+                        // honest — the reference counts one test per voxel per
+                        // setup in range, and so does this.
+                        const uint8_t set = (verdict == BrickVerdict::AllVisible)
+                                          ? uint8_t(kReachable | kVisible)
+                                          : uint8_t(kReachable);
+                        for (uint32_t z = z0; z < z1; ++z) {
+                            for (uint32_t y = y0; y < y1; ++y) {
+                                for (uint32_t x = x0; x < x1; ++x) {
+                                    if (!allInRange) {
+                                        double c[3];
+                                        out.centre(x, y, z, p.voxelSize, c);
+                                        const double dx = c[0] - s.origin[0];
+                                        const double dy = c[1] - s.origin[1];
+                                        const double dz = c[2] - s.origin[2];
+                                        if (dx * dx + dy * dy + dz * dz > R2) continue;
+                                    }
+                                    out.state[out.index(x, y, z)] |= set;
+                                    if (out.isInterior(x, y, z)) ++stats.setupTests;
+                                }
+                            }
+                        }
+                        continue;
+                    }
 
                     for (uint32_t z = z0; z < z1; ++z) {
                         for (uint32_t y = y0; y < y1; ++y) {
