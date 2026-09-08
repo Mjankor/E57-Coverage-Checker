@@ -44,7 +44,7 @@ documented where it is declared. Defaults:
 | parameter | default | meaning |
 |---|---|---|
 | `voxelSize` | 0.05 m | grid spacing |
-| `maxRange` | 45 m | how far a no-return ray clears |
+| `maxRange` | 60 m | how far a no-return ray clears — must exceed the corpus's furthest return, or sky rays stop before clearing anything; `e57cov info` reports what each scan supports |
 | `surfaceMargin` | `0.5 · voxelSize · √3` | half a voxel diagonal; keeps the surface voxel out of VISIBLE |
 | `maxVoidDepth` | 2.0 m (`40 · voxelSize`) | geodesic reach of the void dilation (§6) |
 | `minVoidVolume` | 0.125 m³ (1000 voxels) | components smaller than this are dropped as noise |

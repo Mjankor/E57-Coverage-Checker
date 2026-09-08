@@ -12,8 +12,9 @@ See [DESIGN.md](DESIGN.md) for the full design and the reasoning behind it.
 
 ## Status
 
-**Early. The E57 reader is complete and tested; nothing downstream of it is
-built yet.**
+**In progress.** The reader, the viewer and the corpus indexer are done and
+validated against real scanner files. The visibility analysis itself — the
+reason the tool exists — is one stage in.
 
 | stage | state |
 |---|---|
