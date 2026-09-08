@@ -87,6 +87,12 @@ struct Options {
     // full resolution is not a thing that fits. The per-scan cap is this
     // divided by the scan count, and binning down takes the minimum range per
     // bin, which clears less rather than more.
+    // Passed through to rimg::Options — how much company a no-return needs
+    // before it is believed to be sky rather than a dropped return. The single
+    // most consequential setting after the domain: see rimg::Options.
+    uint32_t skyRadius   = 2;
+    double   skyFraction = 0.75;
+
     uint64_t totalImageCells = 512ull << 20;
     uint32_t minImageCells   = 1u << 20;   // never bin below this per scan
 

@@ -397,6 +397,27 @@ static void testEndToEnd() {
         CHECK(hr.carverVoxelsCompared > 0, "verification actually compared something");
         CHECK(hr.carverDisagreements == 0,
               "a carver that calls carveTile agrees with carveTile");
+
+        // Under verification the CPU's answer is the one kept. A mode whose
+        // whole purpose is to find out whether the carver is lying must not
+        // then show you what the carver said.
+        vis::Options lying = opt;
+        lying.verifyCarver = true;
+        lying.carver = [](const carve::TileKey& k, const std::vector<carve::SetupView>& sv,
+                          const carve::Params& pp, carve::Tile& t, carve::Stats& st,
+                          void*) -> bool {
+            carve::carveTile(k, sv, pp, t, st);
+            // Corrupt it: claim everything in the domain was seen through.
+            for (uint8_t& b : t.state) if (b & carve::kReachable) b = carve::kReachable |
+                                                                     carve::kVisible;
+            return true;
+        };
+        vis::Result lr;
+        CHECK(vis::run({path}, lying, nullptr, lr, err), "ran with a lying carver");
+        CHECK(lr.carverDisagreements > 0, "the lie is detected");
+        CHECK(statsEqual(lr.stats, frontier.stats),
+              "and the reported answer is the CPU's, not the lie");
+        CHECK(latticeSet(lr) == fset, "including the voxels drawn");
         // The whole point: an accelerated run must produce the same answer, and
         // must not double-count the tiles it accelerated.
         CHECK(statsEqual(hr.stats, frontier.stats), "same counts through the carver");

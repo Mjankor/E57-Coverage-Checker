@@ -104,6 +104,80 @@ bool RangeImage::sample(double az, double el, Status& st, double& range) const {
     return true;
 }
 
+// Demotes no-returns that have too few no-return neighbours to OutsideFov.
+//
+// Counted with a separable sliding window, so the cost is two linear passes
+// rather than one window per cell: at 13 M cells the naive form would be 330 M
+// probes. Columns wrap, because azimuth does and a sky region crossing the seam
+// is one region; rows clamp, because the top and bottom of the raster are real
+// edges.
+//
+// The counts all come from the original mask. Reclassifying as it goes would
+// make a cell's verdict depend on the order cells were visited, and erode a sky
+// region from one side.
+void filterIsolatedNoReturns(RangeImage& im, const Options& opt) {
+    if (opt.noReturnRadius == 0 || im.rows == 0 || im.cols == 0) return;
+    const int R    = int(opt.noReturnRadius);
+    const int rows = int(im.rows), cols = int(im.cols);
+    if (cols <= 2 * R || rows == 0) return;
+    const size_t n = im.cells.size();
+
+    std::vector<uint8_t> isNoReturn(n, 0);
+    for (size_t i = 0; i < n; ++i)
+        isNoReturn[i] = (Status(im.cells[i].status) == Status::NoReturn) ? 1u : 0u;
+
+    // Horizontal window, wrapping in azimuth.
+    std::vector<uint16_t> h(n, 0);
+    const int W = 2 * R + 1;
+    for (int r = 0; r < rows; ++r) {
+        const uint8_t* row = &isNoReturn[size_t(r) * size_t(cols)];
+        uint32_t sum = 0;
+        for (int c = -R; c <= R; ++c) sum += row[((c % cols) + cols) % cols];
+        uint16_t* out = &h[size_t(r) * size_t(cols)];
+        for (int c = 0; c < cols; ++c) {
+            out[c] = uint16_t(sum);
+            sum -= row[(((c - R) % cols) + cols) % cols];
+            sum += row[(((c + R + 1) % cols) + cols) % cols];
+        }
+    }
+
+    // Vertical window, clamped, via a prefix sum down each column. Built in
+    // row-major order so both passes stay sequential in memory.
+    std::vector<uint32_t> prefix(size_t(rows + 1) * size_t(cols), 0);
+    for (int r = 0; r < rows; ++r) {
+        const uint16_t* src = &h[size_t(r) * size_t(cols)];
+        const uint32_t* prev = &prefix[size_t(r) * size_t(cols)];
+        uint32_t*       cur  = &prefix[size_t(r + 1) * size_t(cols)];
+        for (int c = 0; c < cols; ++c) cur[c] = prev[c] + src[c];
+    }
+
+    uint64_t demoted = 0;
+    for (int r = 0; r < rows; ++r) {
+        const int lo = std::max(0, r - R);
+        const int hi = std::min(rows - 1, r + R);
+        const double windowCells = double(W) * double(hi - lo + 1);
+        const double needed = opt.noReturnFraction * windowCells;
+        const uint32_t* top = &prefix[size_t(lo) * size_t(cols)];
+        const uint32_t* bot = &prefix[size_t(hi + 1) * size_t(cols)];
+        for (int c = 0; c < cols; ++c) {
+            const size_t i = size_t(r) * size_t(cols) + size_t(c);
+            if (!isNoReturn[i]) continue;
+            if (double(bot[c] - top[c]) >= needed) continue;
+            // Not enough company to be sky. It says nothing rather than
+            // clearing to maxRange, and its stored range goes with it so no
+            // later reader mistakes it for a measurement.
+            im.cells[i].status  = uint8_t(Status::OutsideFov);
+            im.cells[i].rangeCm = 0;
+            ++demoted;
+        }
+    }
+    im.diag.isolatedNoReturns = demoted;
+    if (demoted) {
+        im.diag.noReturns  -= std::min<uint64_t>(demoted, im.diag.noReturns);
+        im.diag.outsideFov += demoted;
+    }
+}
+
 double RangeImage::rowCoord(double el) const {
     if (std::fabs(map.dElPerRow) < 1e-12) return 0.0;
     return (el - map.el0) / map.dElPerRow;
@@ -456,7 +530,21 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         out.cells[i].rangeCm = uint16_t(std::min(opt.maxRange * 100.0, 65535.0));
         ++out.diag.noReturns;
     }
+    // Before the fill, every empty cell is a no-return. This is what decides
+    // which of them are believed.
+    filterIsolatedNoReturns(out, opt);
+
     out.diag.fillFraction = double(out.diag.hits) / double(out.cellCount());
+    if (out.diag.isolatedNoReturns) {
+        char buf[220];
+        std::snprintf(buf, sizeof(buf),
+                      "%llu of %llu empty cells had too few empty neighbours to be sky "
+                      "and were treated as unsampled rather than as clear space",
+                      (unsigned long long)out.diag.isolatedNoReturns,
+                      (unsigned long long)(out.diag.noReturns + out.diag.isolatedNoReturns));
+        if (!out.diag.note.empty()) out.diag.note += "; ";
+        out.diag.note += buf;
+    }
     return true;
 }
 

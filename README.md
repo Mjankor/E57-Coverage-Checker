@@ -157,6 +157,10 @@ For each scan it reports the pose, the prototype with per-field bit widths, and:
   `sphericalInvalidState` field, or nothing at all. This decides whether the
   field of view has to be recovered from angular extent, and getting it wrong
   carves a cone straight through the floor beneath every tripod (DESIGN.md §4).
+- **how many of those empty cells are dropped returns rather than sky** — the
+  file cannot tell them apart, and believing a dropped return clears a pencil of
+  space to the maximum range straight through the building. A high figure here
+  means the scan drops heavily and `--sky-fraction` is worth raising.
 - **which coordinate frame the points are in** — scanner-local with a
   meaningful pose, or already transformed to global. Both conventions appear in
   the wild, sometimes within one corpus.

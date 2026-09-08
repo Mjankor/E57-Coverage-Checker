@@ -60,6 +60,36 @@ struct Options {
     // A residual above this means the row/column grid is not a uniform raster
     // and the linear angular model would misplace lookups.
     double   maxMappingResidualRad = 0.02;   // ~1.15 degrees
+
+    // A no-return is only believed when its neighbourhood is mostly no-return.
+    //
+    // The file cannot tell a ray that saw sky from a ray that hit something and
+    // came back empty — dark paint, glossy tile, wet ground, grazing incidence.
+    // Both are an absent record in the grid. Believing them all is catastrophic:
+    // a dropped return in the middle of a wall clears a pencil of space to
+    // maxRange straight through the building, and a scan with a few per cent of
+    // them threads those pencils through every occluded volume.
+    //
+    // What separates the two is company. Sky comes in large connected regions;
+    // a dropped return is surrounded by neighbours that hit something. So a
+    // no-return is trusted only when most of a small window around it is also
+    // no-return, and is otherwise treated as a direction the scanner said
+    // nothing about — which clears nothing, the conservative reading.
+    //
+    // Radius 2 is a 5x5 window: large enough that a scattered drop cannot
+    // muster the required share, small enough that genuine sky is only eroded by
+    // about two cells at its silhouette edges.
+    //
+    // Three quarters rather than a bare majority, because a bare majority is not
+    // robust to a scan that drops heavily: at a 40% drop rate, chance clusters
+    // reach a majority often enough to matter, and 0.6 let 2.1 M spurious
+    // frontier voxels through where 0.75 let 0.22 M. It costs nothing at low
+    // drop rates — at 0% the two are identical to the voxel.
+    //
+    // Set the radius to 0 to believe every empty cell, which is what this did
+    // before the filter existed.
+    uint32_t noReturnRadius   = 2;
+    double   noReturnFraction = 0.75;
 };
 
 // az(col) = az0 + col * dAzPerCol, el(row) = el0 + row * dElPerRow.
@@ -95,6 +125,11 @@ struct Diagnostics {
     // than the range sphere is built from — the file's declared cartesianBounds
     // would do for a conformant writer, but this is measured from the points
     // that survived decoding rather than taken on trust.
+    // No-returns that failed the neighbourhood test and were demoted to
+    // OutsideFov. A large number here means the scan drops returns, which is
+    // worth knowing about the instrument and the surfaces, not just about this
+    // run: every one of them would otherwise have cleared space to maxRange.
+    uint64_t isolatedNoReturns = 0;
     bool   hasReturnBounds = false;
     double returnMin[3] = {0, 0, 0};
     double returnMax[3] = {0, 0, 0};
@@ -221,6 +256,9 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
 // accelerator, not part of the image: a caller that only samples directions has
 // no use for it and should not pay the memory.
 void buildPyramid(RangeImage& im);
+
+// Exposed for testing: the sky-versus-dropped-return decision.
+void filterIsolatedNoReturns(RangeImage& im, const Options& opt);
 
 const char* statusName(Status s);
 

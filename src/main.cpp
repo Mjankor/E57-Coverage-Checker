@@ -204,6 +204,16 @@ int info(const std::string& path, bool verifyCrc, double maxRange) {
                                 "(these are what clear space)\n",
                                 (unsigned long long)img.diag.hits,
                                 (unsigned long long)img.diag.noReturns);
+                    if (img.diag.isolatedNoReturns) {
+                        const double pct = 100.0 * double(img.diag.isolatedNoReturns) /
+                                           double(img.diag.isolatedNoReturns + img.diag.noReturns);
+                        std::printf("      drops     : %llu empty cells (%.1f%% of them) had too "
+                                    "few empty\n                  neighbours to be sky and clear "
+                                    "nothing. Believed, each\n                  would have cleared "
+                                    "a line to %.0f m through solid geometry.\n",
+                                    (unsigned long long)img.diag.isolatedNoReturns, pct,
+                                    ro.maxRange);
+                    }
                     std::printf("      range     : returns from %.2f m to %.2f m; "
                                 "no-returns clear to %.0f m\n",
                                 img.diag.nearestReturn, img.diag.furthestReturn, ro.maxRange);
@@ -391,6 +401,14 @@ void usage() {
         "          'any' stops at the first bit: still exact for the unknown set,\n"
         "          but visible and occupied become lower bounds. 'none' asks every\n"
         "          setup, matching the reference's work exactly.\n"
+        "  --sky-radius <cells>   --sky-fraction <0..1>\n"
+        "          (carve) How much company an empty cell needs before it is\n"
+        "          believed to have seen sky rather than dropped a return.\n"
+        "          Default radius 2 (a 5x5 window) and 0.75 of it. Nothing in an\n"
+        "          E57 distinguishes the two, and believing a dropped return\n"
+        "          clears a pencil of space to --max-range through solid\n"
+        "          geometry. Raise the fraction if a scan drops heavily; set the\n"
+        "          radius to 0 to believe every empty cell, as before.\n"
         "  --threads <n>\n"
         "          (carve) Worker threads over the tile list. Default 0, the\n"
         "          machine's count. The answer is identical at any count.\n"
@@ -438,6 +456,17 @@ int main(int argc, char** argv) {
             continue;
         }
         if (std::strcmp(argv[i], "--solid") == 0) { co.solid = true; continue; }
+        if (std::strcmp(argv[i], "--sky-radius") == 0 && i + 1 < argc) {
+            co.skyRadius = uint32_t(std::strtoul(argv[++i], nullptr, 10));
+            continue;
+        }
+        if (std::strcmp(argv[i], "--sky-fraction") == 0 && i + 1 < argc) {
+            co.skyFraction = std::strtod(argv[++i], nullptr);
+            if (co.skyFraction < 0.0 || co.skyFraction > 1.0) {
+                std::printf("--sky-fraction must be in 0..1\n"); return 2;
+            }
+            continue;
+        }
         if (std::strcmp(argv[i], "--early-out") == 0 && i + 1 < argc) {
             const std::string v = argv[++i];
             if      (v == "none")      co.earlyOut = carve::EarlyOut::None;

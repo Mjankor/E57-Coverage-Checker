@@ -178,6 +178,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     rimg::Options ro;
     ro.maxRange = opt.maxRange;
     ro.maxCells = uint32_t(perImage);
+    ro.noReturnRadius   = opt.skyRadius;
+    ro.noReturnFraction = opt.skyFraction;
 
     // --- range images -----------------------------------------------------
     std::vector<std::unique_ptr<rimg::RangeImage>> images;
@@ -186,11 +188,14 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     setups.reserve(size_t(scanCount));
 
     uint64_t seen = 0;
+    uint64_t isolated = 0, believedSky = 0;
     for (const auto& r : readers) {
         for (size_t i = 0; i < r->scanCount(); ++i) {
             auto img = std::make_unique<rimg::RangeImage>();
             std::string rerr;
             if (rimg::build(*r, i, ro, *img, rerr)) {
+                isolated    += img->diag.isolatedNoReturns;
+                believedSky += img->diag.noReturns;
                 // The accelerator the carve culls with. About 5/16 of a byte
                 // per cell, and it settles most bricks with one lookup instead
                 // of 512 voxel tests.
@@ -360,30 +365,36 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
 
             bool carved = false;
             if (opt.carver) {
-                // Statistics go to a scratch tally: if the carver declines part
-                // way it may already have counted some of the tile, and the CPU
-                // pass that follows would count it again.
+                // Under verification the carver's output goes to a scratch tile
+                // and the CPU's is the one used. The CPU is the oracle; a mode
+                // whose purpose is to find out whether the carver is lying must
+                // not then hand you the carver's answer.
+                carve::Tile&  target = opt.verifyCarver ? w.check : w.tile;
+                // A scratch tally too: a carver that declines part way may
+                // already have counted some of the tile, and the CPU pass that
+                // follows would count it again.
                 carve::Stats attempt;
-                carved = opt.carver(keys[size_t(t)], setups, p, w.tile, attempt,
+                carved = opt.carver(keys[size_t(t)], setups, p, target, attempt,
                                     opt.carverUser);
                 if (carved) {
                     ++w.carverTiles;
-                    w.stats.voxels     += attempt.voxels;
-                    w.stats.reachable  += attempt.reachable;
-                    w.stats.visible    += attempt.visible;
-                    w.stats.occupied   += attempt.occupied;
-                    w.stats.unknown    += attempt.unknown;
-                    w.stats.setupTests += attempt.setupTests;
+                    if (!opt.verifyCarver) {
+                        w.stats.voxels     += attempt.voxels;
+                        w.stats.reachable  += attempt.reachable;
+                        w.stats.visible    += attempt.visible;
+                        w.stats.occupied   += attempt.occupied;
+                        w.stats.unknown    += attempt.unknown;
+                        w.stats.setupTests += attempt.setupTests;
+                    }
                 } else {
                     ++w.carverRefused;
                 }
             }
-            if (!carved) {
+            if (!carved || opt.verifyCarver) {
                 carve::carveTile(keys[size_t(t)], setups, p, w.tile, w.stats);
-            } else if (opt.verifyCarver) {
-                carve::Stats ignored;
-                carve::carveTile(keys[size_t(t)], setups, p, w.check, ignored);
-                w.compared += w.check.state.size();
+            }
+            if (carved && opt.verifyCarver) {
+                w.compared += w.tile.state.size();
                 for (size_t i = 0; i < w.check.state.size() && i < w.tile.state.size(); ++i)
                     if (w.check.state[i] != w.tile.state[i]) ++w.disagreements;
             }
@@ -475,6 +486,11 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     if (out.keptFraction < 1.0)
         note += fmt("showing %.1f%% of %llu frontier voxels (display cap); ",
                     100.0 * out.keptFraction, (unsigned long long)out.qualified);
+    if (isolated) {
+        note += fmt("%llu empty cells looked like dropped returns rather than sky and "
+                    "cleared nothing (%llu were believed); ",
+                    (unsigned long long)isolated, (unsigned long long)believedSky);
+    }
     if (out.domain.kind == carve::Domain::Kind::Box && out.sphereVolume > 0)
         note += fmt("domain narrowed to the surveyed extent, %.0f m^3 instead of %.0f; ",
                     out.domainVolume, out.sphereVolume);
