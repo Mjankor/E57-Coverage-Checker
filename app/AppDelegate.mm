@@ -74,11 +74,20 @@ std::string corpusKey(const std::vector<std::string> &paths) {
     return buf;
 }
 
-// The sidebar's default width. Narrow on purpose: it identifies setups, and
-// the cloud is what the window is for.
-constexpr CGFloat kSidebarWidth    = 320;
-constexpr CGFloat kSidebarMinWidth = 200;
+// The sidebar's default width. Narrow on purpose — it identifies setups, and the
+// cloud is what the window is for — but wide enough that all three columns fit
+// with the scroller: 150 + 104 + 60 of column, two 3 px gaps, 16 for the
+// scroller, and a little slack.
+constexpr CGFloat kSidebarWidth    = 344;
+// Below this the three columns cannot all meet their minimum widths
+// (80 + 70 + 52, two 3 px gaps, and the scroller).
+constexpr CGFloat kSidebarMinWidth = 240;
 constexpr CGFloat kSidebarMaxWidth = 620;
+// The cloud never gets squeezed to nothing, however far the divider is dragged.
+constexpr CGFloat kCloudMinWidth   = 360;
+// Space left around the window on the desktop. Not zero, so it still reads as a
+// window rather than as a takeover, and so the corners stay grabbable.
+constexpr CGFloat kScreenInset     = 20;
 
 const char *kindLabel(check::Kind k) {
     switch (k) {
@@ -126,13 +135,14 @@ const char *kindLabel(check::Kind k) {
     (void)note;
     [self buildMenu];
 
-    // Open to most of the display rather than a fixed box. A point cloud is
-    // read by eye, and the default window is the one people actually work in.
+    // The working area, less a small inset. No absolute cap: a point cloud is
+    // read by eye and there is no display large enough that you would rather
+    // have grey desktop beside it.
     NSScreen *screen = NSScreen.mainScreen;
     const NSRect visible = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1440, 900);
     const NSRect frame = NSMakeRect(0, 0,
-                                    std::min(visible.size.width  - 80.0, 1760.0),
-                                    std::min(visible.size.height - 60.0, 1100.0));
+                                    std::max(900.0, visible.size.width  - 2 * kScreenInset),
+                                    std::max(600.0, visible.size.height - 2 * kScreenInset));
     _window = [[NSWindow alloc]
         initWithContentRect:frame
                   styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
@@ -157,27 +167,38 @@ const char *kindLabel(check::Kind k) {
     // Sized so the three columns fit the sidebar at its default width: the list
     // is for identifying a setup, not for reading paths, and every pixel it
     // takes is one the cloud does not get.
-    struct { NSString *ident; NSString *title; CGFloat width; } cols[] = {
-        {@"scan",   @"Setup",  158},
-        {@"status", @"Status",  95},
-        {@"points", @"Points",  52},
+    struct { NSString *ident; NSString *title; CGFloat width; CGFloat minWidth; BOOL right; }
+    cols[] = {
+        {@"scan",   @"Setup",  150, 80, NO},
+        {@"status", @"Status", 104, 70, NO},
+        {@"points", @"Points",  60, 52, YES},
     };
     for (auto &c : cols) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:c.ident];
-        col.title = c.title;
-        col.width = c.width;
+        col.title    = c.title;
+        col.width    = c.width;
+        col.minWidth = c.minWidth;
+        if (c.right) col.headerCell.alignment = NSTextAlignmentRight;
         [_table addTableColumn:col];
     }
+    // Widening the sidebar lengthens the name column, which is the one that
+    // truncates; status and point count already fit what they hold.
+    _table.columnAutoresizingStyle = NSTableViewFirstColumnOnlyAutoresizingStyle;
     NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:
         NSMakeRect(0, 0, kSidebarWidth, frame.size.height)];
     scroll.documentView = _table;
     scroll.hasVerticalScroller = YES;
+    // An overlay scroller would sit on top of the last column; a legacy one
+    // takes its own width, which is what the sidebar width above allows for.
+    scroll.scrollerStyle = NSScrollerStyleLegacy;
+    scroll.borderType = NSNoBorder;
     scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
-    const CGFloat rightWidth = std::max<CGFloat>(400, frame.size.width - kSidebarWidth);
+    const CGFloat rightWidth = std::max(kCloudMinWidth, frame.size.width - kSidebarWidth);
     NSView *rightPane = [[NSView alloc] initWithFrame:
         NSMakeRect(0, 0, rightWidth, frame.size.height)];
     rightPane.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    rightPane.autoresizesSubviews = YES;
 
     _cloudView = [[CloudView alloc] initWithFrame:
         NSMakeRect(0, 44, rightWidth, frame.size.height - 44)];
@@ -271,6 +292,12 @@ const char *kindLabel(check::Kind k) {
 }
 
 // --- split view -----------------------------------------------------------
+//
+// The geometry is done here rather than left to NSSplitView's own adjustment
+// and the subviews' autoresizing masks. Those interact in ways that are easy to
+// get subtly wrong — the first version of this left the cloud at its original
+// width while the window grew, so a wide window had a band of empty desktop
+// grey down its right-hand side — and this is small enough to just state.
 
 - (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposed
          ofSubviewAt:(NSInteger)index {
@@ -280,14 +307,35 @@ const char *kindLabel(check::Kind k) {
 
 - (CGFloat)splitView:(NSSplitView *)splitView constrainMaxCoordinate:(CGFloat)proposed
          ofSubviewAt:(NSInteger)index {
-    (void)splitView; (void)index;
-    return std::min<CGFloat>(proposed, kSidebarMaxWidth);
+    (void)proposed; (void)index;
+    // Never past the point where the cloud would be squeezed to nothing.
+    const CGFloat room = splitView.bounds.size.width - splitView.dividerThickness -
+                         kCloudMinWidth;
+    return std::max(kSidebarMinWidth, std::min(kSidebarMaxWidth, room));
 }
 
-// The cloud takes the space when the window grows; the list keeps its width.
-- (BOOL)splitView:(NSSplitView *)splitView shouldAdjustSizeOfSubview:(NSView *)subview {
-    (void)splitView;
-    return subview != splitView.subviews.firstObject;
+// The list keeps whatever width it has been dragged to; every pixel of a resize
+// goes to the cloud.
+- (void)splitView:(NSSplitView *)splitView resizeSubviewsWithOldSize:(NSSize)oldSize {
+    (void)oldSize;
+    if (splitView.subviews.count < 2) return;
+    NSView *list  = splitView.subviews[0];
+    NSView *cloud = splitView.subviews[1];
+
+    const CGFloat total    = splitView.bounds.size.width;
+    const CGFloat height   = splitView.bounds.size.height;
+    const CGFloat divider  = splitView.dividerThickness;
+
+    CGFloat listWidth = list.frame.size.width;
+    if (listWidth <= 0) listWidth = kSidebarWidth;
+    listWidth = std::max(kSidebarMinWidth, std::min(kSidebarMaxWidth, listWidth));
+    // A window narrower than both minimums together: the list yields first, so
+    // the cloud never disappears entirely.
+    listWidth = std::min(listWidth, std::max<CGFloat>(0, total - divider - kCloudMinWidth));
+
+    list.frame  = NSMakeRect(0, 0, listWidth, height);
+    cloud.frame = NSMakeRect(listWidth + divider, 0,
+                             std::max<CGFloat>(0, total - listWidth - divider), height);
 }
 
 - (void)buildMenu {
