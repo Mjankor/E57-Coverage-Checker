@@ -65,6 +65,13 @@ struct Options {
     // Upper bound on voxels handed back for drawing. 6 M is 120 MB as
     // StorePoints, which is a fraction of what the point cloud itself costs.
     uint64_t displayCap = 6ull << 20;
+
+    // Worker threads over the tile list. 0 asks the machine. Tiles share
+    // nothing — no accumulator, no neighbour reads across seams — so this is
+    // parallel by construction rather than by locking, and the result is
+    // identical at any thread count: the statistics are integer sums, and the
+    // display sample is chosen by a hash threshold rather than by counting.
+    uint32_t threads = 0;
 };
 
 // done/total are 0 when a stage cannot say. Return false to cancel; a cancelled

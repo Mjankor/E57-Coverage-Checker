@@ -3,10 +3,13 @@
 #include "e57.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <memory>
+#include <mutex>
+#include <thread>
 
 namespace vis {
 
@@ -67,23 +70,23 @@ uint64_t voxelHash(int64_t x, int64_t y, int64_t z) {
 namespace {
 
 // Collects the voxels to draw, sampling down whenever the cap is reached.
+//
+// The origin is fixed before collection starts rather than taken from the first
+// voxel to arrive. With one thread those are the same thing; with several,
+// "first to arrive" is a race, and an origin that varied run to run would make
+// the float offsets — and so the drawn positions — vary with it.
 struct Collector {
     std::vector<lod::StorePoint> out;
     uint64_t cap = 0;
     uint64_t threshold = ~0ull;   // keep when voxelHash < threshold
     uint64_t qualified = 0;
     double   origin[3] = {0, 0, 0};
-    bool     haveOrigin = false;
 
     void add(const double centre[3], const int64_t gi[3]) {
         ++qualified;
         const uint64_t h = voxelHash(gi[0], gi[1], gi[2]);
         if (h >= threshold) return;
 
-        if (!haveOrigin) {
-            for (int k = 0; k < 3; ++k) origin[k] = centre[k];
-            haveOrigin = true;
-        }
         lod::StorePoint p{};
         p.x = float(centre[0] - origin[0]);
         p.y = float(centre[1] - origin[1]);
@@ -96,6 +99,27 @@ struct Collector {
         if (cap && out.size() > cap) halve();
     }
 
+    // Takes another collector's voxels. Both were filtered at their own
+    // threshold; re-filtering the union at the lower of the two restores the
+    // exact invariant, and the caller then halves down to the cap as a single
+    // thread would have.
+    void absorb(Collector& other) {
+        qualified += other.qualified;
+        threshold = std::min(threshold, other.threshold);
+        out.insert(out.end(), other.out.begin(), other.out.end());
+        keys.insert(keys.end(), other.keys.begin(), other.keys.end());
+        other.out.clear();
+        other.keys.clear();
+    }
+
+    void filterToThreshold() {
+        size_t w = 0;
+        for (size_t i = 0; i < out.size(); ++i)
+            if (keys[i] < threshold) { out[w] = out[i]; keys[w] = keys[i]; ++w; }
+        out.resize(w);
+        keys.resize(w);
+    }
+
     // Halving the threshold drops about half the kept set, and re-testing what
     // is already held keeps the invariant exact: whatever order voxels arrived
     // in, and however many times the threshold has moved, the result is always
@@ -103,12 +127,7 @@ struct Collector {
     // makes the same site draw the same way at any tile size.
     void halve() {
         threshold /= 2;
-        size_t w = 0;
-        for (size_t i = 0; i < out.size(); ++i) {
-            if (keys[i] < threshold) { out[w] = out[i]; keys[w] = keys[i]; ++w; }
-        }
-        out.resize(w);
-        keys.resize(w);
+        filterToThreshold();
     }
 
     std::vector<uint64_t> keys;
@@ -207,42 +226,122 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
 
     const std::vector<carve::TileKey> keys = carve::tilesForSetups(setups, p);
     out.tilesTotal = keys.size();
+    const uint64_t plannedTiles = opt.maxTiles
+                                ? std::min<uint64_t>(opt.maxTiles, keys.size())
+                                : keys.size();
 
-    Collector col;
-    col.cap = opt.displayCap;
-
-    carve::Tile tile;
-    for (size_t t = 0; t < keys.size(); ++t) {
-        if (opt.maxTiles && out.tilesCarved >= opt.maxTiles) { out.partial = true; break; }
-        carve::carveTile(keys[t], setups, p, tile, out.stats);
-        ++out.tilesCarved;
-
-        for (uint32_t z = tile.interiorBegin(); z < tile.interiorEnd(); ++z) {
-            for (uint32_t y = tile.interiorBegin(); y < tile.interiorEnd(); ++y) {
-                for (uint32_t x = tile.interiorBegin(); x < tile.interiorEnd(); ++x) {
-                    // Exactly kReachable: in the domain, and nothing observed
-                    // it. Anything else is either outside the question or was
-                    // seen by something.
-                    if (tile.state[tile.index(x, y, z)] != carve::kReachable) continue;
-                    if (!opt.solid && !touchesVisible(tile, x, y, z)) continue;
-                    double c[3];
-                    tile.centre(x, y, z, p.voxelSize, c);
-                    int64_t gi[3];
-                    tile.globalIndex(x, y, z, gi);
-                    col.add(c, gi);
-                }
+    // The origin is the centre of the domain, computed from the tile list before
+    // anything is carved. Deterministic, independent of thread count, and it
+    // keeps the float offsets small even at UTM magnitudes.
+    double origin[3] = {0, 0, 0};
+    if (!keys.empty()) {
+        int64_t lo[3] = {keys[0].x, keys[0].y, keys[0].z};
+        int64_t hi[3] = {keys[0].x, keys[0].y, keys[0].z};
+        for (const carve::TileKey& k : keys) {
+            const int64_t v[3] = {k.x, k.y, k.z};
+            for (int i = 0; i < 3; ++i) {
+                lo[i] = std::min(lo[i], v[i]);
+                hi[i] = std::max(hi[i], v[i]);
             }
         }
-
-        if (!tick("carving", out.tilesCarved, keys.size())) {
-            out.cancelled = true;
-            out.partial = true;
-            break;
-        }
+        for (int i = 0; i < 3; ++i)
+            origin[i] = 0.5 * (double(lo[i]) + double(hi[i]) + 1.0) * p.tileMetres();
     }
 
+    unsigned nthreads = opt.threads ? opt.threads : std::thread::hardware_concurrency();
+    if (nthreads == 0) nthreads = 1;
+    nthreads = unsigned(std::min<uint64_t>(nthreads, std::max<uint64_t>(1, plannedTiles)));
+
+    // Per worker: its own statistics, its own collector, its own tile scratch.
+    // Nothing is shared but the tile cursor and the progress lock.
+    struct Worker {
+        carve::Stats stats;
+        Collector    col;
+        carve::Tile  tile;
+    };
+    std::vector<Worker> workers(nthreads);
+    for (Worker& w : workers) {
+        // Each worker gets the whole cap rather than a share of it. A worker's
+        // voxels are a subset of the run's, so a subset can never need a lower
+        // threshold than the whole would — which is what makes the merge below
+        // land on exactly the threshold one thread would have reached. Tiles are
+        // handed out dynamically, so in practice a worker holds about its share.
+        w.col.cap = opt.displayCap;
+        for (int k = 0; k < 3; ++k) w.col.origin[k] = origin[k];
+    }
+
+    std::atomic<uint64_t> cursor{0};
+    std::atomic<uint64_t> finished{0};
+    std::atomic<bool>     stop{false};
+    std::mutex            progressLock;
+
+    auto body = [&](unsigned id) {
+        Worker& w = workers[id];
+        for (;;) {
+            if (stop.load(std::memory_order_relaxed)) break;
+            const uint64_t t = cursor.fetch_add(1, std::memory_order_relaxed);
+            if (t >= plannedTiles) break;
+
+            carve::carveTile(keys[size_t(t)], setups, p, w.tile, w.stats);
+
+            const carve::Tile& tile = w.tile;
+            for (uint32_t z = tile.interiorBegin(); z < tile.interiorEnd(); ++z) {
+                for (uint32_t y = tile.interiorBegin(); y < tile.interiorEnd(); ++y) {
+                    for (uint32_t x = tile.interiorBegin(); x < tile.interiorEnd(); ++x) {
+                        // Exactly kReachable: in the domain, and nothing
+                        // observed it. Anything else is either outside the
+                        // question or was seen by something.
+                        if (tile.state[tile.index(x, y, z)] != carve::kReachable) continue;
+                        if (!opt.solid && !touchesVisible(tile, x, y, z)) continue;
+                        double c[3];
+                        tile.centre(x, y, z, p.voxelSize, c);
+                        int64_t gi[3];
+                        tile.globalIndex(x, y, z, gi);
+                        w.col.add(c, gi);
+                    }
+                }
+            }
+
+            const uint64_t d = finished.fetch_add(1, std::memory_order_relaxed) + 1;
+            // Serialised because the callback ends up on one UI thread. It is
+            // taken once per tile, which is milliseconds of work apart.
+            std::lock_guard<std::mutex> lk(progressLock);
+            if (!tick("carving", d, plannedTiles)) stop.store(true, std::memory_order_relaxed);
+        }
+    };
+
+    if (nthreads == 1) {
+        body(0);
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(nthreads);
+        for (unsigned i = 0; i < nthreads; ++i) pool.emplace_back(body, i);
+        for (std::thread& th : pool) th.join();
+    }
+
+    out.tilesCarved = finished.load();
+    if (stop.load()) { out.cancelled = true; out.partial = true; }
+    else if (opt.maxTiles && opt.maxTiles < keys.size()) out.partial = true;
+
+    // Merge. Integer sums are order-independent, so the statistics are exact
+    // whatever order the tiles finished in.
+    Collector col;
+    col.cap = opt.displayCap;
+    for (int k = 0; k < 3; ++k) col.origin[k] = origin[k];
+    for (Worker& w : workers) {
+        out.stats.voxels     += w.stats.voxels;
+        out.stats.reachable  += w.stats.reachable;
+        out.stats.visible    += w.stats.visible;
+        out.stats.occupied   += w.stats.occupied;
+        out.stats.unknown    += w.stats.unknown;
+        out.stats.setupTests += w.stats.setupTests;
+        col.absorb(w.col);
+    }
+    col.filterToThreshold();
+    while (col.cap && col.out.size() > col.cap) col.halve();
+
     out.voxels = std::move(col.out);
-    for (int k = 0; k < 3; ++k) out.origin[k] = col.origin[k];
+    for (int k = 0; k < 3; ++k) out.origin[k] = origin[k];
     out.qualified = col.qualified;
     out.keptFraction = col.qualified ? double(out.voxels.size()) / double(col.qualified) : 1.0;
 

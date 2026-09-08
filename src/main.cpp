@@ -26,6 +26,7 @@
 
 #include <chrono>
 #include <memory>
+#include <thread>
 
 #include <algorithm>
 #include <cmath>
@@ -300,8 +301,9 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
 
     std::printf("\nsetups    : %llu used, %llu skipped\n",
                 (unsigned long long)res.setupsUsed, (unsigned long long)res.scansSkipped);
-    std::printf("voxel     : %.3f m   ·   tile %u^3   ·   max range %.0f m\n",
-                opt.voxelSize, opt.tileVoxels, opt.maxRange);
+    std::printf("voxel     : %.3f m   ·   tile %u^3   ·   max range %.0f m   ·   %u thread(s)\n",
+                opt.voxelSize, opt.tileVoxels, opt.maxRange,
+                opt.threads ? opt.threads : std::thread::hardware_concurrency());
     std::printf("domain    : %llu tiles, %llu carved%s\n",
                 (unsigned long long)res.tilesTotal, (unsigned long long)res.tilesCarved,
                 res.partial ? "  (stopped early — the numbers below are a sample)" : "");
@@ -360,6 +362,9 @@ void usage() {
         "          set and nothing else — the answer is identical either way.\n"
         "  --max-tiles <n>\n"
         "          (carve) Stop after n tiles. Default 0, the whole domain.\n"
+        "  --threads <n>\n"
+        "          (carve) Worker threads over the tile list. Default 0, the\n"
+        "          machine's count. The answer is identical at any count.\n"
         "  --solid (carve) Keep every unknown voxel rather than only those on the\n"
         "          frontier with observed space. Far more voxels, same answer:\n"
         "          an opaque volume hides its own interior anyway.\n");
@@ -404,6 +409,12 @@ int main(int argc, char** argv) {
             continue;
         }
         if (std::strcmp(argv[i], "--solid") == 0) { co.solid = true; continue; }
+        if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+            const long v = std::strtol(argv[++i], nullptr, 10);
+            if (v < 0 || v > 1024) { std::printf("--threads must be in 0..1024\n"); return 2; }
+            co.threads = uint32_t(v);
+            continue;
+        }
         paths.push_back(argv[i]);
     }
     if (paths.empty()) { usage(); return 2; }

@@ -24,6 +24,10 @@ add_library(e57cov_core STATIC
   src/carve.cpp
   src/visibility.cpp)
 target_include_directories(e57cov_core PUBLIC src)
+# The tile loop is parallel; the standard library needs the platform's thread
+# support explicitly on some toolchains.
+find_package(Threads REQUIRED)
+target_link_libraries(e57cov_core PUBLIC Threads::Threads)
 target_compile_options(e57cov_core PRIVATE -Wall -Wextra)
 
 add_executable(e57cov src/main.cpp)

@@ -277,6 +277,33 @@ static void testEndToEnd() {
     CHECK(statsEqual(frontier.stats, wideRes.stats), "same counts at a different tile size");
     CHECK(latticeSet(wideRes) == fset, "and exactly the same voxels drawn");
 
+    // 2b. Nor does the thread count. This is the property that makes the
+    // parallel run trustworthy: not "about the same answer, faster", but the
+    // same answer.
+    for (uint32_t n : {1u, 2u, 4u, 7u}) {
+        vis::Options threaded = opt;
+        threaded.threads = n;
+        vis::Result tr;
+        CHECK(vis::run({path}, threaded, nullptr, tr, err), err.empty() ? "ran threaded" : err.c_str());
+        CHECK(statsEqual(frontier.stats, tr.stats), "same counts at every thread count");
+        CHECK(latticeSet(tr) == fset, "and exactly the same voxels drawn");
+        CHECK(tr.origin[0] == frontier.origin[0] && tr.origin[1] == frontier.origin[1] &&
+              tr.origin[2] == frontier.origin[2], "and the same origin");
+    }
+
+    // The cap and the threads together: sampling must not become thread
+    // dependent, which is where a per-worker share of the cap would go wrong.
+    {
+        vis::Options a = opt, b = opt;
+        a.displayCap = frontier.voxels.size() / 3; a.threads = 1;
+        b.displayCap = a.displayCap;               b.threads = 6;
+        vis::Result ra, rb;
+        CHECK(vis::run({path}, a, nullptr, ra, err), "ran capped, one thread");
+        CHECK(vis::run({path}, b, nullptr, rb, err), "ran capped, six threads");
+        CHECK(latticeSet(ra) == latticeSet(rb),
+              "a capped run draws the same voxels however many threads carved it");
+    }
+
     // 3. The cap samples rather than truncates.
     vis::Options capped = opt;
     capped.displayCap = frontier.voxels.size() / 4;
