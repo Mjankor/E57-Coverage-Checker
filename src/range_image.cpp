@@ -143,6 +143,12 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     // non-conformant "pre-transformed" case has to be undone.
     const viewer::FrameDecision fd = viewer::decideFrame(reader, scanIndex);
     const bool subtractPose = !fd.applyPose() && s.hasPose && cartesian;
+    // The undo is the full inverse pose, rotation included: p_local =
+    // R^T (p_world - t). Subtracting only the translation would leave the points
+    // on world-aligned axes about the scanner, which is not the frame `pose`
+    // describes — and the carve builds its world-to-scanner transform from
+    // `pose`, so the two have to mean the same thing.
+    const viewer::Rigid poseRot = viewer::rigidFromPose(s.pose);
 
     // Grid dimensions.
     uint32_t gridRows = 0, gridCols = 0;
@@ -183,7 +189,12 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
             double x, y, z;
             if (cartesian) {
                 x = b.columns[0][k]; y = b.columns[1][k]; z = b.columns[2][k];
-                if (subtractPose) { x -= s.pose.t[0]; y -= s.pose.t[1]; z -= s.pose.t[2]; }
+                if (subtractPose) {
+                    const double a = x - s.pose.t[0], bb = y - s.pose.t[1], c = z - s.pose.t[2];
+                    x = poseRot.R[0] * a + poseRot.R[3] * bb + poseRot.R[6] * c;
+                    y = poseRot.R[1] * a + poseRot.R[4] * bb + poseRot.R[7] * c;
+                    z = poseRot.R[2] * a + poseRot.R[5] * bb + poseRot.R[8] * c;
+                }
             } else {
                 const double r = b.columns[0][k], a = b.columns[1][k], e = b.columns[2][k];
                 const double ce = std::cos(e);

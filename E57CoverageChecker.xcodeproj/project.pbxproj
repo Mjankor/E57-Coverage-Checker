@@ -7,85 +7,104 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		E57C0000000000000000002D /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
-		E57C0000000000000000002E /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
-		E57C0000000000000000002F /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
-		E57C00000000000000000030 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
-		E57C00000000000000000031 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
-		E57C00000000000000000032 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
-		E57C00000000000000000033 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
-		E57C00000000000000000034 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
-		E57C00000000000000000035 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
-		E57C00000000000000000036 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
-		E57C00000000000000000037 /* main.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000016 /* main.cpp */; };
-		E57C0000000000000000003E /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
-		E57C0000000000000000003F /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
-		E57C00000000000000000040 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
-		E57C00000000000000000041 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
-		E57C00000000000000000042 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
-		E57C00000000000000000043 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
-		E57C00000000000000000044 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
-		E57C00000000000000000045 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
-		E57C00000000000000000046 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
-		E57C00000000000000000047 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
-		E57C00000000000000000048 /* test_e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001E /* test_e57.cpp */; };
-		E57C0000000000000000004F /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
-		E57C00000000000000000050 /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
-		E57C00000000000000000051 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
-		E57C00000000000000000052 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
-		E57C00000000000000000053 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
-		E57C00000000000000000054 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
-		E57C00000000000000000055 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
-		E57C00000000000000000056 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
-		E57C00000000000000000057 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
-		E57C00000000000000000058 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
-		E57C00000000000000000059 /* test_viewer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001F /* test_viewer.cpp */; };
-		E57C00000000000000000060 /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
-		E57C00000000000000000061 /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
-		E57C00000000000000000062 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
-		E57C00000000000000000063 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
-		E57C00000000000000000064 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
-		E57C00000000000000000065 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
-		E57C00000000000000000066 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
-		E57C00000000000000000067 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
-		E57C00000000000000000068 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
-		E57C00000000000000000069 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
-		E57C0000000000000000006A /* test_lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000020 /* test_lod.cpp */; };
-		E57C00000000000000000071 /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
-		E57C00000000000000000072 /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
-		E57C00000000000000000073 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
-		E57C00000000000000000074 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
-		E57C00000000000000000075 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
-		E57C00000000000000000076 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
-		E57C00000000000000000077 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
-		E57C00000000000000000078 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
-		E57C00000000000000000079 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
-		E57C0000000000000000007A /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
-		E57C0000000000000000007B /* test_indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000021 /* test_indexer.cpp */; };
-		E57C00000000000000000082 /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
-		E57C00000000000000000083 /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
-		E57C00000000000000000084 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
-		E57C00000000000000000085 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
-		E57C00000000000000000086 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
-		E57C00000000000000000087 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
-		E57C00000000000000000088 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
-		E57C00000000000000000089 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
-		E57C0000000000000000008A /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
-		E57C0000000000000000008B /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
-		E57C0000000000000000008C /* test_range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000022 /* test_range_image.cpp */; };
-		E57C00000000000000000093 /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
-		E57C00000000000000000094 /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
-		E57C00000000000000000095 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
-		E57C00000000000000000096 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
-		E57C00000000000000000097 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
-		E57C00000000000000000098 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
-		E57C00000000000000000099 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
-		E57C0000000000000000009A /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
-		E57C0000000000000000009B /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
-		E57C0000000000000000009C /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
-		E57C0000000000000000009D /* Renderer.mm in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000018 /* Renderer.mm */; };
-		E57C0000000000000000009E /* CloudView.mm in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001A /* CloudView.mm */; };
-		E57C0000000000000000009F /* AppDelegate.mm in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001B /* AppDelegate.mm */; };
+		E57C00000000000000000030 /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
+		E57C00000000000000000031 /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
+		E57C00000000000000000032 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
+		E57C00000000000000000033 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
+		E57C00000000000000000034 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
+		E57C00000000000000000035 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
+		E57C00000000000000000036 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
+		E57C00000000000000000037 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
+		E57C00000000000000000038 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
+		E57C00000000000000000039 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C0000000000000000003A /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
+		E57C0000000000000000003B /* main.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000018 /* main.cpp */; };
+		E57C00000000000000000042 /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
+		E57C00000000000000000043 /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
+		E57C00000000000000000044 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
+		E57C00000000000000000045 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
+		E57C00000000000000000046 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
+		E57C00000000000000000047 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
+		E57C00000000000000000048 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
+		E57C00000000000000000049 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
+		E57C0000000000000000004A /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
+		E57C0000000000000000004B /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C0000000000000000004C /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
+		E57C0000000000000000004D /* test_e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000020 /* test_e57.cpp */; };
+		E57C00000000000000000054 /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
+		E57C00000000000000000055 /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
+		E57C00000000000000000056 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
+		E57C00000000000000000057 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
+		E57C00000000000000000058 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
+		E57C00000000000000000059 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
+		E57C0000000000000000005A /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
+		E57C0000000000000000005B /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
+		E57C0000000000000000005C /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
+		E57C0000000000000000005D /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C0000000000000000005E /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
+		E57C0000000000000000005F /* test_viewer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000021 /* test_viewer.cpp */; };
+		E57C00000000000000000066 /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
+		E57C00000000000000000067 /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
+		E57C00000000000000000068 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
+		E57C00000000000000000069 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
+		E57C0000000000000000006A /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
+		E57C0000000000000000006B /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
+		E57C0000000000000000006C /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
+		E57C0000000000000000006D /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
+		E57C0000000000000000006E /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
+		E57C0000000000000000006F /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000070 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
+		E57C00000000000000000071 /* test_lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000022 /* test_lod.cpp */; };
+		E57C00000000000000000078 /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
+		E57C00000000000000000079 /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
+		E57C0000000000000000007A /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
+		E57C0000000000000000007B /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
+		E57C0000000000000000007C /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
+		E57C0000000000000000007D /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
+		E57C0000000000000000007E /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
+		E57C0000000000000000007F /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
+		E57C00000000000000000080 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
+		E57C00000000000000000081 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000082 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
+		E57C00000000000000000083 /* test_indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000023 /* test_indexer.cpp */; };
+		E57C0000000000000000008A /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
+		E57C0000000000000000008B /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
+		E57C0000000000000000008C /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
+		E57C0000000000000000008D /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
+		E57C0000000000000000008E /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
+		E57C0000000000000000008F /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
+		E57C00000000000000000090 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
+		E57C00000000000000000091 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
+		E57C00000000000000000092 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
+		E57C00000000000000000093 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000094 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
+		E57C00000000000000000095 /* test_range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000024 /* test_range_image.cpp */; };
+		E57C0000000000000000009C /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
+		E57C0000000000000000009D /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
+		E57C0000000000000000009E /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
+		E57C0000000000000000009F /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
+		E57C000000000000000000A0 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
+		E57C000000000000000000A1 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
+		E57C000000000000000000A2 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
+		E57C000000000000000000A3 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
+		E57C000000000000000000A4 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
+		E57C000000000000000000A5 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C000000000000000000A6 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
+		E57C000000000000000000A7 /* test_carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000025 /* test_carve.cpp */; };
+		E57C000000000000000000AE /* e57.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000002 /* e57.cpp */; };
+		E57C000000000000000000AF /* camera.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000005 /* camera.cpp */; };
+		E57C000000000000000000B0 /* scan_check.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000007 /* scan_check.cpp */; };
+		E57C000000000000000000B1 /* point_cloud.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000009 /* point_cloud.cpp */; };
+		E57C000000000000000000B2 /* picker.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000B /* picker.cpp */; };
+		E57C000000000000000000B3 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000D /* frame.cpp */; };
+		E57C000000000000000000B4 /* lod.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000F /* lod.cpp */; };
+		E57C000000000000000000B5 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
+		E57C000000000000000000B6 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
+		E57C000000000000000000B7 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C000000000000000000B8 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
+		E57C000000000000000000B9 /* Renderer.mm in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001A /* Renderer.mm */; };
+		E57C000000000000000000BA /* CloudView.mm in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001C /* CloudView.mm */; };
+		E57C000000000000000000BB /* AppDelegate.mm in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* AppDelegate.mm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -110,45 +129,49 @@
 		E57C00000000000000000013 /* indexer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = indexer.cpp; sourceTree = "<group>"; };
 		E57C00000000000000000014 /* range_image.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = range_image.h; sourceTree = "<group>"; };
 		E57C00000000000000000015 /* range_image.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = range_image.cpp; sourceTree = "<group>"; };
-		E57C00000000000000000016 /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = main.cpp; sourceTree = "<group>"; };
-		E57C00000000000000000017 /* Renderer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Renderer.h; sourceTree = "<group>"; };
-		E57C00000000000000000018 /* Renderer.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Renderer.mm; sourceTree = "<group>"; };
-		E57C00000000000000000019 /* CloudView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CloudView.h; sourceTree = "<group>"; };
-		E57C0000000000000000001A /* CloudView.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CloudView.mm; sourceTree = "<group>"; };
-		E57C0000000000000000001B /* AppDelegate.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AppDelegate.mm; sourceTree = "<group>"; };
-		E57C0000000000000000001C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		E57C0000000000000000001D /* e57_fixture.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = e57_fixture.h; sourceTree = "<group>"; };
-		E57C0000000000000000001E /* test_e57.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_e57.cpp; sourceTree = "<group>"; };
-		E57C0000000000000000001F /* test_viewer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_viewer.cpp; sourceTree = "<group>"; };
-		E57C00000000000000000020 /* test_lod.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_lod.cpp; sourceTree = "<group>"; };
-		E57C00000000000000000021 /* test_indexer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_indexer.cpp; sourceTree = "<group>"; };
-		E57C00000000000000000022 /* test_range_image.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_range_image.cpp; sourceTree = "<group>"; };
-		E57C00000000000000000023 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
-		E57C00000000000000000024 /* DESIGN.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DESIGN.md; sourceTree = "<group>"; };
-		E57C00000000000000000025 /* CLAUDE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = CLAUDE.md; sourceTree = "<group>"; };
-		E57C00000000000000000026 /* CMakeLists.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = CMakeLists.txt; sourceTree = "<group>"; };
-		E57C00000000000000000027 /* e57cov */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = e57cov; sourceTree = BUILT_PRODUCTS_DIR; };
-		E57C00000000000000000038 /* test_e57 */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_e57; sourceTree = BUILT_PRODUCTS_DIR; };
-		E57C00000000000000000049 /* test_viewer */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_viewer; sourceTree = BUILT_PRODUCTS_DIR; };
-		E57C0000000000000000005A /* test_lod */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_lod; sourceTree = BUILT_PRODUCTS_DIR; };
-		E57C0000000000000000006B /* test_indexer */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_indexer; sourceTree = BUILT_PRODUCTS_DIR; };
-		E57C0000000000000000007C /* test_range_image */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_range_image; sourceTree = BUILT_PRODUCTS_DIR; };
-		E57C0000000000000000008D /* E57CoverageChecker.app */ = {isa = PBXFileReference; explicitFileType = "wrapper.application"; includeInIndex = 0; path = E57CoverageChecker.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E57C00000000000000000016 /* carve.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = carve.h; sourceTree = "<group>"; };
+		E57C00000000000000000017 /* carve.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = carve.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000018 /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = main.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000019 /* Renderer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Renderer.h; sourceTree = "<group>"; };
+		E57C0000000000000000001A /* Renderer.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Renderer.mm; sourceTree = "<group>"; };
+		E57C0000000000000000001B /* CloudView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CloudView.h; sourceTree = "<group>"; };
+		E57C0000000000000000001C /* CloudView.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CloudView.mm; sourceTree = "<group>"; };
+		E57C0000000000000000001D /* AppDelegate.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = AppDelegate.mm; sourceTree = "<group>"; };
+		E57C0000000000000000001E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		E57C0000000000000000001F /* e57_fixture.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = e57_fixture.h; sourceTree = "<group>"; };
+		E57C00000000000000000020 /* test_e57.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_e57.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000021 /* test_viewer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_viewer.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000022 /* test_lod.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_lod.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000023 /* test_indexer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_indexer.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000024 /* test_range_image.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_range_image.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000025 /* test_carve.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = test_carve.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000026 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		E57C00000000000000000027 /* DESIGN.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DESIGN.md; sourceTree = "<group>"; };
+		E57C00000000000000000028 /* CLAUDE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = CLAUDE.md; sourceTree = "<group>"; };
+		E57C00000000000000000029 /* CMakeLists.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = CMakeLists.txt; sourceTree = "<group>"; };
+		E57C0000000000000000002A /* e57cov */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = e57cov; sourceTree = BUILT_PRODUCTS_DIR; };
+		E57C0000000000000000003C /* test_e57 */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_e57; sourceTree = BUILT_PRODUCTS_DIR; };
+		E57C0000000000000000004E /* test_viewer */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_viewer; sourceTree = BUILT_PRODUCTS_DIR; };
+		E57C00000000000000000060 /* test_lod */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_lod; sourceTree = BUILT_PRODUCTS_DIR; };
+		E57C00000000000000000072 /* test_indexer */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_indexer; sourceTree = BUILT_PRODUCTS_DIR; };
+		E57C00000000000000000084 /* test_range_image */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_range_image; sourceTree = BUILT_PRODUCTS_DIR; };
+		E57C00000000000000000096 /* test_carve */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o-executable"; includeInIndex = 0; path = test_carve; sourceTree = BUILT_PRODUCTS_DIR; };
+		E57C000000000000000000A8 /* E57CoverageChecker.app */ = {isa = PBXFileReference; explicitFileType = "wrapper.application"; includeInIndex = 0; path = E57CoverageChecker.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
-		E57C000000000000000000A3 = {
+		E57C000000000000000000BF = {
 			isa = PBXGroup;
 			children = (
-				E57C000000000000000000A6 /* src */,
-				E57C000000000000000000A7 /* app */,
-				E57C000000000000000000A8 /* tests */,
-				E57C000000000000000000A5 /* Documentation */,
-				E57C000000000000000000A4 /* Products */,
+				E57C000000000000000000C2 /* src */,
+				E57C000000000000000000C3 /* app */,
+				E57C000000000000000000C4 /* tests */,
+				E57C000000000000000000C1 /* Documentation */,
+				E57C000000000000000000C0 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
-		E57C000000000000000000A6 /* src */ = {
+		E57C000000000000000000C2 /* src */ = {
 			isa = PBXGroup;
 			children = (
 				E57C00000000000000000001 /* e57.h */,
@@ -172,58 +195,62 @@
 				E57C00000000000000000013 /* indexer.cpp */,
 				E57C00000000000000000014 /* range_image.h */,
 				E57C00000000000000000015 /* range_image.cpp */,
-				E57C00000000000000000016 /* main.cpp */,
+				E57C00000000000000000016 /* carve.h */,
+				E57C00000000000000000017 /* carve.cpp */,
+				E57C00000000000000000018 /* main.cpp */,
 			);
 			path = src;
 			sourceTree = "<group>";
 		};
-		E57C000000000000000000A7 /* app */ = {
+		E57C000000000000000000C3 /* app */ = {
 			isa = PBXGroup;
 			children = (
-				E57C00000000000000000017 /* Renderer.h */,
-				E57C00000000000000000018 /* Renderer.mm */,
-				E57C00000000000000000019 /* CloudView.h */,
-				E57C0000000000000000001A /* CloudView.mm */,
-				E57C0000000000000000001B /* AppDelegate.mm */,
-				E57C0000000000000000001C /* Info.plist */,
+				E57C00000000000000000019 /* Renderer.h */,
+				E57C0000000000000000001A /* Renderer.mm */,
+				E57C0000000000000000001B /* CloudView.h */,
+				E57C0000000000000000001C /* CloudView.mm */,
+				E57C0000000000000000001D /* AppDelegate.mm */,
+				E57C0000000000000000001E /* Info.plist */,
 			);
 			path = app;
 			sourceTree = "<group>";
 		};
-		E57C000000000000000000A8 /* tests */ = {
+		E57C000000000000000000C4 /* tests */ = {
 			isa = PBXGroup;
 			children = (
-				E57C0000000000000000001D /* e57_fixture.h */,
-				E57C0000000000000000001E /* test_e57.cpp */,
-				E57C0000000000000000001F /* test_viewer.cpp */,
-				E57C00000000000000000020 /* test_lod.cpp */,
-				E57C00000000000000000021 /* test_indexer.cpp */,
-				E57C00000000000000000022 /* test_range_image.cpp */,
+				E57C0000000000000000001F /* e57_fixture.h */,
+				E57C00000000000000000020 /* test_e57.cpp */,
+				E57C00000000000000000021 /* test_viewer.cpp */,
+				E57C00000000000000000022 /* test_lod.cpp */,
+				E57C00000000000000000023 /* test_indexer.cpp */,
+				E57C00000000000000000024 /* test_range_image.cpp */,
+				E57C00000000000000000025 /* test_carve.cpp */,
 			);
 			path = tests;
 			sourceTree = "<group>";
 		};
-		E57C000000000000000000A5 /* Documentation */ = {
+		E57C000000000000000000C1 /* Documentation */ = {
 			isa = PBXGroup;
 			children = (
-				E57C00000000000000000023 /* README.md */,
-				E57C00000000000000000024 /* DESIGN.md */,
-				E57C00000000000000000025 /* CLAUDE.md */,
-				E57C00000000000000000026 /* CMakeLists.txt */,
+				E57C00000000000000000026 /* README.md */,
+				E57C00000000000000000027 /* DESIGN.md */,
+				E57C00000000000000000028 /* CLAUDE.md */,
+				E57C00000000000000000029 /* CMakeLists.txt */,
 			);
 			name = Documentation;
 			sourceTree = "<group>";
 		};
-		E57C000000000000000000A4 /* Products */ = {
+		E57C000000000000000000C0 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				E57C00000000000000000027 /* e57cov */,
-				E57C00000000000000000038 /* test_e57 */,
-				E57C00000000000000000049 /* test_viewer */,
-				E57C0000000000000000005A /* test_lod */,
-				E57C0000000000000000006B /* test_indexer */,
-				E57C0000000000000000007C /* test_range_image */,
-				E57C0000000000000000008D /* E57CoverageChecker.app */,
+				E57C0000000000000000002A /* e57cov */,
+				E57C0000000000000000003C /* test_e57 */,
+				E57C0000000000000000004E /* test_viewer */,
+				E57C00000000000000000060 /* test_lod */,
+				E57C00000000000000000072 /* test_indexer */,
+				E57C00000000000000000084 /* test_range_image */,
+				E57C00000000000000000096 /* test_carve */,
+				E57C000000000000000000A8 /* E57CoverageChecker.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -231,11 +258,11 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		E57C00000000000000000028 /* e57cov */ = {
+		E57C0000000000000000002B /* e57cov */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = E57C0000000000000000002A /* Build configuration list for PBXNativeTarget "e57cov" */;
+			buildConfigurationList = E57C0000000000000000002D /* Build configuration list for PBXNativeTarget "e57cov" */;
 			buildPhases = (
-				E57C00000000000000000029 /* Sources */,
+				E57C0000000000000000002C /* Sources */,
 			);
 			buildRules = (
 			);
@@ -243,14 +270,14 @@
 			);
 			name = e57cov;
 			productName = e57cov;
-			productReference = E57C00000000000000000027 /* e57cov */;
+			productReference = E57C0000000000000000002A /* e57cov */;
 			productType = "com.apple.product-type.tool";
 		};
-		E57C00000000000000000039 /* test_e57 */ = {
+		E57C0000000000000000003D /* test_e57 */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = E57C0000000000000000003B /* Build configuration list for PBXNativeTarget "test_e57" */;
+			buildConfigurationList = E57C0000000000000000003F /* Build configuration list for PBXNativeTarget "test_e57" */;
 			buildPhases = (
-				E57C0000000000000000003A /* Sources */,
+				E57C0000000000000000003E /* Sources */,
 			);
 			buildRules = (
 			);
@@ -258,14 +285,14 @@
 			);
 			name = test_e57;
 			productName = test_e57;
-			productReference = E57C00000000000000000038 /* test_e57 */;
+			productReference = E57C0000000000000000003C /* test_e57 */;
 			productType = "com.apple.product-type.tool";
 		};
-		E57C0000000000000000004A /* test_viewer */ = {
+		E57C0000000000000000004F /* test_viewer */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = E57C0000000000000000004C /* Build configuration list for PBXNativeTarget "test_viewer" */;
+			buildConfigurationList = E57C00000000000000000051 /* Build configuration list for PBXNativeTarget "test_viewer" */;
 			buildPhases = (
-				E57C0000000000000000004B /* Sources */,
+				E57C00000000000000000050 /* Sources */,
 			);
 			buildRules = (
 			);
@@ -273,14 +300,14 @@
 			);
 			name = test_viewer;
 			productName = test_viewer;
-			productReference = E57C00000000000000000049 /* test_viewer */;
+			productReference = E57C0000000000000000004E /* test_viewer */;
 			productType = "com.apple.product-type.tool";
 		};
-		E57C0000000000000000005B /* test_lod */ = {
+		E57C00000000000000000061 /* test_lod */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = E57C0000000000000000005D /* Build configuration list for PBXNativeTarget "test_lod" */;
+			buildConfigurationList = E57C00000000000000000063 /* Build configuration list for PBXNativeTarget "test_lod" */;
 			buildPhases = (
-				E57C0000000000000000005C /* Sources */,
+				E57C00000000000000000062 /* Sources */,
 			);
 			buildRules = (
 			);
@@ -288,14 +315,14 @@
 			);
 			name = test_lod;
 			productName = test_lod;
-			productReference = E57C0000000000000000005A /* test_lod */;
+			productReference = E57C00000000000000000060 /* test_lod */;
 			productType = "com.apple.product-type.tool";
 		};
-		E57C0000000000000000006C /* test_indexer */ = {
+		E57C00000000000000000073 /* test_indexer */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = E57C0000000000000000006E /* Build configuration list for PBXNativeTarget "test_indexer" */;
+			buildConfigurationList = E57C00000000000000000075 /* Build configuration list for PBXNativeTarget "test_indexer" */;
 			buildPhases = (
-				E57C0000000000000000006D /* Sources */,
+				E57C00000000000000000074 /* Sources */,
 			);
 			buildRules = (
 			);
@@ -303,14 +330,14 @@
 			);
 			name = test_indexer;
 			productName = test_indexer;
-			productReference = E57C0000000000000000006B /* test_indexer */;
+			productReference = E57C00000000000000000072 /* test_indexer */;
 			productType = "com.apple.product-type.tool";
 		};
-		E57C0000000000000000007D /* test_range_image */ = {
+		E57C00000000000000000085 /* test_range_image */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = E57C0000000000000000007F /* Build configuration list for PBXNativeTarget "test_range_image" */;
+			buildConfigurationList = E57C00000000000000000087 /* Build configuration list for PBXNativeTarget "test_range_image" */;
 			buildPhases = (
-				E57C0000000000000000007E /* Sources */,
+				E57C00000000000000000086 /* Sources */,
 			);
 			buildRules = (
 			);
@@ -318,14 +345,29 @@
 			);
 			name = test_range_image;
 			productName = test_range_image;
-			productReference = E57C0000000000000000007C /* test_range_image */;
+			productReference = E57C00000000000000000084 /* test_range_image */;
 			productType = "com.apple.product-type.tool";
 		};
-		E57C0000000000000000008E /* E57CoverageChecker */ = {
+		E57C00000000000000000097 /* test_carve */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = E57C00000000000000000090 /* Build configuration list for PBXNativeTarget "E57CoverageChecker" */;
+			buildConfigurationList = E57C00000000000000000099 /* Build configuration list for PBXNativeTarget "test_carve" */;
 			buildPhases = (
-				E57C0000000000000000008F /* Sources */,
+				E57C00000000000000000098 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = test_carve;
+			productName = test_carve;
+			productReference = E57C00000000000000000096 /* test_carve */;
+			productType = "com.apple.product-type.tool";
+		};
+		E57C000000000000000000A9 /* E57CoverageChecker */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E57C000000000000000000AB /* Build configuration list for PBXNativeTarget "E57CoverageChecker" */;
+			buildPhases = (
+				E57C000000000000000000AA /* Sources */,
 			);
 			buildRules = (
 			);
@@ -333,42 +375,45 @@
 			);
 			name = E57CoverageChecker;
 			productName = E57CoverageChecker;
-			productReference = E57C0000000000000000008D /* E57CoverageChecker.app */;
+			productReference = E57C000000000000000000A8 /* E57CoverageChecker.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
-		E57C000000000000000000A9 /* Project object */ = {
+		E57C000000000000000000C5 /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastUpgradeCheck = 1540;
 				TargetAttributes = {
-					E57C00000000000000000028 = {
+					E57C0000000000000000002B = {
 						CreatedOnToolsVersion = 15.4;
 					};
-					E57C00000000000000000039 = {
+					E57C0000000000000000003D = {
 						CreatedOnToolsVersion = 15.4;
 					};
-					E57C0000000000000000004A = {
+					E57C0000000000000000004F = {
 						CreatedOnToolsVersion = 15.4;
 					};
-					E57C0000000000000000005B = {
+					E57C00000000000000000061 = {
 						CreatedOnToolsVersion = 15.4;
 					};
-					E57C0000000000000000006C = {
+					E57C00000000000000000073 = {
 						CreatedOnToolsVersion = 15.4;
 					};
-					E57C0000000000000000007D = {
+					E57C00000000000000000085 = {
 						CreatedOnToolsVersion = 15.4;
 					};
-					E57C0000000000000000008E = {
+					E57C00000000000000000097 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+					E57C000000000000000000A9 = {
 						CreatedOnToolsVersion = 15.4;
 					};
 				};
 			};
-			buildConfigurationList = E57C000000000000000000A0 /* Build configuration list for PBXProject "E57CoverageChecker" */;
+			buildConfigurationList = E57C000000000000000000BC /* Build configuration list for PBXProject "E57CoverageChecker" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -376,155 +421,182 @@
 				en,
 				Base,
 			);
-			mainGroup = E57C000000000000000000A3;
-			productRefGroup = E57C000000000000000000A4 /* Products */;
+			mainGroup = E57C000000000000000000BF;
+			productRefGroup = E57C000000000000000000C0 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				E57C00000000000000000028 /* e57cov */,
-				E57C00000000000000000039 /* test_e57 */,
-				E57C0000000000000000004A /* test_viewer */,
-				E57C0000000000000000005B /* test_lod */,
-				E57C0000000000000000006C /* test_indexer */,
-				E57C0000000000000000007D /* test_range_image */,
-				E57C0000000000000000008E /* E57CoverageChecker */,
+				E57C0000000000000000002B /* e57cov */,
+				E57C0000000000000000003D /* test_e57 */,
+				E57C0000000000000000004F /* test_viewer */,
+				E57C00000000000000000061 /* test_lod */,
+				E57C00000000000000000073 /* test_indexer */,
+				E57C00000000000000000085 /* test_range_image */,
+				E57C00000000000000000097 /* test_carve */,
+				E57C000000000000000000A9 /* E57CoverageChecker */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXSourcesBuildPhase section */
-		E57C00000000000000000029 /* Sources */ = {
+		E57C0000000000000000002C /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E57C0000000000000000002D /* e57.cpp in Sources */,
-				E57C0000000000000000002E /* camera.cpp in Sources */,
-				E57C0000000000000000002F /* scan_check.cpp in Sources */,
-				E57C00000000000000000030 /* point_cloud.cpp in Sources */,
-				E57C00000000000000000031 /* picker.cpp in Sources */,
-				E57C00000000000000000032 /* frame.cpp in Sources */,
-				E57C00000000000000000033 /* lod.cpp in Sources */,
-				E57C00000000000000000034 /* point_store.cpp in Sources */,
-				E57C00000000000000000035 /* indexer.cpp in Sources */,
-				E57C00000000000000000036 /* range_image.cpp in Sources */,
-				E57C00000000000000000037 /* main.cpp in Sources */,
+				E57C00000000000000000030 /* e57.cpp in Sources */,
+				E57C00000000000000000031 /* camera.cpp in Sources */,
+				E57C00000000000000000032 /* scan_check.cpp in Sources */,
+				E57C00000000000000000033 /* point_cloud.cpp in Sources */,
+				E57C00000000000000000034 /* picker.cpp in Sources */,
+				E57C00000000000000000035 /* frame.cpp in Sources */,
+				E57C00000000000000000036 /* lod.cpp in Sources */,
+				E57C00000000000000000037 /* point_store.cpp in Sources */,
+				E57C00000000000000000038 /* indexer.cpp in Sources */,
+				E57C00000000000000000039 /* range_image.cpp in Sources */,
+				E57C0000000000000000003A /* carve.cpp in Sources */,
+				E57C0000000000000000003B /* main.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		E57C0000000000000000003A /* Sources */ = {
+		E57C0000000000000000003E /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E57C0000000000000000003E /* e57.cpp in Sources */,
-				E57C0000000000000000003F /* camera.cpp in Sources */,
-				E57C00000000000000000040 /* scan_check.cpp in Sources */,
-				E57C00000000000000000041 /* point_cloud.cpp in Sources */,
-				E57C00000000000000000042 /* picker.cpp in Sources */,
-				E57C00000000000000000043 /* frame.cpp in Sources */,
-				E57C00000000000000000044 /* lod.cpp in Sources */,
-				E57C00000000000000000045 /* point_store.cpp in Sources */,
-				E57C00000000000000000046 /* indexer.cpp in Sources */,
-				E57C00000000000000000047 /* range_image.cpp in Sources */,
-				E57C00000000000000000048 /* test_e57.cpp in Sources */,
+				E57C00000000000000000042 /* e57.cpp in Sources */,
+				E57C00000000000000000043 /* camera.cpp in Sources */,
+				E57C00000000000000000044 /* scan_check.cpp in Sources */,
+				E57C00000000000000000045 /* point_cloud.cpp in Sources */,
+				E57C00000000000000000046 /* picker.cpp in Sources */,
+				E57C00000000000000000047 /* frame.cpp in Sources */,
+				E57C00000000000000000048 /* lod.cpp in Sources */,
+				E57C00000000000000000049 /* point_store.cpp in Sources */,
+				E57C0000000000000000004A /* indexer.cpp in Sources */,
+				E57C0000000000000000004B /* range_image.cpp in Sources */,
+				E57C0000000000000000004C /* carve.cpp in Sources */,
+				E57C0000000000000000004D /* test_e57.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		E57C0000000000000000004B /* Sources */ = {
+		E57C00000000000000000050 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E57C0000000000000000004F /* e57.cpp in Sources */,
-				E57C00000000000000000050 /* camera.cpp in Sources */,
-				E57C00000000000000000051 /* scan_check.cpp in Sources */,
-				E57C00000000000000000052 /* point_cloud.cpp in Sources */,
-				E57C00000000000000000053 /* picker.cpp in Sources */,
-				E57C00000000000000000054 /* frame.cpp in Sources */,
-				E57C00000000000000000055 /* lod.cpp in Sources */,
-				E57C00000000000000000056 /* point_store.cpp in Sources */,
-				E57C00000000000000000057 /* indexer.cpp in Sources */,
-				E57C00000000000000000058 /* range_image.cpp in Sources */,
-				E57C00000000000000000059 /* test_viewer.cpp in Sources */,
+				E57C00000000000000000054 /* e57.cpp in Sources */,
+				E57C00000000000000000055 /* camera.cpp in Sources */,
+				E57C00000000000000000056 /* scan_check.cpp in Sources */,
+				E57C00000000000000000057 /* point_cloud.cpp in Sources */,
+				E57C00000000000000000058 /* picker.cpp in Sources */,
+				E57C00000000000000000059 /* frame.cpp in Sources */,
+				E57C0000000000000000005A /* lod.cpp in Sources */,
+				E57C0000000000000000005B /* point_store.cpp in Sources */,
+				E57C0000000000000000005C /* indexer.cpp in Sources */,
+				E57C0000000000000000005D /* range_image.cpp in Sources */,
+				E57C0000000000000000005E /* carve.cpp in Sources */,
+				E57C0000000000000000005F /* test_viewer.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		E57C0000000000000000005C /* Sources */ = {
+		E57C00000000000000000062 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E57C00000000000000000060 /* e57.cpp in Sources */,
-				E57C00000000000000000061 /* camera.cpp in Sources */,
-				E57C00000000000000000062 /* scan_check.cpp in Sources */,
-				E57C00000000000000000063 /* point_cloud.cpp in Sources */,
-				E57C00000000000000000064 /* picker.cpp in Sources */,
-				E57C00000000000000000065 /* frame.cpp in Sources */,
-				E57C00000000000000000066 /* lod.cpp in Sources */,
-				E57C00000000000000000067 /* point_store.cpp in Sources */,
-				E57C00000000000000000068 /* indexer.cpp in Sources */,
-				E57C00000000000000000069 /* range_image.cpp in Sources */,
-				E57C0000000000000000006A /* test_lod.cpp in Sources */,
+				E57C00000000000000000066 /* e57.cpp in Sources */,
+				E57C00000000000000000067 /* camera.cpp in Sources */,
+				E57C00000000000000000068 /* scan_check.cpp in Sources */,
+				E57C00000000000000000069 /* point_cloud.cpp in Sources */,
+				E57C0000000000000000006A /* picker.cpp in Sources */,
+				E57C0000000000000000006B /* frame.cpp in Sources */,
+				E57C0000000000000000006C /* lod.cpp in Sources */,
+				E57C0000000000000000006D /* point_store.cpp in Sources */,
+				E57C0000000000000000006E /* indexer.cpp in Sources */,
+				E57C0000000000000000006F /* range_image.cpp in Sources */,
+				E57C00000000000000000070 /* carve.cpp in Sources */,
+				E57C00000000000000000071 /* test_lod.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		E57C0000000000000000006D /* Sources */ = {
+		E57C00000000000000000074 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E57C00000000000000000071 /* e57.cpp in Sources */,
-				E57C00000000000000000072 /* camera.cpp in Sources */,
-				E57C00000000000000000073 /* scan_check.cpp in Sources */,
-				E57C00000000000000000074 /* point_cloud.cpp in Sources */,
-				E57C00000000000000000075 /* picker.cpp in Sources */,
-				E57C00000000000000000076 /* frame.cpp in Sources */,
-				E57C00000000000000000077 /* lod.cpp in Sources */,
-				E57C00000000000000000078 /* point_store.cpp in Sources */,
-				E57C00000000000000000079 /* indexer.cpp in Sources */,
-				E57C0000000000000000007A /* range_image.cpp in Sources */,
-				E57C0000000000000000007B /* test_indexer.cpp in Sources */,
+				E57C00000000000000000078 /* e57.cpp in Sources */,
+				E57C00000000000000000079 /* camera.cpp in Sources */,
+				E57C0000000000000000007A /* scan_check.cpp in Sources */,
+				E57C0000000000000000007B /* point_cloud.cpp in Sources */,
+				E57C0000000000000000007C /* picker.cpp in Sources */,
+				E57C0000000000000000007D /* frame.cpp in Sources */,
+				E57C0000000000000000007E /* lod.cpp in Sources */,
+				E57C0000000000000000007F /* point_store.cpp in Sources */,
+				E57C00000000000000000080 /* indexer.cpp in Sources */,
+				E57C00000000000000000081 /* range_image.cpp in Sources */,
+				E57C00000000000000000082 /* carve.cpp in Sources */,
+				E57C00000000000000000083 /* test_indexer.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		E57C0000000000000000007E /* Sources */ = {
+		E57C00000000000000000086 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E57C00000000000000000082 /* e57.cpp in Sources */,
-				E57C00000000000000000083 /* camera.cpp in Sources */,
-				E57C00000000000000000084 /* scan_check.cpp in Sources */,
-				E57C00000000000000000085 /* point_cloud.cpp in Sources */,
-				E57C00000000000000000086 /* picker.cpp in Sources */,
-				E57C00000000000000000087 /* frame.cpp in Sources */,
-				E57C00000000000000000088 /* lod.cpp in Sources */,
-				E57C00000000000000000089 /* point_store.cpp in Sources */,
-				E57C0000000000000000008A /* indexer.cpp in Sources */,
-				E57C0000000000000000008B /* range_image.cpp in Sources */,
-				E57C0000000000000000008C /* test_range_image.cpp in Sources */,
+				E57C0000000000000000008A /* e57.cpp in Sources */,
+				E57C0000000000000000008B /* camera.cpp in Sources */,
+				E57C0000000000000000008C /* scan_check.cpp in Sources */,
+				E57C0000000000000000008D /* point_cloud.cpp in Sources */,
+				E57C0000000000000000008E /* picker.cpp in Sources */,
+				E57C0000000000000000008F /* frame.cpp in Sources */,
+				E57C00000000000000000090 /* lod.cpp in Sources */,
+				E57C00000000000000000091 /* point_store.cpp in Sources */,
+				E57C00000000000000000092 /* indexer.cpp in Sources */,
+				E57C00000000000000000093 /* range_image.cpp in Sources */,
+				E57C00000000000000000094 /* carve.cpp in Sources */,
+				E57C00000000000000000095 /* test_range_image.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
-		E57C0000000000000000008F /* Sources */ = {
+		E57C00000000000000000098 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				E57C00000000000000000093 /* e57.cpp in Sources */,
-				E57C00000000000000000094 /* camera.cpp in Sources */,
-				E57C00000000000000000095 /* scan_check.cpp in Sources */,
-				E57C00000000000000000096 /* point_cloud.cpp in Sources */,
-				E57C00000000000000000097 /* picker.cpp in Sources */,
-				E57C00000000000000000098 /* frame.cpp in Sources */,
-				E57C00000000000000000099 /* lod.cpp in Sources */,
-				E57C0000000000000000009A /* point_store.cpp in Sources */,
-				E57C0000000000000000009B /* indexer.cpp in Sources */,
-				E57C0000000000000000009C /* range_image.cpp in Sources */,
-				E57C0000000000000000009D /* Renderer.mm in Sources */,
-				E57C0000000000000000009E /* CloudView.mm in Sources */,
-				E57C0000000000000000009F /* AppDelegate.mm in Sources */,
+				E57C0000000000000000009C /* e57.cpp in Sources */,
+				E57C0000000000000000009D /* camera.cpp in Sources */,
+				E57C0000000000000000009E /* scan_check.cpp in Sources */,
+				E57C0000000000000000009F /* point_cloud.cpp in Sources */,
+				E57C000000000000000000A0 /* picker.cpp in Sources */,
+				E57C000000000000000000A1 /* frame.cpp in Sources */,
+				E57C000000000000000000A2 /* lod.cpp in Sources */,
+				E57C000000000000000000A3 /* point_store.cpp in Sources */,
+				E57C000000000000000000A4 /* indexer.cpp in Sources */,
+				E57C000000000000000000A5 /* range_image.cpp in Sources */,
+				E57C000000000000000000A6 /* carve.cpp in Sources */,
+				E57C000000000000000000A7 /* test_carve.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		E57C000000000000000000AA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E57C000000000000000000AE /* e57.cpp in Sources */,
+				E57C000000000000000000AF /* camera.cpp in Sources */,
+				E57C000000000000000000B0 /* scan_check.cpp in Sources */,
+				E57C000000000000000000B1 /* point_cloud.cpp in Sources */,
+				E57C000000000000000000B2 /* picker.cpp in Sources */,
+				E57C000000000000000000B3 /* frame.cpp in Sources */,
+				E57C000000000000000000B4 /* lod.cpp in Sources */,
+				E57C000000000000000000B5 /* point_store.cpp in Sources */,
+				E57C000000000000000000B6 /* indexer.cpp in Sources */,
+				E57C000000000000000000B7 /* range_image.cpp in Sources */,
+				E57C000000000000000000B8 /* carve.cpp in Sources */,
+				E57C000000000000000000B9 /* Renderer.mm in Sources */,
+				E57C000000000000000000BA /* CloudView.mm in Sources */,
+				E57C000000000000000000BB /* AppDelegate.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
-		E57C000000000000000000A1 /* Debug */ = {
+		E57C000000000000000000BD /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -567,7 +639,7 @@
 			};
 			name = Debug;
 		};
-		E57C000000000000000000A2 /* Release */ = {
+		E57C000000000000000000BE /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
@@ -604,7 +676,7 @@
 			};
 			name = Release;
 		};
-		E57C0000000000000000002B /* Debug */ = {
+		E57C0000000000000000002E /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -618,7 +690,7 @@
 			};
 			name = Debug;
 		};
-		E57C0000000000000000002C /* Release */ = {
+		E57C0000000000000000002F /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -632,7 +704,7 @@
 			};
 			name = Release;
 		};
-		E57C0000000000000000003C /* Debug */ = {
+		E57C00000000000000000040 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -646,7 +718,7 @@
 			};
 			name = Debug;
 		};
-		E57C0000000000000000003D /* Release */ = {
+		E57C00000000000000000041 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -660,7 +732,7 @@
 			};
 			name = Release;
 		};
-		E57C0000000000000000004D /* Debug */ = {
+		E57C00000000000000000052 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -674,7 +746,7 @@
 			};
 			name = Debug;
 		};
-		E57C0000000000000000004E /* Release */ = {
+		E57C00000000000000000053 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -688,7 +760,7 @@
 			};
 			name = Release;
 		};
-		E57C0000000000000000005E /* Debug */ = {
+		E57C00000000000000000064 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -702,7 +774,7 @@
 			};
 			name = Debug;
 		};
-		E57C0000000000000000005F /* Release */ = {
+		E57C00000000000000000065 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -716,7 +788,7 @@
 			};
 			name = Release;
 		};
-		E57C0000000000000000006F /* Debug */ = {
+		E57C00000000000000000076 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -730,7 +802,7 @@
 			};
 			name = Debug;
 		};
-		E57C00000000000000000070 /* Release */ = {
+		E57C00000000000000000077 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -744,7 +816,7 @@
 			};
 			name = Release;
 		};
-		E57C00000000000000000080 /* Debug */ = {
+		E57C00000000000000000088 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -758,7 +830,7 @@
 			};
 			name = Debug;
 		};
-		E57C00000000000000000081 /* Release */ = {
+		E57C00000000000000000089 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -772,7 +844,35 @@
 			};
 			name = Release;
 		};
-		E57C00000000000000000091 /* Debug */ = {
+		E57C0000000000000000009A /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/src";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				WARNING_CFLAGS = (
+					"-Wall",
+					"-Wextra",
+				);
+			};
+			name = Debug;
+		};
+		E57C0000000000000000009B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Automatic;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/src";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				WARNING_CFLAGS = (
+					"-Wall",
+					"-Wextra",
+				);
+			};
+			name = Release;
+		};
+		E57C000000000000000000AC /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -800,7 +900,7 @@
 			};
 			name = Debug;
 		};
-		E57C00000000000000000092 /* Release */ = {
+		E57C000000000000000000AD /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_IDENTITY = "-";
@@ -831,79 +931,88 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		E57C000000000000000000A0 /* Build configuration list for PBXProject "E57CoverageChecker" */ = {
+		E57C000000000000000000BC /* Build configuration list for PBXProject "E57CoverageChecker" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				E57C000000000000000000A1 /* Debug */,
-				E57C000000000000000000A2 /* Release */,
+				E57C000000000000000000BD /* Debug */,
+				E57C000000000000000000BE /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		E57C0000000000000000002A /* Build configuration list for PBXNativeTarget "e57cov" */ = {
+		E57C0000000000000000002D /* Build configuration list for PBXNativeTarget "e57cov" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				E57C0000000000000000002B /* Debug */,
-				E57C0000000000000000002C /* Release */,
+				E57C0000000000000000002E /* Debug */,
+				E57C0000000000000000002F /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		E57C0000000000000000003B /* Build configuration list for PBXNativeTarget "test_e57" */ = {
+		E57C0000000000000000003F /* Build configuration list for PBXNativeTarget "test_e57" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				E57C0000000000000000003C /* Debug */,
-				E57C0000000000000000003D /* Release */,
+				E57C00000000000000000040 /* Debug */,
+				E57C00000000000000000041 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		E57C0000000000000000004C /* Build configuration list for PBXNativeTarget "test_viewer" */ = {
+		E57C00000000000000000051 /* Build configuration list for PBXNativeTarget "test_viewer" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				E57C0000000000000000004D /* Debug */,
-				E57C0000000000000000004E /* Release */,
+				E57C00000000000000000052 /* Debug */,
+				E57C00000000000000000053 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		E57C0000000000000000005D /* Build configuration list for PBXNativeTarget "test_lod" */ = {
+		E57C00000000000000000063 /* Build configuration list for PBXNativeTarget "test_lod" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				E57C0000000000000000005E /* Debug */,
-				E57C0000000000000000005F /* Release */,
+				E57C00000000000000000064 /* Debug */,
+				E57C00000000000000000065 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		E57C0000000000000000006E /* Build configuration list for PBXNativeTarget "test_indexer" */ = {
+		E57C00000000000000000075 /* Build configuration list for PBXNativeTarget "test_indexer" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				E57C0000000000000000006F /* Debug */,
-				E57C00000000000000000070 /* Release */,
+				E57C00000000000000000076 /* Debug */,
+				E57C00000000000000000077 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		E57C0000000000000000007F /* Build configuration list for PBXNativeTarget "test_range_image" */ = {
+		E57C00000000000000000087 /* Build configuration list for PBXNativeTarget "test_range_image" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				E57C00000000000000000080 /* Debug */,
-				E57C00000000000000000081 /* Release */,
+				E57C00000000000000000088 /* Debug */,
+				E57C00000000000000000089 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		E57C00000000000000000090 /* Build configuration list for PBXNativeTarget "E57CoverageChecker" */ = {
+		E57C00000000000000000099 /* Build configuration list for PBXNativeTarget "test_carve" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
-				E57C00000000000000000091 /* Debug */,
-				E57C00000000000000000092 /* Release */,
+				E57C0000000000000000009A /* Debug */,
+				E57C0000000000000000009B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E57C000000000000000000AB /* Build configuration list for PBXNativeTarget "E57CoverageChecker" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E57C000000000000000000AC /* Debug */,
+				E57C000000000000000000AD /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
 	};
-	rootObject = E57C000000000000000000A9 /* Project object */;
+	rootObject = E57C000000000000000000C5 /* Project object */;
 }

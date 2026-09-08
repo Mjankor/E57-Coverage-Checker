@@ -436,8 +436,13 @@ usually truncates or overruns), and the Cartesian bounds match the file's own
 
 ### Build order
 
-1. E57 reader → `(pose, range image, status mask)` for one scan.
+1. E57 reader → `(pose, range image, status mask)` for one scan. **Done.**
 2. Single-threaded CPU reference carve on a small grid. **Keep permanently.**
+   **Done** — `src/carve.{h,cpp}`, driven by `e57cov carve`. The outer loop is
+   over space in tiles and the inner loop over the setups that reach each tile,
+   which keeps the working set to one tile plus one range image while leaving
+   the answer identical to any other partitioning of space. That invariance is
+   asserted in `test_carve` and is what makes step 3 checkable at all.
 3. GPU gather kernel, flat, no hierarchy. Assert bit-exact against (2).
 4. Sparse bricks and, if profiling demands, HZB culling. Re-assert bit-exact —
    these are pure optimisations and must not change a single bit.

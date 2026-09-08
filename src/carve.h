@@ -110,10 +110,18 @@ struct Tile {
 };
 
 struct Stats {
+    // Every voxel of every carved tile. Tiles are cubes, so this counts the
+    // corners of tiles that only clip the domain too — it is a measure of work
+    // done, and it changes with `tileVoxels`.
     uint64_t voxels = 0;
+    // Voxels within maxRange of at least one setup: the domain proper. Unlike
+    // `voxels` this is a property of the site, not of the tiling.
+    uint64_t reachable = 0;
     uint64_t visible = 0;
     uint64_t occupied = 0;
-    uint64_t unknown = 0;      // in the domain but neither: the candidate voids
+    // Reachable, but no setup said anything about it: seen through by none,
+    // measured by none. These are the candidate voids — the deliverable.
+    uint64_t unknown = 0;
     uint64_t setupTests = 0;   // (voxel, setup) pairs actually evaluated
 };
 

@@ -14,7 +14,8 @@ See [DESIGN.md](DESIGN.md) for the full design and the reasoning behind it.
 
 **In progress.** The reader, the viewer and the corpus indexer are done and
 validated against real scanner files. The visibility analysis itself — the
-reason the tool exists — is one stage in.
+reason the tool exists — now runs end to end on the CPU reference, and the
+remaining work is making it fast and turning the raw result into an answer.
 
 | stage | state |
 |---|---|
@@ -27,7 +28,7 @@ reason the tool exists — is one stage in.
 | indexer: E57 corpus → store | done and tested |
 | viewer on the store, two-phase open | done — **rendering layer unrun** |
 | **range-image builder** | done and tested |
-| CPU reference visibility pass | not started |
+| **CPU reference visibility pass** | done and tested — `e57cov carve` |
 | Metal gather kernel | not started |
 | void extraction, classification, export | not started |
 
@@ -158,6 +159,38 @@ record count against the declared `recordCount`, and decoded bounds against the
 file's own `cartesianBounds`. Exit status is nonzero if either fails, so it can
 be run across a whole directory as a smoke test.
 
+## The visibility pass — `e57cov carve`
+
+```sh
+e57cov carve --voxel 0.05 --max-range 45 /path/to/*.e57
+```
+
+Builds a range image per scan, then walks space in tiles and, for each voxel,
+asks every setup that can reach it what it saw in that direction. A voxel comes
+out carrying two independent bits:
+
+- **visible** — some setup had line of sight through it.
+- **occupied** — some setup measured a surface inside it.
+
+A voxel within range of a setup and carrying neither is one nobody observed:
+a candidate void. That is the number the tool exists to produce, though it is
+not yet the answer — at this stage it still mixes occlusion shadows inside the
+site with material behind walls and with the open air outside the building.
+Separating those is the next stage.
+
+Two things about this command are worth knowing. It is the **CPU reference**:
+single-threaded, no early exits, written to be obviously correct so the Metal
+kernel can be asserted bit-exact against it. On a full corpus at 5 cm it will
+be slow, and `--max-tiles` stops it after a sample. And it holds every range
+image in memory at once, which the production path will not do.
+
+`--tile` changes the working set and nothing else. Carving a volume as one
+large tile and as many small ones gives identical results, voxel for voxel —
+the voxel lattice is global and anchored at the world origin, so a voxel's
+verdict never depends on which tile carried it. The test suite asserts this
+directly, because a carve whose answer depended on how space was partitioned
+could not be validated against anything.
+
 ## Build and test
 
 Two build systems, both first-class. Xcode is the one to use on the Mac — the
@@ -170,17 +203,18 @@ keeps the reader buildable and testable off the target platform.
 open E57CoverageChecker.xcodeproj
 ```
 
-Seven targets, all C++20 with shared schemes:
+Eight targets, all C++20 with shared schemes:
 
 | target | kind | what it is |
 |---|---|---|
 | `E57CoverageChecker` | app | the viewer |
-| `e57cov` | tool | the format-audit CLI |
+| `e57cov` | tool | the CLI: format audit (`info`) and visibility pass (`carve`) |
 | `test_e57` | tool | reader tests |
 | `test_viewer` | tool | camera / classifier / picker tests |
 | `test_lod` | tool | LOD octree, selection and point store tests |
 | `test_indexer` | tool | survey, bounded-memory build, store round trip |
 | `test_range_image` | tool | grid path, angular mapping, conservative binning |
+| `test_carve` | tool | per-setup evidence, OR across setups, tiling invariance |
 
 ⌘R on a test scheme runs that suite in the console.
 
@@ -220,6 +254,7 @@ src/lod.{h,cpp}             LOD octree: additive build and view selection
 src/point_store.{h,cpp}     on-disk store, mmap'd and zero-copy
 src/indexer.{h,cpp}         corpus survey and bounded-memory build
 src/range_image.{h,cpp}     structured scan -> range image (visibility stage 1)
+src/carve.{h,cpp}           tiled visibility carve, CPU reference (stage 2)
 src/camera.{h,cpp}          orbit camera
 src/picker.{h,cpp}          screen-space point picking (orbit centre)
 src/math3d.h                vectors and matrices
@@ -231,6 +266,8 @@ tests/test_viewer.cpp       camera, classifier, picker, decimation tests
 tests/test_lod.cpp          octree, selection, store tests
 tests/test_indexer.cpp      survey and build tests
 tests/test_range_image.cpp  range image tests
+tests/test_carve.cpp        visibility carve tests
+tools/genproj.py            regenerates the Xcode project from a file list
 tools/validate_xcodeproj.py pbxproj structural validator
 E57CoverageChecker.xcodeproj
 DESIGN.md                   design and rationale
