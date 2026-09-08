@@ -25,7 +25,9 @@
 #include "../src/scan_check.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -94,7 +96,10 @@ const char *kindLabel(check::Kind k) {
 
     indexer::Survey      _survey;
     BOOL                 _busy;
-    BOOL                 _cancelRequested;
+    // Shared with the worker rather than read through `self`: it is written on
+    // the main thread and read on a background queue, which as a plain BOOL was
+    // a data race.
+    std::shared_ptr<std::atomic<bool>> _cancel;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification *)note {
@@ -260,7 +265,10 @@ const char *kindLabel(check::Kind k) {
     [self loadPaths:paths];
 }
 
-- (void)cancelIndexing:(id)sender { (void)sender; _cancelRequested = YES; }
+- (void)cancelIndexing:(id)sender {
+    (void)sender;
+    if (_cancel) _cancel->store(true);
+}
 
 - (void)closeAll:(id)sender {
     (void)sender;
@@ -294,126 +302,150 @@ const char *kindLabel(check::Kind k) {
 
 - (void)loadPaths:(NSArray<NSString *> *)paths {
     if (_busy || paths.count == 0) return;
-    _busy = YES;
-    _cancelRequested = NO;
-    _spinner.hidden = NO;
-    [_spinner startAnimation:nil];
-    _status.stringValue = [NSString stringWithFormat:@"Reading headers from %lu file%s…",
-                           (unsigned long)paths.count, paths.count == 1 ? "" : "s"];
 
     std::vector<std::string> cpaths;
-    for (NSString *p in paths) cpaths.push_back(p.UTF8String);
+    for (NSString *p in paths) {
+        const char *u = p.UTF8String;      // nil for an undecodable path
+        if (u) cpaths.push_back(u);
+    }
+    if (cpaths.empty()) { _status.stringValue = @"No readable paths."; return; }
+
+    _busy = YES;
+    _cancel = std::make_shared<std::atomic<bool>>(false);
+    _spinner.hidden = NO;
+    [_spinner startAnimation:nil];
+    _status.stringValue = [NSString stringWithFormat:@"Reading headers from %zu file%s…",
+                           cpaths.size(), cpaths.size() == 1 ? "" : "s"];
+
+    // Everything the worker needs is captured by value up front. Nothing on the
+    // background queue touches `self` or an ivar: reaching through `self->` from
+    // another thread is how a window closing mid-index turns into a crash, and
+    // it was being done in twenty-odd places.
+    NSString *storePath = [self storePathForKey:corpusKey(cpaths)];
+    const BOOL cached = [NSFileManager.defaultManager fileExistsAtPath:storePath];
+    auto cancel = _cancel;
+
+    __weak AppDelegate *weakSelf = self;
+
+    // One place where progress crosses back to the main thread, and it
+    // re-checks that the delegate is still alive every time.
+    void (^report)(NSString *) = ^(NSString *line) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *me = weakSelf;
+            if (me) me->_progress.stringValue = line;
+        });
+    };
+    void (^finish)(NSString *) = ^(NSString *line) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *me = weakSelf;
+            if (!me) return;
+            me->_status.stringValue = line;
+            me->_progress.stringValue = @"";
+            me->_busy = NO;
+            [me->_spinner stopAnimation:nil];
+            me->_spinner.hidden = YES;
+        });
+    };
+
+    // Captures by value only — no reference into block storage, and no ObjC
+    // state reached through a dangling `self`.
+    auto makeProgress = [report, cancel](NSString *prefix, uint64_t every) {
+        return [report, cancel, prefix, every](const std::string &stage,
+                                               uint64_t done, uint64_t total) {
+            if (every == 0 || done % every == 0) {
+                @autoreleasepool {
+                    NSString *what = prefix ?: [NSString stringWithUTF8String:stage.c_str()];
+                    report([NSString stringWithFormat:@"%@  %llu / %llu", what,
+                            (unsigned long long)done, (unsigned long long)total]);
+                }
+            }
+            return !cancel->load();
+        };
+    };
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      @autoreleasepool {
         // --- stage 1: headers only ---
         indexer::SurveyOptions so;      // classify off: no point decoding
-        indexer::Survey s = indexer::survey(cpaths, so,
-            [&](const std::string &stage, uint64_t done, uint64_t total) {
-                if (done % 25 == 0) {
-                    NSString *line = [NSString stringWithFormat:@"%s  %llu / %llu",
-                                      stage.c_str(), (unsigned long long)done,
-                                      (unsigned long long)total];
-                    dispatch_async(dispatch_get_main_queue(), ^{ self->_progress.stringValue = line; });
-                }
-                return !self->_cancelRequested;
-            });
+        indexer::Survey survey = indexer::survey(cpaths, so, makeProgress(nil, 25));
+        if (cancel->load()) { finish(@"Cancelled."); return; }
 
         std::vector<double> setups;
-        setups.reserve(s.scans.size() * 3);
-        for (const auto &sc : s.scans)
+        setups.reserve(survey.scans.size() * 3);
+        for (const auto &sc : survey.scans)
             if (sc.usable) for (int k = 0; k < 3; ++k) setups.push_back(sc.setup[k]);
 
-        const std::string key = corpusKey(cpaths);
-        __block indexer::Survey surveyCopy = s;
+        const size_t usable = survey.usableCount();
+        const size_t files  = survey.filesRead;
+        const std::string declared = humanCount(survey.totalPoints());
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            self->_survey = surveyCopy;
-            [self->_table reloadData];
-            [self->_cloudView setSetups:setups];
-            self->_status.stringValue = [NSString stringWithFormat:
+            AppDelegate *me = weakSelf;
+            if (!me) return;
+            me->_survey = survey;
+            [me->_table reloadData];
+            [me->_cloudView setSetups:setups];
+            me->_status.stringValue = [NSString stringWithFormat:
                 @"%zu setups from %zu files   ·   %s declared points   ·   indexing…",
-                surveyCopy.usableCount(), surveyCopy.filesRead,
-                humanCount(surveyCopy.totalPoints()).c_str()];
+                usable, files, declared.c_str()];
         });
 
-        if (self->_cancelRequested) { [self finishBusy:@"Cancelled."]; return; }
-
         // --- stage 2: the point store ---
-        NSString *storePath = [self storePathForKey:key];
-        const BOOL cached = [NSFileManager.defaultManager fileExistsAtPath:storePath];
-
         if (!cached) {
             // The build needs the full structured check, which decodes a sample
             // per scan; the fast survey deliberately skipped it.
             indexer::SurveyOptions full;
             full.classify = true;
-            s = indexer::survey(cpaths, full,
-                [&](const std::string &, uint64_t done, uint64_t total) {
-                    if (done % 10 == 0) {
-                        NSString *line = [NSString stringWithFormat:@"checking scans  %llu / %llu",
-                                          (unsigned long long)done, (unsigned long long)total];
-                        dispatch_async(dispatch_get_main_queue(), ^{ self->_progress.stringValue = line; });
-                    }
-                    return !self->_cancelRequested;
-                });
-            __block indexer::Survey checked = s;
+            indexer::Survey checked =
+                indexer::survey(cpaths, full, makeProgress(@"checking scans", 10));
+            if (cancel->load()) { finish(@"Cancelled."); return; }
+
             dispatch_async(dispatch_get_main_queue(), ^{
-                self->_survey = checked;
-                [self->_table reloadData];
+                AppDelegate *me = weakSelf;
+                if (!me) return;
+                me->_survey = checked;
+                [me->_table reloadData];
             });
 
             indexer::BuildOptions bo;
             indexer::BuildStats stats;
             std::string err;
-            const bool ok = indexer::build(s, storePath.UTF8String, bo, stats,
-                [&](const std::string &stage, uint64_t done, uint64_t total) {
-                    NSString *line = [NSString stringWithFormat:@"%s  %llu / %llu",
-                                      stage.c_str(), (unsigned long long)done,
-                                      (unsigned long long)total];
-                    dispatch_async(dispatch_get_main_queue(), ^{ self->_progress.stringValue = line; });
-                    return !self->_cancelRequested;
-                }, err);
-
+            const bool ok = indexer::build(checked, storePath.UTF8String, bo, stats,
+                                           makeProgress(nil, 0), err);
             if (!ok) {
                 // A partial store must not be left where the cache key would
                 // find it and present it as complete.
                 [NSFileManager.defaultManager removeItemAtPath:storePath error:nil];
-                NSString *msg = [NSString stringWithFormat:@"Indexing failed: %s", err.c_str()];
-                [self finishBusy:msg];
+                finish(cancel->load() ? @"Cancelled."
+                                      : [NSString stringWithFormat:@"Indexing failed: %s",
+                                         err.c_str()]);
                 return;
             }
             if (stats.outsideRoot || stats.dropped) {
-                NSString *warn = [NSString stringWithFormat:
+                report([NSString stringWithFormat:
                     @"indexed with losses: %llu outside bounds, %llu dropped at depth limit",
-                    (unsigned long long)stats.outsideRoot, (unsigned long long)stats.dropped];
-                dispatch_async(dispatch_get_main_queue(), ^{ self->_progress.stringValue = warn; });
+                    (unsigned long long)stats.outsideRoot, (unsigned long long)stats.dropped]);
             }
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSString *err = nil;
-            if (![self->_cloudView openStore:storePath error:&err]) {
-                self->_status.stringValue = [NSString stringWithFormat:@"Could not open store: %@", err];
+            AppDelegate *me = weakSelf;
+            if (!me) return;
+            NSString *openErr = nil;
+            if (![me->_cloudView openStore:storePath error:&openErr]) {
+                me->_status.stringValue =
+                    [NSString stringWithFormat:@"Could not open store: %@", openErr];
             } else {
-                self->_status.stringValue = [NSString stringWithFormat:
+                me->_status.stringValue = [NSString stringWithFormat:
                     @"%zu setups   ·   store %@   ·   drag to navigate",
-                    self->_survey.usableCount(), cached ? @"reused from cache" : @"built"];
+                    usable, cached ? @"reused from cache" : @"built"];
             }
-            self->_progress.stringValue = @"";
-            self->_busy = NO;
-            [self->_spinner stopAnimation:nil];
-            self->_spinner.hidden = YES;
+            me->_progress.stringValue = @"";
+            me->_busy = NO;
+            [me->_spinner stopAnimation:nil];
+            me->_spinner.hidden = YES;
         });
-    });
-}
-
-- (void)finishBusy:(NSString *)message {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        self->_status.stringValue = message;
-        self->_progress.stringValue = @"";
-        self->_busy = NO;
-        [self->_spinner stopAnimation:nil];
-        self->_spinner.hidden = YES;
+      }
     });
 }
 
@@ -470,7 +502,12 @@ int main(int argc, const char *argv[]) {
     @autoreleasepool {
         NSApplication *app = [NSApplication sharedApplication];
         [app setActivationPolicy:NSApplicationActivationPolicyRegular];
-        AppDelegate *delegate = [[AppDelegate alloc] init];
+        // NSApplication.delegate is a WEAK property, and a scope-local strong
+        // reference whose last use is this assignment can be released by ARC
+        // immediately — leaving NSApp.delegate dangling before the run loop
+        // even starts. Held for the process lifetime instead.
+        static AppDelegate *delegate = nil;
+        delegate = [[AppDelegate alloc] init];
         app.delegate = delegate;
         [app run];
     }
