@@ -175,8 +175,7 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     if (gridPath) {
         out.rows = (gridRows + step - 1) / step;
         out.cols = (gridCols + step - 1) / step;
-        out.rangeCm.assign(out.cellCount(), 0);
-        out.status.assign(out.cellCount(), uint8_t(Status::NoReturn));
+        out.cells.assign(out.cellCount(), Cell{});
         rowAcc.assign(out.rows, Accum{});
         colAcc.assign(out.cols, Accum{});
     }
@@ -225,10 +224,10 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
             const uint32_t cm = uint32_t(std::min(range * 100.0, 65535.0));
             // Minimum range wins: several source cells can land in one binned
             // cell, and clearing to the nearest of them never over-clears.
-            if (out.status[i] != uint8_t(Status::Hit) || cm < out.rangeCm[i]) {
-                out.rangeCm[i] = uint16_t(cm);
+            if (out.cells[i].status != uint8_t(Status::Hit) || cm < out.cells[i].rangeCm) {
+                out.cells[i].rangeCm = uint16_t(cm);
             }
-            out.status[i] = uint8_t(Status::Hit);
+            out.cells[i].status = uint8_t(Status::Hit);
 
             Accum& ra = rowAcc[r];
             ra.sumEl += el; ++ra.n;
@@ -306,12 +305,12 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     out.diag.emptyLeadingRows  = lead;
     out.diag.emptyTrailingRows = trail;
 
-    for (size_t i = 0; i < out.status.size(); ++i) {
-        if (out.status[i] == uint8_t(Status::Hit)) { ++out.diag.hits; continue; }
+    for (size_t i = 0; i < out.cells.size(); ++i) {
+        if (out.cells[i].status == uint8_t(Status::Hit)) { ++out.diag.hits; continue; }
         // Every cell the grid declares was sampled, so an empty one is a ray
         // that came back nothing. It clears to maxRange.
-        out.status[i]  = uint8_t(Status::NoReturn);
-        out.rangeCm[i] = uint16_t(std::min(opt.maxRange * 100.0, 65535.0));
+        out.cells[i].status  = uint8_t(Status::NoReturn);
+        out.cells[i].rangeCm = uint16_t(std::min(opt.maxRange * 100.0, 65535.0));
         ++out.diag.noReturns;
     }
     out.diag.fillFraction = double(out.diag.hits) / double(out.cellCount());

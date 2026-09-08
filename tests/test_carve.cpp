@@ -62,8 +62,8 @@ static rimg::RangeImage shellImage(double range, double maxRange,
     rimg::RangeImage im;
     im.rows = rows;
     im.cols = cols;
-    im.rangeCm.assign(im.cellCount(), uint16_t(range * 100.0 + 0.5));
-    im.status.assign(im.cellCount(), uint8_t(rimg::Status::Hit));
+    im.cells.assign(im.cellCount(),
+                    rimg::Cell{uint16_t(range * 100.0 + 0.5), uint8_t(rimg::Status::Hit)});
     im.map.az0 = 0.0;
     im.map.dAzPerCol = kTau / double(cols);
     im.map.el0 = -0.8;
@@ -87,8 +87,8 @@ static void makeNoReturnColumns(rimg::RangeImage& im, uint32_t c0, uint32_t c1,
     for (uint32_t r = 0; r < im.rows; ++r) {
         for (uint32_t c = c0; c < c1 && c < im.cols; ++c) {
             const size_t i = size_t(r) * im.cols + c;
-            im.status[i]  = uint8_t(rimg::Status::NoReturn);
-            im.rangeCm[i] = uint16_t(maxRange * 100.0 + 0.5);
+            im.cells[i].status  = uint8_t(rimg::Status::NoReturn);
+            im.cells[i].rangeCm = uint16_t(maxRange * 100.0 + 0.5);
         }
     }
 }

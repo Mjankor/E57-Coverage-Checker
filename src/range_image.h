@@ -93,10 +93,26 @@ struct Diagnostics {
     std::string note;
 };
 
+// One raster cell: what the scanner did in this direction, and how far away the
+// answer was. Range is in centimetres, which is well under a 5 cm voxel.
+//
+// Packed into one three-byte record rather than kept as parallel range and
+// status arrays. Every lookup wants both fields at the same index, and two
+// arrays meant two cache lines touched for one question. Three bytes rather
+// than a padded four keeps the image the same size it was: a 2500 x 5280 raster
+// is 38 MB either way, and at that size the extra 13 MB of padding would cost
+// more than the alignment saved.
+#pragma pack(push, 1)
+struct Cell {
+    uint16_t rangeCm = 0;
+    uint8_t  status  = uint8_t(Status::NoReturn);
+};
+#pragma pack(pop)
+static_assert(sizeof(Cell) == 3, "Cell must stay three bytes");
+
 struct RangeImage {
     uint32_t rows = 0, cols = 0;
-    std::vector<uint16_t> rangeCm;    // centimetres; 1 cm is well under a 5 cm voxel
-    std::vector<uint8_t>  status;
+    std::vector<Cell> cells;
     Mapping     map;
     Diagnostics diag;
 
@@ -107,10 +123,10 @@ struct RangeImage {
 
     size_t cellCount() const { return size_t(rows) * size_t(cols); }
     Status statusAt(uint32_t row, uint32_t col) const {
-        return Status(status[size_t(row) * cols + col]);
+        return Status(cells[size_t(row) * cols + col].status);
     }
     double rangeAt(uint32_t row, uint32_t col) const {
-        return double(rangeCm[size_t(row) * cols + col]) * 0.01;
+        return double(cells[size_t(row) * cols + col].rangeCm) * 0.01;
     }
 
     // Direction in the scanner frame to a cell. Returns false outside the grid.
