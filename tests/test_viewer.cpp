@@ -7,6 +7,7 @@
 #include "e57_fixture.h"
 #include "../src/camera.h"
 #include "../src/point_cloud.h"
+#include "../src/frame.h"
 #include "../src/picker.h"
 #include "../src/scan_check.h"
 
@@ -374,6 +375,196 @@ static void testSceneOriginAlignment() {
     CHECK_NEAR(hi.x - lo.x, 20.0, 1e-3, "scene spans both clouds");
 }
 
+// ---------------------------------------------------------------------------
+// Coordinate frames
+//
+// The regression these guard: E57 stores each scan in its own local frame and
+// carries the registration in `pose`. Ignoring the pose does not offset a scan
+// slightly — it discards the registration entirely and stacks every setup
+// around a common origin, which is what a whole aligned job looked like.
+
+// World-space points of a small "room", shared by every setup below.
+static void roomPoints(std::vector<double>& wx, std::vector<double>& wy, std::vector<double>& wz) {
+    for (int i = -6; i <= 6; ++i)
+        for (int j = -6; j <= 6; ++j) {
+            wx.push_back(100.0 + double(i) * 0.5);
+            wy.push_back(250.0 + double(j) * 0.5);
+            wz.push_back(10.0 + 0.05 * double(i * j));
+        }
+}
+
+// Writes those world points as seen from a setup: stored in the scanner's local
+// frame, with the pose that maps them back. This is the conformant layout.
+static fixture::Scan scanFromSetup(const char* name, double yawRad,
+                                   double tx, double ty, double tz,
+                                   const std::vector<double>& wx,
+                                   const std::vector<double>& wy,
+                                   const std::vector<double>& wz) {
+    fixture::Scan s;
+    s.name = name;
+    s.hasPose = true;
+    s.q[0] = std::cos(yawRad * 0.5); s.q[1] = 0; s.q[2] = 0; s.q[3] = std::sin(yawRad * 0.5);
+    s.t[0] = tx; s.t[1] = ty; s.t[2] = tz;
+    s.fields = {
+        {"cartesianX", e57::FieldType::FloatDouble},
+        {"cartesianY", e57::FieldType::FloatDouble},
+        {"cartesianZ", e57::FieldType::FloatDouble},
+    };
+    s.data.assign(3, {});
+
+    e57::Pose pose;
+    for (int i = 0; i < 4; ++i) pose.q[i] = s.q[i];
+    for (int i = 0; i < 3; ++i) pose.t[i] = s.t[i];
+    const viewer::Rigid R = viewer::rigidFromPose(pose);
+
+    for (size_t i = 0; i < wx.size(); ++i) {
+        // local = R^T (world - t)
+        const double ax = wx[i] - R.t[0], ay = wy[i] - R.t[1], az = wz[i] - R.t[2];
+        s.data[0].push_back(R.R[0] * ax + R.R[3] * ay + R.R[6] * az);
+        s.data[1].push_back(R.R[1] * ax + R.R[4] * ay + R.R[7] * az);
+        s.data[2].push_back(R.R[2] * ax + R.R[5] * ay + R.R[8] * az);
+    }
+    return s;
+}
+
+static void testPoseRoundTrip() {
+    std::printf("frame: quaternion to rigid transform\n");
+    e57::Pose p;
+    const double a = 0.7;
+    p.q[0] = std::cos(a * 0.5); p.q[3] = std::sin(a * 0.5);
+    p.t[0] = 5.0; p.t[1] = -2.0; p.t[2] = 1.0;
+    const viewer::Rigid R = viewer::rigidFromPose(p);
+
+    // A yaw about Z takes the x axis to (cos a, sin a, 0), then translates.
+    double x = 1, y = 0, z = 0;
+    R.apply(x, y, z);
+    CHECK_NEAR(x, std::cos(a) + 5.0, 1e-9, "rotated x");
+    CHECK_NEAR(y, std::sin(a) - 2.0, 1e-9, "rotated y");
+    CHECK_NEAR(z, 1.0, 1e-9, "z unchanged by a yaw");
+
+    e57::Pose ident;
+    CHECK(viewer::isIdentityPose(ident), "default pose is identity");
+    e57::Pose negW; negW.q[0] = -1.0;
+    CHECK(viewer::isIdentityPose(negW), "q and -q are the same rotation");
+    CHECK(!viewer::isIdentityPose(p), "a real pose is not identity");
+}
+
+static void testAlignedSetupsStayAligned() {
+    std::printf("frame: aligned setups reconstruct to the same world points\n");
+    std::vector<double> wx, wy, wz;
+    roomPoints(wx, wy, wz);
+
+    std::vector<fixture::Scan> scans = {
+        scanFromSetup("Setup 001",  0.0,   98.0, 249.0, 11.5, wx, wy, wz),
+        scanFromSetup("Setup 002",  1.9,  103.5, 252.5, 11.5, wx, wy, wz),
+        scanFromSetup("Setup 003", -2.6,   99.0, 254.0, 11.5, wx, wy, wz),
+    };
+    const std::string p = tmpPath("aligned");
+    CHECK(fixture::write(p, scans, 256), "fixture written");
+
+    e57::Reader r;
+    std::string err;
+    CHECK(r.open(p, err), err.empty() ? "opened" : err.c_str());
+
+    viewer::LoadOptions opt;
+    opt.maxPoints = 100000;                 // no decimation, so indices correspond
+    std::vector<viewer::PointCloud> clouds;
+    for (size_t i = 0; i < r.scanCount(); ++i) {
+        viewer::PointCloud pc;
+        CHECK(viewer::loadCloud(r, i, opt, pc, err), err.empty() ? "loaded" : err.c_str());
+        CHECK(pc.poseApplied, "pose was applied to a scanner-local scan");
+        CHECK(pc.frameConvention == viewer::FrameConvention::ScannerLocal,
+              "detected as scanner-local");
+        clouds.push_back(std::move(pc));
+    }
+    viewer::setSceneOrigin(clouds);
+
+    // Each cloud must reconstruct the original world coordinates.
+    bool worldOk = true;
+    for (const auto& c : clouds)
+        for (size_t i = 0; i < wx.size() && worldOk; ++i) {
+            if (std::fabs(c.originX + double(c.xyz[i * 3 + 0]) - wx[i]) > 1e-3) worldOk = false;
+            if (std::fabs(c.originY + double(c.xyz[i * 3 + 1]) - wy[i]) > 1e-3) worldOk = false;
+            if (std::fabs(c.originZ + double(c.xyz[i * 3 + 2]) - wz[i]) > 1e-3) worldOk = false;
+        }
+    CHECK(worldOk, "every scan reconstructs the file-frame coordinates");
+
+    // And they must coincide in the scene frame the renderer actually uses.
+    bool coincide = true;
+    double worstGap = 0.0;
+    for (size_t k = 1; k < clouds.size(); ++k)
+        for (size_t i = 0; i < wx.size(); ++i) {
+            for (int d = 0; d < 3; ++d) {
+                const double a = double(clouds[0].xyz[i * 3 + d]) + clouds[0].sceneOffset[d];
+                const double b = double(clouds[k].xyz[i * 3 + d]) + clouds[k].sceneOffset[d];
+                worstGap = std::max(worstGap, std::fabs(a - b));
+            }
+        }
+    coincide = worstGap < 2e-3;
+    CHECK(coincide, "aligned setups land on top of each other in the scene frame");
+    if (!coincide) std::printf("       worst separation %.4f m\n", worstGap);
+
+    // The setup markers must be at the poses, not all at the origin.
+    const double sep = std::sqrt(
+        std::pow(double(clouds[0].originOffset[0]) + clouds[0].sceneOffset[0]
+               - double(clouds[1].originOffset[0]) - clouds[1].sceneOffset[0], 2.0) +
+        std::pow(double(clouds[0].originOffset[1]) + clouds[0].sceneOffset[1]
+               - double(clouds[1].originOffset[1]) - clouds[1].sceneOffset[1], 2.0));
+    CHECK_NEAR(sep, std::sqrt(5.5 * 5.5 + 3.5 * 3.5), 1e-2,
+               "setup markers are separated by the true setup spacing");
+
+    // A genuine single setup must not be called merged. Before the frame fix
+    // this is exactly what misfired on real scans.
+    for (size_t i = 0; i < r.scanCount(); ++i) {
+        const check::Result res = check::classify(r, i);
+        CHECK(res.kind != check::Kind::Unified,
+              "a real single setup is not misreported as merged");
+    }
+}
+
+static void testPreTransformedScanIsNotMovedTwice() {
+    std::printf("frame: pre-transformed points are detected, not transformed again\n");
+    std::vector<double> wx, wy, wz;
+    roomPoints(wx, wy, wz);
+
+    // Non-conformant but real: world coordinates stored alongside a
+    // non-identity pose. Applying the pose would displace the scan twice.
+    fixture::Scan s;
+    s.name = "preTransformed";
+    s.hasPose = true;
+    s.q[0] = std::cos(0.4); s.q[3] = std::sin(0.4);
+    s.t[0] = 98.0; s.t[1] = 249.0; s.t[2] = 11.5;
+    s.fields = {
+        {"cartesianX", e57::FieldType::FloatDouble},
+        {"cartesianY", e57::FieldType::FloatDouble},
+        {"cartesianZ", e57::FieldType::FloatDouble},
+    };
+    s.data = {wx, wy, wz};
+
+    const std::string p = tmpPath("pretransformed");
+    CHECK(fixture::write(p, {s}, 256), "fixture written");
+
+    e57::Reader r;
+    std::string err;
+    CHECK(r.open(p, err), err.empty() ? "opened" : err.c_str());
+
+    const viewer::FrameDecision d = viewer::decideFrame(r, 0);
+    CHECK(d.convention == viewer::FrameConvention::AlreadyGlobal,
+          "points clustering about the pose translation are already transformed");
+    CHECK(!d.applyPose(), "so the pose is not applied");
+    CHECK(d.nonConformant(), "and the file is flagged as contradicting the standard");
+
+    viewer::LoadOptions opt; opt.maxPoints = 100000;
+    viewer::PointCloud pc;
+    CHECK(viewer::loadCloud(r, 0, opt, pc, err), err.empty() ? "loaded" : err.c_str());
+    CHECK(!pc.poseApplied, "loader left the points alone");
+
+    bool ok = true;
+    for (size_t i = 0; i < wx.size() && ok; ++i)
+        if (std::fabs(pc.originX + double(pc.xyz[i * 3 + 0]) - wx[i]) > 1e-3) ok = false;
+    CHECK(ok, "coordinates are unchanged");
+}
+
 int main() {
     std::printf("E57 Coverage Checker — viewer tests\n\n");
     testCameraProjection();
@@ -384,6 +575,9 @@ int main() {
     testDecimationAndPrecision();
     testPicker();
     testSceneOriginAlignment();
+    testPoseRoundTrip();
+    testAlignedSetupsStayAligned();
+    testPreTransformedScanIsNotMovedTwice();
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

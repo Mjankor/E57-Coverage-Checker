@@ -15,6 +15,7 @@
 #import "CloudView.h"
 
 #include "../src/e57.h"
+#include "../src/frame.h"
 #include "../src/picker.h"
 #include "../src/point_cloud.h"
 #include "../src/scan_check.h"
@@ -35,6 +36,7 @@ struct Entry {
     uint64_t    sourcePoints = 0;
     size_t      loadedPoints = 0;
     bool        rendered = false;
+    bool        frameWarning = false;   // non-conformant pose handling
 };
 
 NSString *ns(const std::string &s) { return [NSString stringWithUTF8String:s.c_str()]; }
@@ -287,6 +289,15 @@ std::string humanCount(uint64_t n) {
                     if (viewer::loadCloud(reader, i, viewer::LoadOptions{}, pc, lerr)) {
                         e.loadedPoints = pc.pointCount();
                         e.rendered = true;
+                        // How the scan was placed. A scan drawn in the wrong
+                        // frame looks plausible on its own and is only obvious
+                        // against its neighbours, so it is always reported.
+                        e.detail += "\n\nplacement: ";
+                        e.detail += viewer::conventionName(pc.frameConvention);
+                        e.detail += "\n";
+                        e.detail += pc.frameNote;
+                        if (pc.frameConvention == viewer::FrameConvention::AlreadyGlobal)
+                            e.frameWarning = true;
                         newClouds.push_back(std::move(pc));
                     } else {
                         e.kind = check::Kind::Unified;
@@ -354,7 +365,7 @@ std::string humanCount(uint64_t n) {
         label.stringValue = ns(e.file + "  ▸  " + e.scan);
         label.toolTip = ns(e.path);
     } else if ([column.identifier isEqualToString:@"status"]) {
-        label.stringValue = ns(e.status);
+        label.stringValue = ns(e.frameWarning ? (e.status + "  ⚠︎ frame") : e.status);
         label.toolTip = ns(e.detail.empty() ? e.status : e.detail);
         switch (e.kind) {
         case check::Kind::Structured: label.textColor = [NSColor systemGreenColor]; break;

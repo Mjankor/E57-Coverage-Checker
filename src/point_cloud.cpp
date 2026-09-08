@@ -1,5 +1,7 @@
 #include "point_cloud.h"
 
+#include "frame.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -45,6 +47,20 @@ bool loadCloud(e57::Reader& reader, size_t scanIndex, const LoadOptions& opt,
         want.push_back("intensity");
     }
 
+    // Place the scan into the file's coordinate system. E57 stores points in
+    // each scan's own local frame and carries the registration in `pose`, so
+    // skipping this does not shift a scan slightly — it throws the
+    // registration away and stacks every setup around a common origin.
+    const FrameDecision frame = decideFrame(reader, scanIndex);
+    const Rigid rigid = rigidFromPose(s.pose);
+    // Spherical storage is scanner-centric by construction, so the pose always
+    // applies there regardless of what the cartesian heuristic would say.
+    const bool applyPose = spherical ? (s.hasPose && !isIdentityPose(s.pose))
+                                     : frame.applyPose();
+    out.frameConvention = frame.convention;
+    out.frameNote       = frame.reason;
+    out.poseApplied     = applyPose && s.hasPose && !isIdentityPose(s.pose);
+
     // Uniform stride rather than random sampling: deterministic, and it keeps
     // the scan-line structure legible when you zoom in.
     const uint64_t stride = std::max<uint64_t>(
@@ -84,6 +100,7 @@ bool loadCloud(e57::Reader& reader, size_t scanIndex, const LoadOptions& opt,
                 z = r * std::sin(el);
             }
             if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+            if (applyPose) rigid.apply(x, y, z);
 
             if (!haveOrigin) {
                 out.originX = x; out.originY = y; out.originZ = z;
@@ -132,12 +149,17 @@ bool loadCloud(e57::Reader& reader, size_t scanIndex, const LoadOptions& opt,
         out.hiMax[i] = float(hi[i]);
     }
 
-    // The setup position, expressed in the same local frame as the points.
-    if (s.hasPose || cartesian) {
-        out.originOffset[0] = float(s.pose.t[0] - out.originX);
-        out.originOffset[1] = float(s.pose.t[1] - out.originY);
-        out.originOffset[2] = float(s.pose.t[2] - out.originZ);
-        out.hasSetupPosition = s.hasPose;
+    // The setup position, in the file frame, expressed relative to this
+    // cloud's local origin. Either convention puts the scanner at the pose
+    // translation: applying the pose maps the local origin onto t, and
+    // pre-transformed data already has it there.
+    if (s.hasPose) {
+        double setup[3];
+        setupPosition(s, frame, setup);
+        out.originOffset[0] = float(setup[0] - out.originX);
+        out.originOffset[1] = float(setup[1] - out.originY);
+        out.originOffset[2] = float(setup[2] - out.originZ);
+        out.hasSetupPosition = true;
     }
     return true;
 }

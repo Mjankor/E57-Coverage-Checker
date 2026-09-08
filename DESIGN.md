@@ -171,9 +171,13 @@ the defaults.**
   and are not special-cased beyond that.
 - A point beyond `maxRange` clears to `maxRange` and does **not** mark an
   OCCUPIED voxel.
-- The E57 `pose` (quaternion + translation) may place points in scanner-local
-  or already-global coordinates depending on the producer. Detect per file
-  rather than assuming; mixed conventions across a 1000-file corpus assembled
+- The E57 `pose` (quaternion + translation) maps a scan's own local coordinate
+  system into the file's. Points are stored local, so the pose must be applied
+  — skipping it does not offset a scan slightly, it discards the registration
+  and stacks every setup around a common origin. Some writers non-conformantly
+  store pre-transformed points alongside a non-identity pose; `src/frame.h`
+  detects that by asking whether the points cluster about the local origin or
+  about the pose translation. Detect per file rather than assuming; mixed conventions across a 1000-file corpus assembled
   from several jobs is a realistic risk.
 
 ### Hierarchical acceleration (deferred)

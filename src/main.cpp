@@ -19,6 +19,7 @@
 // checks that would reveal it.
 
 #include "e57.h"
+#include "frame.h"
 
 #include <algorithm>
 #include <cmath>
@@ -55,27 +56,6 @@ void accumulate(Stats& st, double x, double y, double z) {
     st.minZ = std::min(st.minZ, z); st.maxZ = std::max(st.maxZ, z);
     st.sumX += x; st.sumY += y; st.sumZ += z;
     st.any = true;
-}
-
-// Which of the two coordinate conventions this scan uses. Both appear in the
-// wild, sometimes within one corpus assembled from several jobs, so it is
-// detected rather than assumed.
-const char* frameGuess(const e57::Scan& s, const Stats& st) {
-    if (!st.any) return "unknown (no points decoded)";
-    const double n = double(st.decoded);
-    const double cx = st.sumX / n, cy = st.sumY / n, cz = st.sumZ / n;
-    const double centroid = std::sqrt(cx * cx + cy * cy + cz * cz);
-    const double poseT    = std::sqrt(s.pose.t[0] * s.pose.t[0] +
-                                      s.pose.t[1] * s.pose.t[1] +
-                                      s.pose.t[2] * s.pose.t[2]);
-    // A scanner-local cloud is centred near its own origin. If the centroid
-    // instead sits near where the pose says the scanner is, the producer has
-    // already applied the pose.
-    if (centroid < 5.0)                       return "scanner-local (apply pose)";
-    if (poseT > 1.0 && std::fabs(centroid - poseT) < 0.25 * poseT)
-                                              return "global (pose already applied)";
-    if (poseT < 1e-9 && centroid > 50.0)      return "global (identity pose, far from origin)";
-    return "ambiguous — inspect manually";
 }
 
 int info(const std::string& path, bool verifyCrc) {
@@ -192,8 +172,16 @@ int info(const std::string& path, bool verifyCrc) {
             } else {
                 std::printf("      declared  : no cartesianBounds — cross-check unavailable\n");
             }
-            // Question 2: which coordinate frame?
-            std::printf("      frame     : %s\n", frameGuess(s, st));
+            // Question 2: which coordinate frame, and is the pose applied?
+            const viewer::FrameDecision fd = viewer::decideFrame(r, i);
+            std::printf("      frame     : %s\n", viewer::conventionName(fd.convention));
+            std::printf("                  %s\n", fd.reason.c_str());
+            if (fd.nonConformant()) {
+                std::printf("      *** this file stores pre-transformed points WITH a non-identity\n"
+                            "          pose, which contradicts ASTM E2807. The pose is being\n"
+                            "          ignored for this scan; verify against a known-good viewer.\n");
+                ++failures;
+            }
         }
     }
 

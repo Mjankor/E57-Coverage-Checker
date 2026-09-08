@@ -33,6 +33,10 @@
 		E57C00000000000000000049 /* Renderer.mm in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000000E /* Renderer.mm */; };
 		E57C0000000000000000004A /* CloudView.mm in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000010 /* CloudView.mm */; };
 		E57C0000000000000000004B /* AppDelegate.mm in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* AppDelegate.mm */; };
+		E57C00000000000000000062 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000061 /* frame.cpp */; };
+		E57C00000000000000000063 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000061 /* frame.cpp */; };
+		E57C00000000000000000064 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000061 /* frame.cpp */; };
+		E57C00000000000000000065 /* frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000061 /* frame.cpp */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -48,6 +52,8 @@
 		E57C0000000000000000000A /* picker.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = picker.h; sourceTree = "<group>"; };
 		E57C0000000000000000000B /* picker.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = picker.cpp; sourceTree = "<group>"; };
 		E57C0000000000000000000C /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = main.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000060 /* frame.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = frame.h; sourceTree = "<group>"; };
+		E57C00000000000000000061 /* frame.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = frame.cpp; sourceTree = "<group>"; };
 		E57C0000000000000000000D /* Renderer.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Renderer.h; sourceTree = "<group>"; };
 		E57C0000000000000000000E /* Renderer.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = Renderer.mm; sourceTree = "<group>"; };
 		E57C0000000000000000000F /* CloudView.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CloudView.h; sourceTree = "<group>"; };
@@ -93,6 +99,8 @@
 				E57C00000000000000000009 /* point_cloud.cpp */,
 				E57C0000000000000000000A /* picker.h */,
 				E57C0000000000000000000B /* picker.cpp */,
+				E57C00000000000000000060 /* frame.h */,
+				E57C00000000000000000061 /* frame.cpp */,
 				E57C0000000000000000000C /* main.cpp */,
 			);
 			path = src;
@@ -260,6 +268,7 @@
 				E57C00000000000000000022 /* scan_check.cpp in Sources */,
 				E57C00000000000000000023 /* point_cloud.cpp in Sources */,
 				E57C00000000000000000024 /* picker.cpp in Sources */,
+				E57C00000000000000000062 /* frame.cpp in Sources */,
 				E57C00000000000000000025 /* main.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -273,6 +282,7 @@
 				E57C0000000000000000002E /* scan_check.cpp in Sources */,
 				E57C0000000000000000002F /* point_cloud.cpp in Sources */,
 				E57C00000000000000000030 /* picker.cpp in Sources */,
+				E57C00000000000000000063 /* frame.cpp in Sources */,
 				E57C00000000000000000031 /* test_e57.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -286,6 +296,7 @@
 				E57C0000000000000000003A /* scan_check.cpp in Sources */,
 				E57C0000000000000000003B /* point_cloud.cpp in Sources */,
 				E57C0000000000000000003C /* picker.cpp in Sources */,
+				E57C00000000000000000064 /* frame.cpp in Sources */,
 				E57C0000000000000000003D /* test_viewer.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -299,6 +310,7 @@
 				E57C00000000000000000046 /* scan_check.cpp in Sources */,
 				E57C00000000000000000047 /* point_cloud.cpp in Sources */,
 				E57C00000000000000000048 /* picker.cpp in Sources */,
+				E57C00000000000000000065 /* frame.cpp in Sources */,
 				E57C00000000000000000049 /* Renderer.mm in Sources */,
 				E57C0000000000000000004A /* CloudView.mm in Sources */,
 				E57C0000000000000000004B /* AppDelegate.mm in Sources */,

@@ -87,6 +87,14 @@ the view never jumps. If the crosshair is over empty space the centre is left
 alone and the status bar says so, rather than flinging the view somewhere
 arbitrary.
 
+**Scans are placed by their `pose`.** E57 stores each scan in its own local
+coordinate system and carries the registration in the `pose` element, so a
+registered multi-setup job only lines up once every pose is applied. The list's
+Status tooltip reports how each scan was placed. Files that store
+already-transformed points *with* a non-identity pose contradict the standard;
+those are detected rather than assumed, flagged `⚠︎ frame`, and left
+untransformed instead of being displaced twice.
+
 **Merged clouds are rejected on load.** Every scan is classified and the reason
 shown in the list: green for usable, red for rejected, amber for ambiguous.
 Rejected scans stay listed with their reason on hover — they are just not drawn

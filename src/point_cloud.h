@@ -18,6 +18,7 @@
 #pragma once
 
 #include "e57.h"
+#include "frame.h"
 
 #include <cstdint>
 #include <string>
@@ -47,6 +48,13 @@ struct PointCloud {
     // needs this; the viewer draws it so a bad pose is obvious on sight.
     float  originOffset[3] = {0, 0, 0};
     bool   hasSetupPosition = false;
+
+    // How this scan was placed into the file's coordinate system. Surfaced in
+    // the UI because a scan drawn in the wrong frame looks plausible up close
+    // and is only obvious when compared against its neighbours.
+    FrameConvention frameConvention = FrameConvention::Unknown;
+    std::string     frameNote;
+    bool            poseApplied = false;
 
     uint64_t sourcePointCount = 0;   // before decimation
     float    loMin[3] = {0, 0, 0};

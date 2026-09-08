@@ -1,5 +1,7 @@
 #include "scan_check.h"
 
+#include "frame.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -89,21 +91,30 @@ Result classify(e57::Reader& reader, size_t scanIndex, const Thresholds& t) {
                            hasField(s, "cartesianZ");
     if (!cartesian || s.recordCount == 0) return r;
 
-    // Points are relative to the scanner origin. If the producer already
-    // applied the pose, the origin is the pose translation; otherwise it is
-    // zero. Deciding wrongly would scatter directions meaninglessly, so use
-    // the centroid as a tiebreak the same way `e57cov info` does.
+    // Bin about wherever the scanner actually is. This used to be guessed from
+    // the sample centroid, which fails exactly when setups are close together:
+    // an outdoor scan whose centroid sits a few metres off its own origin was
+    // tested about the pose translation instead, scattering the direction bins
+    // and reporting a perfectly good single setup as merged. The frame
+    // decision answers the same question properly.
     std::vector<std::string> want = {"cartesianX", "cartesianY", "cartesianZ"};
     const char* invName = hasField(s, "cartesianInvalidState") ? "cartesianInvalidState"
                                                               : nullptr;
     if (invName) want.push_back(invName);
     const size_t invIdx = 3;
 
-    const uint64_t stride = std::max<uint64_t>(1, s.recordCount / std::max<size_t>(1, t.sampleTarget));
+    const viewer::FrameDecision frame = viewer::decideFrame(reader, scanIndex);
+    double ox = 0, oy = 0, oz = 0;
+    if (!frame.applyPose() && s.hasPose) {
+        // Points are already in the file frame, so the scanner is at the pose
+        // translation.
+        ox = s.pose.t[0]; oy = s.pose.t[1]; oz = s.pose.t[2];
+    }
+    r.evidence.push_back(frame.reason);
 
-    // Pass 1: centroid of the sample, to choose the origin.
-    double cx = 0, cy = 0, cz = 0;
-    uint64_t n = 0, seen = 0;
+    const uint64_t stride = std::max<uint64_t>(
+        1, s.recordCount / std::max<size_t>(1, t.sampleTarget));
+    uint64_t seen = 0;
     std::string err;
     auto sample = [&](const e57::PointBlock& b, auto&& fn) {
         for (size_t k = 0; k < b.count; ++k, ++seen) {
@@ -113,28 +124,6 @@ Result classify(e57::Reader& reader, size_t scanIndex, const Thresholds& t) {
         }
         return true;
     };
-
-    if (!reader.readPoints(scanIndex, want, [&](const e57::PointBlock& b) {
-            return sample(b, [&](double x, double y, double z) {
-                cx += x; cy += y; cz += z; ++n;
-            });
-        }, err) || n < 100) {
-        r.evidence.push_back("geometric test skipped: too few decodable points");
-        return r;
-    }
-    cx /= double(n); cy /= double(n); cz /= double(n);
-
-    double ox = 0, oy = 0, oz = 0;
-    const double poseLen = std::sqrt(s.pose.t[0] * s.pose.t[0] +
-                                     s.pose.t[1] * s.pose.t[1] +
-                                     s.pose.t[2] * s.pose.t[2]);
-    const double centLen = std::sqrt(cx * cx + cy * cy + cz * cz);
-    if (poseLen > 1.0 && centLen > 0.5 * poseLen) {
-        ox = s.pose.t[0]; oy = s.pose.t[1]; oz = s.pose.t[2];
-        r.evidence.push_back("testing about the pose translation (points appear pre-transformed)");
-    } else {
-        r.evidence.push_back("testing about the local origin");
-    }
 
     // Pass 2: bin by direction, track min and max range per bin.
     struct Bin { float lo = 1e30f, hi = -1e30f; int n = 0; };

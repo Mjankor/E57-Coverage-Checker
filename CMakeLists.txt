@@ -15,7 +15,8 @@ add_library(e57cov_core STATIC
   src/camera.cpp
   src/scan_check.cpp
   src/point_cloud.cpp
-  src/picker.cpp)
+  src/picker.cpp
+  src/frame.cpp)
 target_include_directories(e57cov_core PUBLIC src)
 target_compile_options(e57cov_core PRIVATE -Wall -Wextra)
 
