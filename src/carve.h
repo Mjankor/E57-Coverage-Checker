@@ -274,6 +274,21 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
 void carveTileReference(const TileKey& key, const std::vector<SetupView>& setups,
                         const Params& p, Tile& out, Stats& stats);
 
+// Tallies a finished tile into `stats`. Exposed because a carver that fills the
+// state some other way — the GPU — still has to count it the same way.
+void tallyTile(const Tile& t, Stats& stats);
+
+// An alternative implementation of carveTile, installed from outside.
+//
+// This is the seam the Metal path plugs into, and it is a "try" rather than a
+// "do": returning false means the tile was not carved and the caller runs the
+// CPU path instead. Every failure the GPU layer can have — no device, a buffer
+// that would not allocate, a command buffer that errored — comes out here as
+// false, so the CPU implementation is not a fallback that might be missing but
+// the thing that always works.
+using TileCarver = bool (*)(const TileKey& key, const std::vector<SetupView>& setups,
+                            const Params& p, Tile& out, Stats& stats, void* user);
+
 // Voxels per brick edge, the unit of traversal in carveTile. Eight at 5 cm is a
 // 40 cm cube: at 20 m it subtends about a degree, which on a 2500 x 5280 raster
 // is roughly 17 x 28 cells — under 2 KB, so the whole brick reads out of L1.

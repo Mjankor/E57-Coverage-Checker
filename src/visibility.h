@@ -94,6 +94,17 @@ struct Options {
     // StorePoints, which is a fraction of what the point cloud itself costs.
     uint64_t displayCap = 6ull << 20;
 
+    // An accelerator for carveTile — the Metal path installs itself here. Left
+    // null the carve runs on the CPU, which is what happens anyway whenever the
+    // carver declines a tile. A carver is driven from one thread: it is the
+    // parallelism, so the tile pool would only contend with it.
+    carve::TileCarver carver = nullptr;
+    void*             carverUser = nullptr;
+    // Carve every tile both ways and count the voxels they disagree about.
+    // Halves the speed, obviously; it is how you find out whether a new carver
+    // is telling the truth on real data rather than on a fixture.
+    bool              verifyCarver = false;
+
     // Worker threads over the tile list. 0 asks the machine. Tiles share
     // nothing — no accumulator, no neighbour reads across seams — so this is
     // parallel by construction rather than by locking, and the result is
@@ -114,6 +125,12 @@ struct Result {
     uint64_t     scansSkipped = 0;
     bool         partial   = false;    // maxTiles stopped it short
     bool         cancelled = false;
+
+    // Tiles the installed carver accepted, and what verification found.
+    uint64_t carverTiles = 0;
+    uint64_t carverRefused = 0;
+    uint64_t carverDisagreements = 0;
+    uint64_t carverVoxelsCompared = 0;
 
     // The region actually asked about, and how much smaller it made the job.
     carve::Domain domain;

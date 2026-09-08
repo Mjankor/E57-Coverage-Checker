@@ -188,8 +188,11 @@ std::vector<size_t> prepareTile(const TileKey& key, const std::vector<SetupView>
     return setupsForBox(plo, phi, setups, p);
 }
 
-// Tallies a finished tile. Split out because the fast path fills the state in a
-// different order from the reference and cannot count as it goes.
+} // namespace
+
+// Split out because the fast path fills the state in a different order from the
+// reference and cannot count as it goes — and because the GPU path fills it
+// somewhere else entirely and still has to count it identically.
 void tallyTile(const Tile& t, Stats& stats) {
     for (uint32_t z = t.interiorBegin(); z < t.interiorEnd(); ++z) {
         for (uint32_t y = t.interiorBegin(); y < t.interiorEnd(); ++y) {
@@ -206,8 +209,6 @@ void tallyTile(const Tile& t, Stats& stats) {
         }
     }
 }
-
-} // namespace
 
 namespace {
 

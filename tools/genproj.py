@@ -17,7 +17,8 @@ GROUPS = {
          ("range_image.cpp","sourcecode.cpp.cpp"),("carve.h","sourcecode.c.h"),
          ("carve.cpp","sourcecode.cpp.cpp"),("visibility.h","sourcecode.c.h"),
          ("visibility.cpp","sourcecode.cpp.cpp"),("main.cpp","sourcecode.cpp.cpp")],
- "app": [("Renderer.h","sourcecode.c.h"),("Renderer.mm","sourcecode.cpp.objcpp"),
+ "app": [("CarveGpu.h","sourcecode.c.h"),("CarveGpu.mm","sourcecode.cpp.objcpp"),
+         ("Renderer.h","sourcecode.c.h"),("Renderer.mm","sourcecode.cpp.objcpp"),
          ("CloudView.h","sourcecode.c.h"),("CloudView.mm","sourcecode.cpp.objcpp"),
          ("AppDelegate.mm","sourcecode.cpp.objcpp"),("Info.plist","text.plist.xml")],
  "tests": [("e57_fixture.h","sourcecode.c.h"),("test_e57.cpp","sourcecode.cpp.cpp"),
@@ -59,7 +60,8 @@ TARGETS = [
    CORE+[("tests","test_visibility.cpp")], False),
   ("E57CoverageChecker","com.apple.product-type.application","E57CoverageChecker.app",
    "wrapper.application",
-   CORE+[("app","Renderer.mm"),("app","CloudView.mm"),("app","AppDelegate.mm")], True),
+   CORE+[("app","Renderer.mm"),("app","CloudView.mm"),("app","CarveGpu.mm"),
+         ("app","AppDelegate.mm")], True),
 ]
 
 prod, tgt, srcphase, cfglist, cfgs, bfiles = {}, {}, {}, {}, {}, {}

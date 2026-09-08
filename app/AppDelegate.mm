@@ -18,6 +18,7 @@
 #import <Cocoa/Cocoa.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
+#import "CarveGpu.h"
 #import "CloudView.h"
 
 #include "../src/indexer.h"
@@ -112,6 +113,8 @@ const char *kindLabel(check::Kind k) {
     std::vector<std::string> _paths;
     // Carried between runs so the sheet reopens with what was last used.
     vis::Options         _visOptions;
+    BOOL                 _useGpu;
+    BOOL                 _verifyGpu;
     BOOL                 _busy;
     // Shared with the worker rather than read through `self`: it is written on
     // the main thread and read on a background queue, which as a plain BOOL was
@@ -314,6 +317,10 @@ const char *kindLabel(check::Kind k) {
     [procMenu addItemWithTitle:@"Run Visibility Filter…"
                         action:@selector(runVisibilityFilter:) keyEquivalent:@"r"];
     [procMenu addItem:[NSMenuItem separatorItem]];
+    [procMenu addItemWithTitle:@"Use the GPU" action:@selector(toggleGpu:) keyEquivalent:@""];
+    [procMenu addItemWithTitle:@"Verify the GPU against the CPU"
+                        action:@selector(toggleVerifyGpu:) keyEquivalent:@""];
+    [procMenu addItem:[NSMenuItem separatorItem]];
     [procMenu addItemWithTitle:@"Clear Voxels" action:@selector(clearVoxels:) keyEquivalent:@""];
     procItem.submenu = procMenu;
     [bar addItem:procItem];
@@ -416,6 +423,28 @@ const char *kindLabel(check::Kind k) {
     (void)sender;
     [_cloudView clearVoxels];
     _status.stringValue = @"Voxels cleared.";
+}
+
+- (void)toggleGpu:(id)sender {
+    _useGpu = !_useGpu;
+    ((NSMenuItem *)sender).state = _useGpu ? NSControlStateValueOn : NSControlStateValueOff;
+    if (_useGpu && ![CarveGpu shared]) {
+        _useGpu = NO;
+        ((NSMenuItem *)sender).state = NSControlStateValueOff;
+        _status.stringValue = [NSString stringWithFormat:@"No GPU carve available: %@",
+                               [CarveGpu unavailableReason]];
+        return;
+    }
+    _status.stringValue = _useGpu ? @"Visibility filter will run on the GPU."
+                                  : @"Visibility filter will run on the CPU.";
+}
+
+- (void)toggleVerifyGpu:(id)sender {
+    _verifyGpu = !_verifyGpu;
+    ((NSMenuItem *)sender).state = _verifyGpu ? NSControlStateValueOn : NSControlStateValueOff;
+    _status.stringValue = _verifyGpu
+        ? @"Every tile will be carved twice and the results compared. Half speed."
+        : @"GPU verification off.";
 }
 - (void)biggerPoints:(id)sender { (void)sender; _cloudView.pointSize = _cloudView.pointSize + 0.5f; }
 - (void)smallerPoints:(id)sender { (void)sender; _cloudView.pointSize = _cloudView.pointSize - 0.5f; }
@@ -702,6 +731,13 @@ const char *kindLabel(check::Kind k) {
     opt.solid        = (solid.state == NSControlStateValueOn);
     opt.earlyOut     = (firstHit.state == NSControlStateValueOn)
                      ? carve::EarlyOut::AnyEvidence : carve::EarlyOut::Saturated;
+    // The carver is a "try": every failure it can have comes back as a declined
+    // tile and that tile is carved on the CPU, so switching this on can slow the
+    // run down but cannot change the answer.
+    CarveGpu *gpu = _useGpu ? [CarveGpu shared] : nil;
+    opt.carver       = gpu ? [CarveGpu carver] : nullptr;
+    opt.carverUser   = gpu ? (__bridge void *)gpu : nullptr;
+    opt.verifyCarver = gpu && _verifyGpu;
     _visOptions      = opt;
 
     // --- run --------------------------------------------------------------
@@ -770,12 +806,18 @@ const char *kindLabel(check::Kind k) {
         const double pct = result->stats.reachable
                          ? 100.0 * double(result->stats.unknown) / double(result->stats.reachable)
                          : 0.0;
+        // The options struct is copied into the block, so `opt` here still
+        // carries the carver that was installed above; the result knows how many
+        // tiles it actually took.
         NSString *note = result->note.empty() ? @""
                        : [NSString stringWithFormat:@"   ·   %s", result->note.c_str()];
         NSString *line = [NSString stringWithFormat:
             @"%llu setups   ·   %.0f m³ unobserved (%.1f%% of what was in range)   ·   "
-            @"%zu voxels drawn%@%@",
+            @"%zu voxels drawn   ·   %@%@%@",
             (unsigned long long)result->setupsUsed, vol, pct, result->voxels.size(),
+            result->carverTiles ? [NSString stringWithFormat:@"%llu tiles on the GPU",
+                                   (unsigned long long)result->carverTiles]
+                                : @"CPU",
             result->partial ? @"   ·   PARTIAL RUN" : @"", note];
 
         dispatch_async(dispatch_get_main_queue(), ^{

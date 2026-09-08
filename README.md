@@ -29,6 +29,8 @@ remaining work is making it fast and turning the raw result into an answer.
 | viewer on the store, two-phase open | done — **rendering layer unrun** |
 | **range-image builder** | done and tested |
 | **CPU reference visibility pass** | done and tested — `e57cov carve` |
+| parallel tiles, brick culling, domain clipping | done and tested |
+| **Metal gather kernel** | written and replica-validated — **never compiled or run** |
 | **visibility filter in the app** | done — Processing ▸ Run Visibility Filter |
 | **voxel display + layer toggles** | done — **rendering layer unrun** |
 | Metal gather kernel | not started |
@@ -190,11 +192,26 @@ two buttons at the top right of the view turn the original clouds and the voxels
 on and off independently (⌘1 and ⌘2 do the same), because reading the result
 means flicking between them.
 
-Two things about this command are worth knowing. It is the **CPU reference**:
-single-threaded, no early exits, written to be obviously correct so the Metal
-kernel can be asserted bit-exact against it. On a full corpus at 5 cm it will
-be slow, and `--max-tiles` stops it after a sample. And it holds every range
-image in memory at once, which the production path will not do.
+Two implementations, and they must agree. `carveTileReference` is the oracle —
+one voxel at a time, every setup that can reach it, no early exits, never
+optimised and never deleted. `carveTile` is what runs: parallel across tiles,
+brick-ordered, and settling whole bricks of 512 voxels with a single lookup into
+a min/max pyramid over the range image. `test_carve` asserts the two produce
+byte-identical tiles at several tile sizes, with and without an apron, with and
+without a domain box slicing through the scene, and with and without the pyramid
+built. Every optimisation re-runs that check; it is the only reason any of them
+can be trusted.
+
+The run still holds every range image in memory at once, which the production
+path will not do — `--domain`, `--max-tiles` and a coarser `--voxel` are the
+levers when a corpus is too big for that.
+
+`--domain` is the setting that matters most. By default the question is a box
+around what the scans actually returned, grown by `--domain-margin` (2 m).
+`--domain spheres` asks about everything within `--max-range` of any setup
+instead, which is honest but, for a building scanned from inside, mostly sky:
+the range spheres reach tens of metres out through every wall, and the unknown
+volume they report is dominated by outdoors.
 
 `--tile` changes the working set and nothing else. Carving a volume as one
 large tile and as many small ones gives identical results, voxel for voxel —
@@ -269,6 +286,7 @@ src/indexer.{h,cpp}         corpus survey and bounded-memory build
 src/range_image.{h,cpp}     structured scan -> range image (visibility stage 1)
 src/carve.{h,cpp}           tiled visibility carve, CPU reference (stage 2)
 src/visibility.{h,cpp}      the carve as a job: files in, drawable voxels out
+app/CarveGpu.{h,mm}         the carve as a Metal gather kernel (unrun)
 src/camera.{h,cpp}          orbit camera
 src/picker.{h,cpp}          screen-space point picking (orbit centre)
 src/math3d.h                vectors and matrices
@@ -283,6 +301,7 @@ tests/test_range_image.cpp  range image tests
 tests/test_carve.cpp        visibility carve tests
 tests/test_visibility.cpp   frontier reduction, display sampling, tiling invariance
 tools/genproj.py            regenerates the Xcode project from a file list
+tools/validate_carve_kernel.py  replica check of the Metal kernel vs the reference
 tools/validate_xcodeproj.py pbxproj structural validator
 E57CoverageChecker.xcodeproj
 DESIGN.md                   design and rationale

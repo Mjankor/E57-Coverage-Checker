@@ -318,6 +318,9 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
 
     unsigned nthreads = opt.threads ? opt.threads : std::thread::hardware_concurrency();
     if (nthreads == 0) nthreads = 1;
+    // A carver is the parallelism; a pool of threads feeding it would only
+    // contend for one device queue.
+    if (opt.carver) nthreads = 1;
     nthreads = unsigned(std::min<uint64_t>(nthreads, std::max<uint64_t>(1, plannedTiles)));
 
     // Per worker: its own statistics, its own collector, its own tile scratch.
@@ -326,6 +329,11 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         carve::Stats stats;
         Collector    col;
         carve::Tile  tile;
+        carve::Tile  check;          // verification only
+        uint64_t     carverTiles = 0;
+        uint64_t     carverRefused = 0;
+        uint64_t     disagreements = 0;
+        uint64_t     compared = 0;
     };
     std::vector<Worker> workers(nthreads);
     for (Worker& w : workers) {
@@ -350,7 +358,35 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             const uint64_t t = cursor.fetch_add(1, std::memory_order_relaxed);
             if (t >= plannedTiles) break;
 
-            carve::carveTile(keys[size_t(t)], setups, p, w.tile, w.stats);
+            bool carved = false;
+            if (opt.carver) {
+                // Statistics go to a scratch tally: if the carver declines part
+                // way it may already have counted some of the tile, and the CPU
+                // pass that follows would count it again.
+                carve::Stats attempt;
+                carved = opt.carver(keys[size_t(t)], setups, p, w.tile, attempt,
+                                    opt.carverUser);
+                if (carved) {
+                    ++w.carverTiles;
+                    w.stats.voxels     += attempt.voxels;
+                    w.stats.reachable  += attempt.reachable;
+                    w.stats.visible    += attempt.visible;
+                    w.stats.occupied   += attempt.occupied;
+                    w.stats.unknown    += attempt.unknown;
+                    w.stats.setupTests += attempt.setupTests;
+                } else {
+                    ++w.carverRefused;
+                }
+            }
+            if (!carved) {
+                carve::carveTile(keys[size_t(t)], setups, p, w.tile, w.stats);
+            } else if (opt.verifyCarver) {
+                carve::Stats ignored;
+                carve::carveTile(keys[size_t(t)], setups, p, w.check, ignored);
+                w.compared += w.check.state.size();
+                for (size_t i = 0; i < w.check.state.size() && i < w.tile.state.size(); ++i)
+                    if (w.check.state[i] != w.tile.state[i]) ++w.disagreements;
+            }
 
             const carve::Tile& tile = w.tile;
             for (uint32_t z = tile.interiorBegin(); z < tile.interiorEnd(); ++z) {
@@ -403,6 +439,10 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         out.stats.occupied   += w.stats.occupied;
         out.stats.unknown    += w.stats.unknown;
         out.stats.setupTests += w.stats.setupTests;
+        out.carverTiles          += w.carverTiles;
+        out.carverRefused        += w.carverRefused;
+        out.carverDisagreements  += w.disagreements;
+        out.carverVoxelsCompared += w.compared;
         col.absorb(w.col);
     }
     col.filterToThreshold();
@@ -440,6 +480,13 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                     out.domainVolume, out.sphereVolume);
     else if (out.domain.kind == carve::Domain::Kind::Unbounded)
         note += "domain is the full range spheres, so most of it is open air; ";
+    if (out.carverTiles && opt.verifyCarver)
+        note += fmt("%llu of %llu voxels differ between the carver and the CPU; ",
+                    (unsigned long long)out.carverDisagreements,
+                    (unsigned long long)out.carverVoxelsCompared);
+    if (out.carverRefused)
+        note += fmt("%llu tile(s) declined by the carver and done on the CPU; ",
+                    (unsigned long long)out.carverRefused);
     if (opt.earlyOut == carve::EarlyOut::AnyEvidence)
         note += "stopped at the first evidence, so visible and occupied are lower bounds; ";
     if (out.partial)

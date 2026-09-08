@@ -365,6 +365,57 @@ static void testEndToEnd() {
         CHECK(!eset.empty(), "and it drew something");
     }
 
+    // 5. The carver hook. No Metal here, so the mechanism is exercised with a
+    // stand-in: one carver that does the tile by calling straight through, and
+    // one that refuses everything. The plumbing — statistics accounted once,
+    // refusals falling back to the CPU, verification comparing byte for byte —
+    // is the part that would silently corrupt a run, and it is testable without
+    // a GPU.
+    {
+        struct Counter { uint64_t accepted = 0, refused = 0; };
+        Counter counter;
+
+        vis::Options hooked = opt;
+        hooked.carverUser = &counter;
+        hooked.verifyCarver = true;
+        hooked.carver = [](const carve::TileKey& k, const std::vector<carve::SetupView>& sv,
+                           const carve::Params& pp, carve::Tile& t, carve::Stats& st,
+                           void* user) -> bool {
+            // Accept every other tile, so both paths run in one job.
+            Counter* c = static_cast<Counter*>(user);
+            if ((k.x + k.y + k.z) % 2 != 0) { ++c->refused; return false; }
+            carve::carveTile(k, sv, pp, t, st);
+            ++c->accepted;
+            return true;
+        };
+
+        vis::Result hr;
+        CHECK(vis::run({path}, hooked, nullptr, hr, err), err.empty() ? "ran hooked" : err.c_str());
+        CHECK(hr.carverTiles > 0 && hr.carverRefused > 0, "both paths were taken");
+        CHECK(hr.carverTiles == counter.accepted, "accepted tiles are counted");
+        CHECK(hr.carverRefused == counter.refused, "and so are refusals");
+        CHECK(hr.carverVoxelsCompared > 0, "verification actually compared something");
+        CHECK(hr.carverDisagreements == 0,
+              "a carver that calls carveTile agrees with carveTile");
+        // The whole point: an accelerated run must produce the same answer, and
+        // must not double-count the tiles it accelerated.
+        CHECK(statsEqual(hr.stats, frontier.stats), "same counts through the carver");
+        CHECK(hr.stats.voxels == frontier.stats.voxels, "and the same voxels examined");
+        CHECK(latticeSet(hr) == fset, "and the same voxels drawn");
+
+        // A carver that always refuses must be indistinguishable from none.
+        vis::Options none = opt;
+        none.carver = [](const carve::TileKey&, const std::vector<carve::SetupView>&,
+                         const carve::Params&, carve::Tile&, carve::Stats&, void*) -> bool {
+            return false;
+        };
+        vis::Result nr;
+        CHECK(vis::run({path}, none, nullptr, nr, err), "ran with a refusing carver");
+        CHECK(nr.carverTiles == 0 && nr.carverRefused == nr.tilesCarved,
+              "every tile was refused");
+        CHECK(statsEqual(nr.stats, frontier.stats), "and the answer is unchanged");
+    }
+
     // Cancelling part way must report what it had rather than claiming success.
     vis::Result stopped;
     int seen = 0;
