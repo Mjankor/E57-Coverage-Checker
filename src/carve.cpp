@@ -156,8 +156,12 @@ std::vector<size_t> setupsForTile(const TileKey& key, const std::vector<SetupVie
     return setupsForBox(lo, hi, setups, p);
 }
 
-void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
-               const Params& p, Tile& out, Stats& stats) {
+namespace {
+
+// Shared by both implementations: shape the tile, zero it, and pick the setups
+// that can reach it including its apron.
+std::vector<size_t> prepareTile(const TileKey& key, const std::vector<SetupView>& setups,
+                                const Params& p, Tile& out) {
     const uint32_t core = p.tileVoxels;
     const uint32_t ap   = p.apron;
     const uint32_t dim  = core + 2 * ap;
@@ -171,14 +175,104 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
     const double pad = double(ap) * p.voxelSize;
     for (int k = 0; k < 3; ++k) out.origin[k] = lo[k] - pad;
     out.state.assign(size_t(dim) * dim * dim, 0);
-    if (dim == 0) return;
+    if (dim == 0) return {};
 
     // The apron reaches outside the tile, so setup selection has to as well —
     // otherwise an apron voxel would be judged against the wrong setup list and
     // the neighbour answers at the seam would be wrong.
     double plo[3], phi[3];
     for (int k = 0; k < 3; ++k) { plo[k] = lo[k] - pad; phi[k] = hi[k] + pad; }
-    const std::vector<size_t> reach = setupsForBox(plo, phi, setups, p);
+    return setupsForBox(plo, phi, setups, p);
+}
+
+// Tallies a finished tile. Split out because the fast path fills the state in a
+// different order from the reference and cannot count as it goes.
+void tallyTile(const Tile& t, Stats& stats) {
+    for (uint32_t z = t.interiorBegin(); z < t.interiorEnd(); ++z) {
+        for (uint32_t y = t.interiorBegin(); y < t.interiorEnd(); ++y) {
+            for (uint32_t x = t.interiorBegin(); x < t.interiorEnd(); ++x) {
+                const uint8_t bits = t.state[t.index(x, y, z)];
+                ++stats.voxels;
+                if (bits & kReachable) {
+                    ++stats.reachable;
+                    if (bits == kReachable) ++stats.unknown;
+                }
+                if (bits & kVisible)  ++stats.visible;
+                if (bits & kOccupied) ++stats.occupied;
+            }
+        }
+    }
+}
+
+} // namespace
+
+// The fast path. Same arithmetic as the reference, reordered for the machine:
+// one setup at a time so a single range image is resident, and within that in
+// bricks, so the patch of image a brick projects onto stays in cache while all
+// 512 of its voxels are tested against it.
+void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
+               const Params& p, Tile& out, Stats& stats) {
+    const std::vector<size_t> reach = prepareTile(key, setups, p, out);
+    const uint32_t dim = out.dim;
+    if (dim == 0) return;
+
+    const double R2 = p.maxRange * p.maxRange;
+    const uint32_t B  = kBrickVoxels;
+    const uint32_t nb = (dim + B - 1) / B;
+
+    for (size_t si : reach) {
+        const SetupView& s = setups[si];
+        for (uint32_t bz = 0; bz < nb; ++bz) {
+            for (uint32_t by = 0; by < nb; ++by) {
+                for (uint32_t bx = 0; bx < nb; ++bx) {
+                    const uint32_t x0 = bx * B, x1 = std::min(x0 + B, dim);
+                    const uint32_t y0 = by * B, y1 = std::min(y0 + B, dim);
+                    const uint32_t z0 = bz * B, z1 = std::min(z0 + B, dim);
+
+                    // One range test for the whole brick. The box spans the
+                    // voxels rather than their centres, so it is a superset of
+                    // what the per-voxel test would accept: conservative, and
+                    // therefore incapable of dropping a voxel the reference
+                    // would have kept.
+                    const double blo[3] = {out.origin[0] + x0 * p.voxelSize,
+                                           out.origin[1] + y0 * p.voxelSize,
+                                           out.origin[2] + z0 * p.voxelSize};
+                    const double bhi[3] = {out.origin[0] + x1 * p.voxelSize,
+                                           out.origin[1] + y1 * p.voxelSize,
+                                           out.origin[2] + z1 * p.voxelSize};
+                    if (distSqPointBox(s.origin, blo, bhi) > R2) continue;
+
+                    for (uint32_t z = z0; z < z1; ++z) {
+                        for (uint32_t y = y0; y < y1; ++y) {
+                            for (uint32_t x = x0; x < x1; ++x) {
+                                double c[3];
+                                out.centre(x, y, z, p.voxelSize, c);
+                                const double dx = c[0] - s.origin[0];
+                                const double dy = c[1] - s.origin[1];
+                                const double dz = c[2] - s.origin[2];
+                                if (dx * dx + dy * dy + dz * dz > R2) continue;
+                                // OR across setups, so the order they are
+                                // combined in cannot change the result — which
+                                // is exactly what makes this reordering legal.
+                                out.state[out.index(x, y, z)] |=
+                                    uint8_t(kReachable | evidenceAt(s, p, c[0], c[1], c[2]));
+                                if (out.isInterior(x, y, z)) ++stats.setupTests;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tallyTile(out, stats);
+}
+
+void carveTileReference(const TileKey& key, const std::vector<SetupView>& setups,
+                        const Params& p, Tile& out, Stats& stats) {
+    const std::vector<size_t> reach = prepareTile(key, setups, p, out);
+    const uint32_t dim = out.dim;
+    if (dim == 0) return;
     const double R2 = p.maxRange * p.maxRange;
 
     for (uint32_t z = 0; z < dim; ++z) {
@@ -201,28 +295,18 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                     if (dx * dx + dy * dy + dz * dz > R2) continue;
                     bits |= kReachable;
                     ++tests;
-                    // OR across setups: visibility from any one of them is
-                    // visibility, and the order they are combined in cannot
-                    // change the result.
                     bits |= evidenceAt(s, p, c[0], c[1], c[2]);
                 }
 
                 out.state[out.index(x, y, z)] = bits;
-
                 // Apron voxels belong to the neighbouring tile; counting them
                 // here would tally them twice.
-                if (!out.isInterior(x, y, z)) continue;
-                ++stats.voxels;
-                stats.setupTests += tests;
-                if (bits & kReachable) {
-                    ++stats.reachable;
-                    if (bits == kReachable) ++stats.unknown;
-                }
-                if (bits & kVisible)  ++stats.visible;
-                if (bits & kOccupied) ++stats.occupied;
+                if (out.isInterior(x, y, z)) stats.setupTests += tests;
             }
         }
     }
+
+    tallyTile(out, stats);
 }
 
 Stats carveAll(const std::vector<SetupView>& setups, const Params& p,

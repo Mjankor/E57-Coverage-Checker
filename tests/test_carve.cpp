@@ -412,6 +412,61 @@ static void testTilingDoesNotChangeTheAnswer() {
           "and no bit is counted outside the domain");
 }
 
+// The fast path and the oracle must agree bit for bit. This is the check every
+// later optimisation re-runs: reordering, culling and early exits are all
+// legal only insofar as this holds.
+static void testFastPathMatchesReference() {
+    std::printf("fast path against the reference\n");
+
+    rimg::RangeImage a = shellImage(3.0, 6.0);
+    rimg::RangeImage b = shellImage(2.4, 6.0);
+    rimg::RangeImage c = shellImage(4.1, 6.0);
+    // Offset off the brick and tile lattices, and yawed, so no boundary lines
+    // up conveniently with anything.
+    setPose(b, 3.3, 1.7, -0.9, 0.9);
+    setPose(c, -2.1, -3.4, 1.2, -2.2);
+    makeNoReturnColumns(a, 40, 60, 6.0);
+    makeNoReturnColumns(c, 100, 150, 6.0);
+
+    std::vector<carve::SetupView> setups{carve::makeSetupView(a), carve::makeSetupView(b),
+                                         carve::makeSetupView(c)};
+
+    // Deliberately not a multiple of the brick size, so the partial bricks at
+    // the far faces are exercised.
+    for (uint32_t tileVoxels : {8u, 13u, 32u}) {
+        for (uint32_t apron : {0u, 1u}) {
+            carve::Params p;
+            p.voxelSize     = 0.25;
+            p.surfaceMargin = 0.5 * 0.25 * 1.7320508075688772;
+            p.maxRange      = 6.0;
+            p.tileVoxels    = tileVoxels;
+            p.apron         = apron;
+
+            const std::vector<carve::TileKey> keys = carve::tilesForSetups(setups, p);
+            CHECK(!keys.empty(), "there are tiles to compare");
+
+            uint64_t stateDiffs = 0;
+            carve::Stats fastStats, refStats;
+            carve::Tile fast, ref;
+            for (const carve::TileKey& k : keys) {
+                carve::carveTile(k, setups, p, fast, fastStats);
+                carve::carveTileReference(k, setups, p, ref, refStats);
+                if (fast.state != ref.state) ++stateDiffs;
+            }
+            CHECK(stateDiffs == 0, "every tile's state matches the reference exactly");
+            CHECK(fastStats.reachable == refStats.reachable, "same reachable count");
+            CHECK(fastStats.visible == refStats.visible, "same visible count");
+            CHECK(fastStats.occupied == refStats.occupied, "same occupied count");
+            CHECK(fastStats.unknown == refStats.unknown, "same unknown count");
+            CHECK(fastStats.setupTests == refStats.setupTests, "same number of setup tests");
+            CHECK(fastStats.voxels == refStats.voxels, "same voxels examined");
+            // Not a trivial pass: there has to be something to disagree about.
+            CHECK(fastStats.visible > 0 && fastStats.occupied > 0 && fastStats.unknown > 0,
+                  "the comparison covered all three outcomes");
+        }
+    }
+}
+
 static void testEarlyStop() {
     std::printf("early stop\n");
 
@@ -441,6 +496,7 @@ int main() {
     testPoseInversion();
     testDomainIsTheUnionOfSpheres();
     testTilingDoesNotChangeTheAnswer();
+    testFastPathMatchesReference();
     testEarlyStop();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

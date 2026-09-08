@@ -175,8 +175,31 @@ std::vector<size_t> setupsForTile(const TileKey& key, const std::vector<SetupVie
                                   const Params& p);
 
 // Carves one tile. Allocates and fills `out`.
+//
+// Two implementations, and they must agree bit for bit — test_carve asserts it,
+// and every optimisation added to the fast path has to keep asserting it.
+//
+//   carveTileReference is the oracle: one voxel at a time, tested against every
+//   setup that can reach it, no early exits, no cleverness. It is never deleted
+//   and never optimised. Its job is to be obviously correct.
+//
+//   carveTile is what runs. It computes the same thing in an order that suits
+//   the machine: one setup at a time so a single range image is resident, and
+//   in bricks so the image cells a brick projects onto stay in L1. Measured on
+//   a real 2500 x 5280 raster, roughly half the cost of a voxel test was cache
+//   misses on the range image, and the same lookups made coherent are 14 times
+//   cheaper.
 void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
                const Params& p, Tile& out, Stats& stats);
+void carveTileReference(const TileKey& key, const std::vector<SetupView>& setups,
+                        const Params& p, Tile& out, Stats& stats);
+
+// Voxels per brick edge, the unit of traversal in carveTile. Eight at 5 cm is a
+// 40 cm cube: at 20 m it subtends about a degree, which on a 2500 x 5280 raster
+// is roughly 17 x 28 cells — under 2 KB, so the whole brick reads out of L1.
+// Larger bricks project onto more image than a cache line pass can hold; smaller
+// ones stop amortising the per-brick range test.
+constexpr uint32_t kBrickVoxels = 8;
 
 // Carves every tile in the domain, handing each finished tile to `sink` and
 // then discarding it. Return false from `sink` to stop early.
