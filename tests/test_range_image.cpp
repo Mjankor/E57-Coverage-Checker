@@ -685,6 +685,52 @@ static void testSweepPastATurnAndNonUniformRows() {
     CHECK(badCol == 0, "and to a column that looked that way");
     CHECK(disagree == 0, "the fractional coordinates agree with the resolved cell");
 
+    // What the reverse index means, checked against its definition rather than
+    // against itself. Without this the index could be consistently wrong — every
+    // lookup agreeing with every other lookup and all of them reading the wrong
+    // part of the raster, which is exactly the failure this change is about.
+    //
+    // Elevations have one row each, so the rule is strict: the row named is the one
+    // whose measured elevation is nearest, to within the bin a lookup quantises
+    // into. Bearings do not, because the sweep covered some of them twice and only
+    // one of each pair is indexed, so the rule there is the one that matters for a
+    // lookup — never further than half a cell from the column it resolves to. This
+    // is the assertion that caught the seam gap running to one and a half cells.
+    // Half a cell, where a cell is the largest step the table actually takes. The
+    // mean step is the wrong yardstick on an axis that is not uniform by
+    // construction — this one's step varies by a fifth either side of its mean.
+    auto widestStep = [](const std::vector<double>& t) {
+        double m = 0;
+        for (size_t i = 1; i < t.size(); ++i) m = std::max(m, std::fabs(t[i] - t[i - 1]));
+        return m;
+    };
+    const double elHalfCell = 0.5 * widestStep(img.map.elByRow) + img.map.elBin;
+    const double azHalfCell = 0.5 * widestStep(img.map.azByCol) + img.map.azBin;
+
+    int notNearest = 0, tooFar = 0;
+    for (int k = 0; k <= 4000; ++k) {
+        const double u  = double(k) / 4000.0;
+        const double el = img.map.elByRow.front() +
+                          u * (img.map.elByRow.back() - img.map.elByRow.front());
+        const int32_t got = img.map.rowFor(el);
+        if (got < 0) { ++notNearest; continue; }
+        double best = 1e300;
+        for (uint32_t r = 0; r < img.rows; ++r)
+            best = std::min(best, std::fabs(img.map.elByRow[r] - el));
+        if (std::fabs(img.map.elByRow[got] - el) > best + img.map.elBin) ++notNearest;
+        if (std::fabs(img.map.elByRow[got] - el) > elHalfCell) ++tooFar;
+
+        const double az  = img.map.azLo + u * kTau;
+        const int32_t gc = img.map.colFor(az);
+        if (gc < 0) { ++tooFar; continue; }
+        double da = img.map.azByCol[gc] - az;
+        da -= kTau * std::round(da / kTau);
+        if (std::fabs(da) > azHalfCell) ++tooFar;
+    }
+    CHECK(notNearest == 0, "the index names the nearest row for any elevation");
+    CHECK(tooFar == 0,
+          "and never sends a direction more than half a cell from where it resolves");
+
     // The 40 rows that hold no returns still map somewhere, extrapolated from
     // their neighbours. Without that a direction inside a blind cone would come
     // back "off the raster" rather than "a direction the instrument never got a

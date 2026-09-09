@@ -311,9 +311,21 @@ bool indexMapping(Mapping& m) {
     // of the two answers a lookup is arbitrary either way, and this way it is
     // arbitrary consistently. Their cells are still in the image and still counted
     // as rays — they are simply never the cell a direction resolves to.
+    //
+    // How many to keep is chosen by index rather than by clipping to a window in
+    // angle, and the remainder is split between the two ends. Clipping left a seam
+    // gap of one and a half steps, wide enough that a bearing in it resolved to a
+    // column more than half a cell away while a dropped column sat right on it.
+    // Keeping floor(2pi/step)+1 columns puts the gap under one step, and centring
+    // it leaves every bearing within half a cell of the column it resolves to.
     {
-        const double mid = 0.5 * (m.azByCol.front() + m.azByCol.back());
-        m.azLo = mid - kTwoPi * 0.5;
+        const size_t turn = size_t(std::floor(kTwoPi / azStep)) + 1;
+        const size_t keep = std::max<size_t>(2, std::min(turn, cols));
+        const size_t c0 = (cols - keep) / 2, c1 = c0 + keep - 1;
+        const double a0 = std::min(m.azByCol[c0], m.azByCol[c1]);
+        const double a1 = std::max(m.azByCol[c0], m.azByCol[c1]);
+        m.azLo = a0 - 0.5 * std::max(0.0, kTwoPi - (a1 - a0));
+
         const size_t nbins = std::min<size_t>(kMaxIndexBins, cols * kReverseBinsPerCell);
         m.azBin = kTwoPi / double(nbins);
 
@@ -321,12 +333,8 @@ bool indexMapping(Mapping& m) {
         // a lookup lands in is found from an offset, but the angle it is compared
         // against is not.
         std::vector<std::pair<double, int32_t>> srt;
-        srt.reserve(cols);
-        for (size_t c = 0; c < cols; ++c) {
-            const double off = m.azByCol[c] - m.azLo;
-            if (off < 0.0 || off > kTwoPi) continue;      // a duplicate of a kept column
-            srt.push_back({m.azByCol[c], int32_t(c)});
-        }
+        srt.reserve(keep);
+        for (size_t c = c0; c <= c1; ++c) srt.push_back({m.azByCol[c], int32_t(c)});
         if (srt.size() < 2) return false;
         std::sort(srt.begin(), srt.end());
         // The turn closes, so the first and last kept columns are neighbours
