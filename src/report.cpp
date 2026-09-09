@@ -525,6 +525,117 @@ constexpr uint64_t kCloudSamples = 120000;
 
 } // namespace
 
+// Where does a point's own direction resolve to, against the cell it was stored in?
+//
+// This is the round-trip check with its workings shown. The gate reports one
+// percentage, which says a mapping is wrong without saying how, and three quite
+// different faults produce the same percentage:
+//
+//   an error that shrinks with range      the ray does not start where the points
+//                                         are measured from
+//   an error flat in range                the mapping from cell to direction is
+//                                         the wrong shape
+//   an error only in one band of the      the raster is not one raster — a sweep
+//   raster, or only past a bearing        that overlaps itself, or turns over
+//
+// So the error is broken down by range and by where in the raster it happened, in
+// cells, which tells those three apart in one run. Read straight from the file
+// rather than from anything build() kept, so a fault inside build() cannot hide.
+static void rasterAudit(e57::Reader& r, size_t scanIndex, const rimg::RangeImage& im,
+                        Out& o) {
+    const e57::Scan& s = r.scan(scanIndex);
+    if (!s.hasIndexBounds || !s.field("rowIndex") || !s.field("columnIndex")) return;
+    if (im.rows == 0 || im.cols == 0 || im.map.rowOfEl.empty()) return;
+
+    std::vector<std::string> want{"cartesianX", "cartesianY", "cartesianZ",
+                                  "rowIndex", "columnIndex"};
+    size_t invIdx = SIZE_MAX;
+    if (s.field("cartesianInvalidState")) { invIdx = want.size(); want.push_back("cartesianInvalidState"); }
+
+    // Exactly what build() does about the frame, so this describes the image that
+    // was built and not a differently-decided one.
+    const viewer::FrameDecision fd = viewer::decideFrame(r, scanIndex);
+    const bool subtractPose = !fd.applyPose() && s.hasPose;
+    const viewer::Rigid poseRot = viewer::rigidFromPose(s.pose);
+
+    const int64_t spanR = s.rowMax - s.rowMin + 1, spanC = s.colMax - s.colMin + 1;
+    const uint32_t stepR = spanR > 0 ? uint32_t((spanR + im.rows - 1) / im.rows) : 1;
+    const uint32_t stepC = spanC > 0 ? uint32_t((spanC + im.cols - 1) / im.cols) : 1;
+
+    // Range bands, and one bucket of row/column errors in each.
+    const double edges[7] = {0.0, 2.0, 5.0, 10.0, 20.0, 45.0, 1e9};
+    std::vector<double> dRow[6], dCol[6];
+    uint64_t seen = 0, used = 0, unresolved = 0;
+    const double azStep = (im.cols > 1) ? std::fabs(im.map.azSpanRad) / double(im.cols - 1) : 0.0;
+    const double perTurn = (azStep > 1e-12) ? 6.28318530717958648 / azStep : double(im.cols);
+    const uint64_t stride = std::max<uint64_t>(1, s.recordCount / 60000);
+
+    std::string err;
+    r.readPoints(scanIndex, want, [&](const e57::PointBlock& b) {
+        for (size_t k = 0; k < b.count; ++k, ++seen) {
+            if (seen % stride) continue;
+            if (invIdx != SIZE_MAX && b.columns[invIdx][k] != 0.0) continue;
+            double x = b.columns[0][k], y = b.columns[1][k], z = b.columns[2][k];
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+            if (subtractPose) {
+                const double a = x - s.pose.t[0], bb = y - s.pose.t[1], c = z - s.pose.t[2];
+                x = poseRot.R[0] * a + poseRot.R[3] * bb + poseRot.R[6] * c;
+                y = poseRot.R[1] * a + poseRot.R[4] * bb + poseRot.R[7] * c;
+                z = poseRot.R[2] * a + poseRot.R[5] * bb + poseRot.R[8] * c;
+            }
+            double az, el, range;
+            rimg::toSpherical(x, y, z, az, el, range);
+            if (range <= 1e-6) continue;
+
+            const int64_t rr = int64_t(b.columns[3][k]) - s.rowMin;
+            const int64_t cc = int64_t(b.columns[4][k]) - s.colMin;
+            if (rr < 0 || cc < 0 || rr >= spanR || cc >= spanC) continue;
+            const int32_t row = int32_t(uint32_t(rr) / stepR);
+            const int32_t col = int32_t(uint32_t(cc) / stepC);
+
+            const int32_t gr = im.map.rowFor(el);
+            const int32_t gc = im.map.colFor(az);
+            ++used;
+            if (gr < 0 || gc < 0) { ++unresolved; continue; }
+
+            int band = 0;
+            while (band < 5 && range >= edges[band + 1]) ++band;
+            double dc = double(gc) - double(col);
+            dc -= perTurn * std::round(dc / perTurn);
+            dRow[band].push_back(std::fabs(double(gr) - double(row)));
+            dCol[band].push_back(std::fabs(dc));
+        }
+        return true;
+    }, err);
+
+    if (!used) return;
+    auto med = [](std::vector<double>& v) {
+        if (v.empty()) return -1.0;
+        std::nth_element(v.begin(), v.begin() + ptrdiff_t(v.size() / 2), v.end());
+        return v[v.size() / 2];
+    };
+    auto within1 = [](const std::vector<double>& v) {
+        if (v.empty()) return -1.0;
+        size_t n = 0;
+        for (double d : v) if (d <= 1.0) ++n;
+        return 100.0 * double(n) / double(v.size());
+    };
+
+    o.add("      raster audit: %llu points, %.1f%% resolved to no cell\n",
+          (unsigned long long)used, 100.0 * double(unresolved) / double(used));
+    o.add("        %-14s %8s %10s %10s %10s %10s\n", "range", "points",
+          "row err", "row ok", "col err", "col ok");
+    const char* names[6] = {"under 2 m", "2 - 5 m", "5 - 10 m",
+                            "10 - 20 m", "20 - 45 m", "over 45 m"};
+    for (int i = 0; i < 6; ++i) {
+        if (dRow[i].empty()) continue;
+        const double n = double(dRow[i].size());
+        const double rw = within1(dRow[i]), cw = within1(dCol[i]);
+        o.add("        %-14s %8.0f %10.1f %9.1f%% %10.1f %9.1f%%\n",
+              names[i], n, med(dRow[i]), rw, med(dCol[i]), cw);
+    }
+}
+
 // Are the setups where the files say they are?
 //
 // Every voxel this tool produces is placed by one transform per scan: the pose,
@@ -699,6 +810,9 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
     std::vector<std::unique_ptr<e57::Reader>> readers;
     std::vector<std::unique_ptr<rimg::RangeImage>> images;
     std::vector<std::string> names;
+    // Which reader and which scan each image came from, so the raster audit can
+    // go back to the file rather than trusting anything build() kept.
+    std::vector<size_t> readerOf, scanOf;
     for (const std::string& path : paths) {
         auto r = std::make_unique<e57::Reader>();
         std::string e;
@@ -712,6 +826,8 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
             }
             images.push_back(std::move(img));
             names.push_back(r->scan(i).name.empty() ? path : r->scan(i).name);
+            readerOf.push_back(readers.size());
+            scanOf.push_back(i);
         }
         readers.push_back(std::move(r));
     }
@@ -765,6 +881,10 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
               fwd.t[0], fwd.t[1], fwd.t[2], im.rows, im.cols,
               im.map.valid ? "accepted" : "*** REFUSED — every lookup returns nothing ***");
         if (!im.map.valid) ++failures;
+        // The reason, which this left out and should never have: "refused" on its
+        // own sends you off to run something else to find out why.
+        if (!im.diag.note.empty()) o.add("      why: %s\n", im.diag.note.c_str());
+        rasterAudit(*readers[readerOf[k]], scanOf[k], im, o);
 
         // A world point in the direction cell (r, c) looked, at range rho.
         auto pointAt = [&](uint32_t r, uint32_t c, double rho, double w[3]) {
