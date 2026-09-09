@@ -1141,13 +1141,48 @@ const char *kindLabel(check::Kind k) {
             warn = [warn stringByAppendingFormat:@"   ·   cone at the %@ of the raster",
                     result->coneVerdict.atFirstRow ? @"start" : @"end"];
 
+        // Which path actually ran, and — when asked to check it — what the check
+        // found. A verification that prints nothing is indistinguishable from one
+        // that never ran, so it says so either way, pass or fail. Same for a
+        // carver that declined every tile: the run is still correct, because the
+        // CPU caught them, but "CPU" alone would hide that the GPU was asked and
+        // said no.
+        NSString *carver = @"CPU";
+        if (opt.carver) {
+            if (result->carverTiles == 0)
+                carver = [NSString stringWithFormat:
+                          @"⚠︎ the GPU declined all %llu tiles — the CPU carved them",
+                          (unsigned long long)result->carverRefused];
+            else if (result->carverRefused)
+                carver = [NSString stringWithFormat:@"%llu tiles on the GPU, %llu on the CPU",
+                          (unsigned long long)result->carverTiles,
+                          (unsigned long long)result->carverRefused];
+            else
+                carver = [NSString stringWithFormat:@"%llu tiles on the GPU",
+                          (unsigned long long)result->carverTiles];
+            if (opt.verifyCarver) {
+                if (result->carverVoxelsCompared == 0)
+                    carver = [carver stringByAppendingString:
+                              @", verified against the CPU: ⚠︎ NOTHING WAS COMPARED"];
+                else if (result->carverDisagreements == 0)
+                    carver = [carver stringByAppendingFormat:
+                              @", verified: %.1f M voxels against the CPU, every one identical",
+                              double(result->carverVoxelsCompared) / 1e6];
+                else
+                    carver = [carver stringByAppendingFormat:
+                              @", ⚠︎ VERIFICATION FAILED: %llu of %.1f M voxels differ (%.4f%%)",
+                              (unsigned long long)result->carverDisagreements,
+                              double(result->carverVoxelsCompared) / 1e6,
+                              100.0 * double(result->carverDisagreements) /
+                                      double(result->carverVoxelsCompared)];
+            }
+        }
+
         NSString *line = [NSString stringWithFormat:
             @"%llu setups   ·   %.0f m³ unobserved (%.1f%% of what was in range)   ·   "
             @"%zu voxels drawn   ·   %@%@%@%@",
             (unsigned long long)result->setupsUsed, vol, pct, result->voxels.size(),
-            result->carverTiles ? [NSString stringWithFormat:@"%llu tiles on the GPU",
-                                   (unsigned long long)result->carverTiles]
-                                : @"CPU",
+            carver,
             result->partial ? @"   ·   PARTIAL RUN" : @"", warn, note];
 
         dispatch_async(dispatch_get_main_queue(), ^{
