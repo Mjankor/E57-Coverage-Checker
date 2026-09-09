@@ -299,33 +299,99 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     images.reserve(size_t(scanCount));
     setups.reserve(size_t(scanCount));
 
-    uint64_t seen = 0;
     uint64_t isolated = 0, believedSky = 0;
-    for (const auto& r : readers) {
-        for (size_t i = 0; i < r->scanCount(); ++i) {
-            auto img = std::make_unique<rimg::RangeImage>();
-            std::string rerr;
-            if (rimg::build(*r, i, ro, *img, rerr)) {
-                if (!img->map.valid) {
-                    ++out.setupsWithoutMapping;
-                    if (out.mappingRefusedWhy.empty()) out.mappingRefusedWhy = img->diag.note;
+
+    // Built in parallel across scans. Range images are independent — one scan's
+    // raster, tilt, mapping and round trip involve no other scan — so this is
+    // the one stage of the pipeline that parallelises with nothing shared, and
+    // at a second a scan it is the difference between a quarter of an hour and
+    // two minutes on a thousand-scan job.
+    //
+    // Each worker opens its own reader rather than sharing one. The readers
+    // above are kept for their headers; decoding through the same object from
+    // several threads would mean sharing its field decoders, which carry the
+    // bit cursor that makes a bytestream continuous across packets.
+    //
+    // Results are written into a slot indexed by job, never appended, so the
+    // order of `images` is the order of the corpus whatever order the threads
+    // finish in. Every count derived from them is taken afterwards, in that same
+    // order, for the same reason.
+    struct Job { size_t path; size_t scan; };
+    std::vector<Job> jobs;
+    jobs.reserve(size_t(scanCount));
+    for (size_t f = 0; f < readers.size(); ++f)
+        for (size_t i = 0; i < readers[f]->scanCount(); ++i) jobs.push_back({f, i});
+
+    std::vector<std::unique_ptr<rimg::RangeImage>> built(jobs.size());
+    {
+        unsigned nb = opt.threads ? opt.threads : std::thread::hardware_concurrency();
+        if (nb == 0) nb = 1;
+        // Each concurrent build holds that scan's decoded returns — about 20
+        // bytes a point, so a hundred megabytes for a large scan. That is the
+        // cost of this, and it is why the thread count is not simply unbounded.
+        nb = unsigned(std::min<uint64_t>(nb, std::max<uint64_t>(1, jobs.size())));
+
+        std::atomic<uint64_t> next{0};
+        std::atomic<uint64_t> done{0};
+        std::atomic<bool>     stop{false};
+        std::mutex            tickLock;
+
+        auto worker = [&]() {
+            e57::Reader own;
+            size_t openPath = SIZE_MAX;
+            for (;;) {
+                if (stop.load(std::memory_order_relaxed)) break;
+                const uint64_t j = next.fetch_add(1, std::memory_order_relaxed);
+                if (j >= jobs.size()) break;
+                const Job& job = jobs[size_t(j)];
+                // Reopened only when the file changes, so a multi-scan file is
+                // opened once per worker rather than once per scan.
+                std::string e;
+                if (openPath != job.path) {
+                    own = e57::Reader{};
+                    if (!own.open(paths[job.path], e)) { openPath = SIZE_MAX; }
+                    else openPath = job.path;
                 }
-                if (img->diag.binStep > 1) {
-                    ++out.setupsBinned;
-                    out.worstBinStep = std::max(out.worstBinStep, img->diag.binStep);
+                if (openPath == job.path) {
+                    auto img = std::make_unique<rimg::RangeImage>();
+                    std::string rerr;
+                    if (rimg::build(own, job.scan, ro, *img, rerr))
+                        built[size_t(j)] = std::move(img);
                 }
-                images.push_back(std::move(img));
-            } else {
-                // A scan with no usable raster cannot contribute evidence, and
-                // inventing one would invent visibility. Skipped and counted.
-                ++out.scansSkipped;
+                const uint64_t d = done.fetch_add(1, std::memory_order_relaxed) + 1;
+                std::lock_guard<std::mutex> lk(tickLock);
+                if (!tick("building range images", d, scanCount))
+                    stop.store(true, std::memory_order_relaxed);
             }
-            if (!tick("building range images", ++seen, scanCount)) {
-                out.cancelled = true;
-                err = "cancelled";
-                return false;
-            }
+        };
+
+        if (nb == 1) {
+            worker();
+        } else {
+            std::vector<std::thread> pool;
+            pool.reserve(nb);
+            for (unsigned i = 0; i < nb; ++i) pool.emplace_back(worker);
+            for (std::thread& t : pool) t.join();
         }
+        if (stop.load()) { out.cancelled = true; err = "cancelled"; return false; }
+    }
+
+    for (auto& img : built) {
+        if (!img) {
+            // A scan with no usable raster cannot contribute evidence, and
+            // inventing one would invent visibility. Skipped and counted.
+            ++out.scansSkipped;
+            continue;
+        }
+        if (!img->map.valid) {
+            ++out.setupsWithoutMapping;
+            if (out.mappingRefusedWhy.empty()) out.mappingRefusedWhy = img->diag.note;
+        }
+        if (img->diag.binStep > 1) {
+            ++out.setupsBinned;
+            out.worstBinStep = std::max(out.worstBinStep, img->diag.binStep);
+        }
+        images.push_back(std::move(img));
     }
 
     // The blind cone, decided once across every scan rather than scan by scan.

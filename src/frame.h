@@ -129,6 +129,16 @@ bool  isIdentityPose(const e57::Pose& p);
 bool instrumentCentre(const std::vector<double>& xyz, double out[3], double& rms,
                       uint32_t& pairs);
 
+// The decision proper, from a sample of the scan's stored positions —
+// interleaved x, y, z, as they appear in the file, with no pose applied.
+//
+// Separate from decideFrame because rimg::build has already decoded the whole
+// scan by the time it needs an answer, and decoding it a second time to ask is
+// both a tenth of a second and a second full read of the file: at two hundred
+// gigabytes of scans that is two hundred gigabytes of re-read for twenty
+// thousand sampled points.
+FrameDecision decideFrameFromSample(const e57::Scan& s, const std::vector<double>& xyz);
+
 // Samples the scan to decide the convention. Cheap: a wide stride, positions
 // only. Returns Unknown (and applyPose() == true, the conformant default) when
 // there is not enough data to judge.

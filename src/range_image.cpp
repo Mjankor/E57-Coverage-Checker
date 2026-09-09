@@ -395,6 +395,12 @@ bool measureOrigin(const std::vector<PointRec>& pts, double out[3], double& rms,
 // because a mapping can be right for one band of rows and wrong for another —
 // which is exactly the failure a double-covered mirror sweep produces.
 constexpr uint64_t kRoundTripStride  = 37;
+
+// The sample build() keeps as it decodes, for the frame decision. Same size
+// decideFrame would have taken for itself; the stride is over decoded returns
+// rather than raw records, which spreads it the same way.
+constexpr uint64_t kFrameSampleStride = 251;
+constexpr size_t   kFrameSampleTarget = 20000;
 constexpr size_t   kRoundTripSamples = 200000;
 
 } // namespace
@@ -1128,14 +1134,22 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     // Ranges are measured in the SCANNER's frame, so points must not have the
     // pose applied. Conformant files already store them that way; the
     // non-conformant "pre-transformed" case has to be undone.
-    const viewer::FrameDecision fd = viewer::decideFrame(reader, scanIndex);
-    const bool subtractPose = !fd.applyPose() && s.hasPose && cartesian;
+    //
+    // Which case this is takes a look at the points, and that used to mean
+    // decideFrame decoding the whole scan for itself before this one started —
+    // a tenth of a second, and a second full read of the file, for the twenty
+    // thousand points it samples. So the order is inverted: decode once, keep a
+    // strided sample as it goes, decide from that, and undo the pose afterwards
+    // on the returns already in hand. At two hundred gigabytes of scans the read
+    // it saves is worth more than the tenth of a second.
+    //
     // The undo is the full inverse pose, rotation included: p_local =
     // R^T (p_world - t). Subtracting only the translation would leave the points
     // on world-aligned axes about the scanner, which is not the frame `pose`
     // describes — and the carve builds its world-to-scanner transform from
     // `pose`, so the two have to mean the same thing.
     const viewer::Rigid poseRot = viewer::rigidFromPose(s.pose);
+    std::vector<double> frameSample;       // strided, as stored, for decideFrame
 
     // Grid dimensions.
     uint32_t gridRows = 0, gridCols = 0;
@@ -1208,11 +1222,13 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
             double x, y, z;
             if (cartesian) {
                 x = b.columns[0][k]; y = b.columns[1][k]; z = b.columns[2][k];
-                if (subtractPose) {
-                    const double a = x - s.pose.t[0], bb = y - s.pose.t[1], c = z - s.pose.t[2];
-                    x = poseRot.R[0] * a + poseRot.R[3] * bb + poseRot.R[6] * c;
-                    y = poseRot.R[1] * a + poseRot.R[4] * bb + poseRot.R[7] * c;
-                    z = poseRot.R[2] * a + poseRot.R[5] * bb + poseRot.R[8] * c;
+                // As stored. Whether the pose has to come off is decided below,
+                // from the sample being gathered here.
+                if ((decoded % kFrameSampleStride) == 0 &&
+                    frameSample.size() < 3 * kFrameSampleTarget) {
+                    frameSample.push_back(x);
+                    frameSample.push_back(y);
+                    frameSample.push_back(z);
                 }
             } else {
                 const double r = b.columns[0][k], a = b.columns[1][k], e = b.columns[2][k];
@@ -1221,26 +1237,21 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
             }
             if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
 
-            double az, el, range;
-            toSpherical(x, y, z, az, el, range);
-            if (range <= 1e-6) continue;
-            farthest = std::max(farthest, range);
-            nearest  = std::min(nearest, range);
-            if (!out.diag.hasReturnBounds) {
-                out.diag.hasReturnBounds = true;
-                out.diag.returnMin[0] = out.diag.returnMax[0] = x;
-                out.diag.returnMin[1] = out.diag.returnMax[1] = y;
-                out.diag.returnMin[2] = out.diag.returnMax[2] = z;
-            } else {
-                const double v[3] = {x, y, z};
-                for (int a = 0; a < 3; ++a) {
-                    out.diag.returnMin[a] = std::min(out.diag.returnMin[a], v[a]);
-                    out.diag.returnMax[a] = std::max(out.diag.returnMax[a], v[a]);
-                }
-            }
+            // Distance only. The direction is not needed here — on the grid
+            // path the raster is filled in a later pass, once the instrument's
+            // own frame is known, and that pass computes it then. Calling
+            // toSpherical here spent an atan2 and an asin per point to fill two
+            // variables nothing on this path reads: a third of a second on a
+            // 5.6 M point scan, thrown away.
+            const double range = std::sqrt(x * x + y * y + z * z);
+            if (!(range > 0.0)) continue;
             ++decoded;
 
             if (!gridPath) {
+                // The angular fallback is the one path that wants a direction
+                // here, so it is the one path that pays for one.
+                double az, el, r2;
+                toSpherical(x, y, z, az, el, r2);
                 samples.push_back({0, 0, float(range), az, el});
                 continue;
             }
@@ -1263,6 +1274,49 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     }, rerr);
     if (!ok) { err = rerr; return false; }
     if (decoded == 0) { err = "no valid points decoded"; return false; }
+
+    // Which frame those points are in, from the sample gathered above.
+    const viewer::FrameDecision fd = viewer::decideFrameFromSample(s, frameSample);
+    std::vector<double>().swap(frameSample);
+    const bool subtractPose = !fd.applyPose() && s.hasPose && cartesian;
+    if (subtractPose) {
+        for (PointRec& pr : pts) {
+            const double a = double(pr.x) - s.pose.t[0];
+            const double bb = double(pr.y) - s.pose.t[1];
+            const double c = double(pr.z) - s.pose.t[2];
+            pr.x = float(poseRot.R[0] * a + poseRot.R[3] * bb + poseRot.R[6] * c);
+            pr.y = float(poseRot.R[1] * a + poseRot.R[4] * bb + poseRot.R[7] * c);
+            pr.z = float(poseRot.R[2] * a + poseRot.R[5] * bb + poseRot.R[8] * c);
+        }
+    }
+
+    // The extent and the range span, in the scanner's frame — so they are taken
+    // here, after any pose has come off, rather than during the decode.
+    //
+    // One difference this makes, and it is the right way round: a point outside
+    // the declared grid no longer widens the return bounds. Those points are
+    // already an error condition — past one per cent the build refuses — and a
+    // raster that cannot hold them should not be reporting their extent as
+    // something it observed.
+    for (const PointRec& pr : pts) {
+        const double x = double(pr.x), y = double(pr.y), z = double(pr.z);
+        const double range = std::sqrt(x * x + y * y + z * z);
+        if (range <= 1e-6) continue;
+        farthest = std::max(farthest, range);
+        nearest  = std::min(nearest, range);
+        if (!out.diag.hasReturnBounds) {
+            out.diag.hasReturnBounds = true;
+            out.diag.returnMin[0] = out.diag.returnMax[0] = x;
+            out.diag.returnMin[1] = out.diag.returnMax[1] = y;
+            out.diag.returnMin[2] = out.diag.returnMax[2] = z;
+        } else {
+            const double v[3] = {x, y, z};
+            for (int a = 0; a < 3; ++a) {
+                out.diag.returnMin[a] = std::min(out.diag.returnMin[a], v[a]);
+                out.diag.returnMax[a] = std::max(out.diag.returnMax[a], v[a]);
+            }
+        }
+    }
 
     // A scan whose points do not fit the grid it declares is not a scan this
     // can read. The cells they should have filled stay empty, and empty reads as
@@ -1342,16 +1396,27 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     for (const PointRec& p : pts) {
         double x = double(p.x), y = double(p.y), z = double(p.z);
         out.toInstrument(x, y, z);
-        double az, el, range;
-        toSpherical(x, y, z, az, el, range);
+        const double range = std::sqrt(x * x + y * y + z * z);
         if (range <= 1e-6) continue;
         if (p.row >= out.rows || p.col >= out.cols) continue;
+        // The direction, in the two forms this loop wants it. The unit vector in
+        // the XY plane IS cos(az) and sin(az), straight out of the coordinates —
+        // so the column accumulator takes them from here rather than going out
+        // through atan2 and back through a cosine and a sine to arrive at the
+        // numbers it started with. Three transcendentals a point become one
+        // divide, over five and a half million points.
+        const double h = std::sqrt(x * x + y * y);
+        const double cosAz = (h > 1e-12) ? x / h : 1.0;
+        const double sinAz = (h > 1e-12) ? y / h : 0.0;
+        const double el = std::asin(std::clamp(z / range, -1.0, 1.0));
         const size_t i = size_t(p.row) * out.cols + p.col;
 
         // Every so often, hold a point back. These are what the mapping is then
         // tested against, so they must take no part in building it: a check fed
         // the same points it was built from is not a check.
         if ((&p - pts.data()) % kRoundTripStride == 0 && samples.size() < kRoundTripSamples) {
+            double az = std::atan2(y, x);
+            if (az < 0) az += kTwoPi;
             samples.push_back({p.row, p.col, float(range), az, el});
         } else {
             // This return was fired in this direction and recorded in this cell.
@@ -1359,8 +1424,13 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
             // it down.
             const double ef = (el + 0.5 * kPi) / (kPi / double(elVote.size()));
             if (ef >= 0.0 && ef < double(elVote.size())) elVote[size_t(ef)].cast(int32_t(p.row));
-            double aa = az - kTwoPi * std::floor(az / kTwoPi);
-            const double af = aa / (kTwoPi / double(azVote.size()));
+            // The azimuth bin. atan2 is unavoidable here — the bins are a
+            // uniform division of the turn and there is no way to that from a
+            // unit vector without one — but it is now paid only by the points
+            // that vote, not by every point twice over.
+            double az = std::atan2(sinAz, cosAz);
+            if (az < 0) az += kTwoPi;
+            const double af = az / (kTwoPi / double(azVote.size()));
             if (af >= 0.0 && af < double(azVote.size())) azVote[size_t(af)].cast(int32_t(p.col));
         }
 
@@ -1383,7 +1453,7 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         Accum& ra = rowAcc[p.row];
         ra.sumEl += el; ++ra.n;
         Accum& ca = colAcc[p.col];
-        ca.sumAzX += std::cos(az); ca.sumAzY += std::sin(az); ++ca.n;
+        ca.sumAzX += cosAz; ca.sumAzY += sinAz; ++ca.n;
     }
     std::vector<PointRec>().swap(pts);      // 113 MB on a big scan; let it go
 

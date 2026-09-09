@@ -250,9 +250,7 @@ FrameDecision decideFrame(e57::Reader& reader, size_t scanIndex, size_t sampleTa
     const uint64_t stride = std::max<uint64_t>(
         1, s.recordCount / std::max<size_t>(1, sampleTarget));
 
-    std::vector<double> dLocal, dPose, xyz;
-    dLocal.reserve(sampleTarget);
-    dPose.reserve(sampleTarget);
+    std::vector<double> xyz;
     xyz.reserve(3 * sampleTarget);
     uint64_t seen = 0;
     std::string err;
@@ -263,18 +261,47 @@ FrameDecision decideFrame(e57::Reader& reader, size_t scanIndex, size_t sampleTa
             if (invName && b.columns[invIdx][k] != 0.0) continue;
             const double x = b.columns[0][k], y = b.columns[1][k], z = b.columns[2][k];
             if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
-            dLocal.push_back(std::sqrt(x * x + y * y + z * z));
-            const double px = x - s.pose.t[0], py = y - s.pose.t[1], pz = z - s.pose.t[2];
-            dPose.push_back(std::sqrt(px * px + py * py + pz * pz));
             xyz.push_back(x); xyz.push_back(y); xyz.push_back(z);
         }
         return true;
     }, err);
-
-    if (!ok || dLocal.size() < 64) {
+    if (!ok) {
         d.convention = FrameConvention::Unknown;
         d.reason = "too few points to judge — assuming the standard (pose applied)";
         return d;
+    }
+    return decideFrameFromSample(s, xyz);
+}
+
+FrameDecision decideFrameFromSample(const e57::Scan& s, const std::vector<double>& xyz) {
+    FrameDecision d;
+
+    if (!s.hasPose || isIdentityPose(s.pose)) {
+        d.convention = FrameConvention::IdentityPose;
+        d.reason = s.hasPose ? "pose is identity — points are already in the file frame"
+                             : "no pose element — points are already in the file frame";
+        return d;
+    }
+    if (!(s.field("cartesianX") && s.field("cartesianY") && s.field("cartesianZ"))) {
+        d.convention = FrameConvention::ScannerLocal;
+        d.reason = "spherical storage is scanner-centric by definition";
+        return d;
+    }
+
+    const size_t n = xyz.size() / 3;
+    if (n < 64) {
+        d.convention = FrameConvention::Unknown;
+        d.reason = "too few points to judge — assuming the standard (pose applied)";
+        return d;
+    }
+    std::vector<double> dLocal, dPose;
+    dLocal.reserve(n);
+    dPose.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        const double x = xyz[3*i], y = xyz[3*i+1], z = xyz[3*i+2];
+        dLocal.push_back(std::sqrt(x * x + y * y + z * z));
+        const double px = x - s.pose.t[0], py = y - s.pose.t[1], pz = z - s.pose.t[2];
+        dPose.push_back(std::sqrt(px * px + py * py + pz * pz));
     }
 
     d.medianFromLocalOrigin = median(dLocal);
