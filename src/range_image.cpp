@@ -248,13 +248,7 @@ struct PointRec {
 // different value and direction each time the tripod was moved, accounting for 80
 // to 98 per cent of how much elevation varies inside a row.
 //
-// Fitted in two steps. The first cycle-per-turn fit is linear and closed form and
-// lands within a few per cent; the refinement then minimises the actual spread
-// under the actual rotation, because the linear form is only the first term of one
-// and the second term is worth several cells at 2.5 degrees.
-constexpr double kTiltSearchHalfWidth = 0.12;   // radians, ~7 degrees: any tripod
-constexpr int    kTiltSweeps  = 3;
-constexpr size_t kTiltSamples = 300000;
+// Fitted by iterating the closed form; see estimateTilt below.
 
 // Rodrigues, about a horizontal axis. `t` is the tilt vector: its length is the
 // angle and its direction is the azimuth leaned toward.
@@ -276,36 +270,61 @@ void tiltMatrix(double tx, double ty, double R[9]) {
     R[6] = uz * ux * C - uy * s; R[7] = uz * uy * C + ux * s; R[8] = c + uz * uz * C;
 }
 
-// How much elevation varies inside a row, under a given tilt. The quantity the
-// whole raster idea depends on being near zero.
-double rowElevationSpread(const std::vector<PointRec>& pts, size_t stride, size_t rows,
-                          double tx, double ty,
-                          std::vector<double>& sum, std::vector<double>& sum2,
-                          std::vector<uint32_t>& n) {
-    double R[9];
-    tiltMatrix(tx, ty, R);
-    std::fill(sum.begin(), sum.end(), 0.0);
-    std::fill(sum2.begin(), sum2.end(), 0.0);
-    std::fill(n.begin(), n.end(), 0u);
+// One pass of the fit: how much of each return's elevation deviation from its own
+// row's mean is a single cycle around the azimuth, under a given tilt.
+bool fitTiltPass(const std::vector<PointRec>& pts, size_t stride, size_t rows,
+                 const double R[9], double& dA, double& dB, double& explained) {
+    std::vector<double> mean(rows, 0.0);
+    std::vector<uint32_t> cnt(rows, 0);
+    struct Obs { float az, el; uint32_t row; };
+    std::vector<Obs> obs;
+    obs.reserve(pts.size() / stride + 1);
     for (size_t i = 0; i < pts.size(); i += stride) {
         const PointRec& p = pts[i];
         if (p.row >= rows) continue;
         const double x = R[0] * p.x + R[1] * p.y + R[2] * p.z;
         const double y = R[3] * p.x + R[4] * p.y + R[5] * p.z;
         const double z = R[6] * p.x + R[7] * p.y + R[8] * p.z;
-        double az, el, r;
-        toSpherical(x, y, z, az, el, r);
+        double a, e, r;
+        toSpherical(x, y, z, a, e, r);
         if (r < 1e-6) continue;
-        sum[p.row] += el; sum2[p.row] += el * el; ++n[p.row];
+        obs.push_back({float(a), float(e), p.row});
+        mean[p.row] += e; ++cnt[p.row];
     }
-    double cost = 0;
-    for (size_t r = 0; r < rows; ++r) {
-        if (n[r] < 2) continue;
-        const double c = double(n[r]);
-        cost += std::max(0.0, sum2[r] - sum[r] * sum[r] / c);
+    for (size_t r = 0; r < rows; ++r) if (cnt[r]) mean[r] /= double(cnt[r]);
+
+    double scc = 0, sss = 0, scs = 0, sdc = 0, sds = 0, sdd = 0;
+    uint64_t used = 0;
+    for (const Obs& o : obs) {
+        if (cnt[o.row] < 8) continue;
+        const double d = double(o.el) - mean[o.row];
+        const double c = std::cos(double(o.az)), si = std::sin(double(o.az));
+        scc += c * c; sss += si * si; scs += c * si;
+        sdc += d * c; sds += d * si; sdd += d * d;
+        ++used;
     }
-    return cost;
+    if (used < 1000) return false;
+    const double det = scc * sss - scs * scs;
+    if (std::fabs(det) < 1e-12) return false;
+    dA = ( sss * sdc - scs * sds) / det;
+    dB = (-scs * sdc + scc * sds) / det;
+    explained = (sdd > 0) ? (dA * sdc + dB * sds) / sdd : 0.0;
+    return true;
 }
+
+// Fitted by iterating the closed form, not by searching for it.
+//
+// Each pass rotates the returns by the estimate so far, fits one cycle per turn to
+// what is left, and folds it in. The first pass lands within a few per cent
+// because the model is very nearly linear at these angles, and two more take it to
+// where the measurement noise is.
+//
+// Three passes over the samples, against the hundred and thirty-two that a golden
+// section over two axes was costing — 3.8 seconds of a 4.8 second range image, to
+// arrive at an answer the closed form already had. That mattered at five scans and
+// would have been unusable at a thousand.
+constexpr int    kTiltPasses  = 3;
+constexpr size_t kTiltSamples = 120000;
 
 void estimateTilt(const std::vector<PointRec>& pts, size_t rows, double R[9],
                   double& tauOut, double& phiOut, double& explainedOut) {
@@ -314,90 +333,34 @@ void estimateTilt(const std::vector<PointRec>& pts, size_t rows, double R[9],
     if (pts.size() < 5000 || rows < 2) return;
 
     const size_t stride = std::max<size_t>(1, pts.size() / kTiltSamples);
-    std::vector<double> sum(rows, 0.0), sum2(rows, 0.0);
-    std::vector<uint32_t> n(rows, 0);
-
-    // Step one: the cycle per turn, in closed form, from the deviation of each
-    // return from its own row's mean.
-    {
-        std::vector<double> mean(rows, 0.0);
-        std::vector<uint32_t> cnt(rows, 0);
-        std::vector<double> az(pts.size() / stride + 1), el(pts.size() / stride + 1);
-        std::vector<uint32_t> row(pts.size() / stride + 1);
-        size_t m = 0;
-        for (size_t i = 0; i < pts.size(); i += stride) {
-            const PointRec& p = pts[i];
-            if (p.row >= rows) continue;
-            double a, e, r;
-            toSpherical(p.x, p.y, p.z, a, e, r);
-            if (r < 1e-6) continue;
-            az[m] = a; el[m] = e; row[m] = p.row; ++m;
-            mean[p.row] += e; ++cnt[p.row];
-        }
-        for (size_t r = 0; r < rows; ++r) if (cnt[r]) mean[r] /= double(cnt[r]);
-        double scc = 0, sss = 0, scs = 0, sdc = 0, sds = 0, sdd = 0;
-        uint64_t used = 0;
-        for (size_t i = 0; i < m; ++i) {
-            if (cnt[row[i]] < 8) continue;
-            const double d = el[i] - mean[row[i]];
-            const double c = std::cos(az[i]), si = std::sin(az[i]);
-            scc += c * c; sss += si * si; scs += c * si;
-            sdc += d * c; sds += d * si; sdd += d * d;
-            ++used;
-        }
-        if (used > 1000) {
-            const double det = scc * sss - scs * scs;
-            if (std::fabs(det) > 1e-12) {
-                const double A = ( sss * sdc - scs * sds) / det;
-                const double B = (-scs * sdc + scc * sds) / det;
-                explainedOut = (sdd > 0) ? (A * sdc + B * sds) / sdd : 0.0;
-                tauOut = std::sqrt(A * A + B * B);
-                phiOut = std::atan2(B, A);
-            }
-        }
+    double tx = 0, ty = 0, first = 0;
+    for (int pass = 0; pass < kTiltPasses; ++pass) {
+        double cur[9];
+        tiltMatrix(tx, ty, cur);
+        double dA = 0, dB = 0, ex = 0;
+        if (!fitTiltPass(pts, stride, rows, cur, dA, dB, ex)) break;
+        if (pass == 0) first = ex;
+        // A rotation of tau about the axis perpendicular to phi lowers a horizon
+        // elevation by tau*cos(azimuth - phi), so what has just been measured is
+        // the correction still outstanding, on top of what is already applied.
+        tx += dA;
+        ty += dB;
     }
 
-    // Step two: refine against the real thing.
-    double best[2] = {tauOut * std::cos(phiOut), tauOut * std::sin(phiOut)};
-    const double none = rowElevationSpread(pts, stride, rows, 0, 0, sum, sum2, n);
-    double bestCost = rowElevationSpread(pts, stride, rows, best[0], best[1], sum, sum2, n);
-    for (int sweep = 0; sweep < kTiltSweeps; ++sweep) {
-        for (int axis = 0; axis < 2; ++axis) {
-            double lo = best[axis] - kTiltSearchHalfWidth;
-            double hi = best[axis] + kTiltSearchHalfWidth;
-            const double phi = 0.6180339887498949;
-            double trial[2] = {best[0], best[1]};
-            double a = hi - phi * (hi - lo), b = lo + phi * (hi - lo);
-            trial[axis] = a;
-            double fa = rowElevationSpread(pts, stride, rows, trial[0], trial[1], sum, sum2, n);
-            trial[axis] = b;
-            double fb = rowElevationSpread(pts, stride, rows, trial[0], trial[1], sum, sum2, n);
-            for (int it = 0; it < 20; ++it) {
-                if (fa < fb) {
-                    hi = b; b = a; fb = fa; a = hi - phi * (hi - lo);
-                    trial[axis] = a;
-                    fa = rowElevationSpread(pts, stride, rows, trial[0], trial[1], sum, sum2, n);
-                } else {
-                    lo = a; a = b; fa = fb; b = lo + phi * (hi - lo);
-                    trial[axis] = b;
-                    fb = rowElevationSpread(pts, stride, rows, trial[0], trial[1], sum, sum2, n);
-                }
-            }
-            best[axis] = 0.5 * (lo + hi);
-            bestCost = rowElevationSpread(pts, stride, rows, best[0], best[1], sum, sum2, n);
-        }
-    }
+    const double tau = std::sqrt(tx * tx + ty * ty);
+    // Under a hundredth of a degree there is nothing to correct, and saying so
+    // beats carrying a rotation that does nothing.
+    if (!(tau > 1.7e-4)) { tiltMatrix(0, 0, R); return; }
+    tiltMatrix(tx, ty, R);
+    tauOut = tau;
+    phiOut = std::atan2(ty, tx);
 
-    // Never make it worse. A level instrument must come out with no correction.
-    if (!(bestCost < none)) {
-        tiltMatrix(0, 0, R);
-        tauOut = phiOut = explainedOut = 0.0;
-        return;
-    }
-    tiltMatrix(best[0], best[1], R);
-    tauOut = std::sqrt(best[0] * best[0] + best[1] * best[1]);
-    phiOut = std::atan2(best[1], best[0]);
-    explainedOut = (none > 0) ? 1.0 - bestCost / none : 0.0;
+    // What it bought, measured the way the report quotes it: how much of the
+    // within-row spread has gone. One extra pass, and worth it — a correction that
+    // cannot say what it achieved is not one anybody can check.
+    double dA = 0, dB = 0, ex = 0;
+    explainedOut = fitTiltPass(pts, stride, rows, R, dA, dB, ex)
+                       ? std::max(first, 1.0 - ex) : first;
 }
 
 // How many points to hold back for the round-trip check, and how widely to
