@@ -24,6 +24,7 @@
 #include "../src/indexer.h"
 #include "../src/point_store.h"
 #include "../src/scan_check.h"
+#include "../src/report.h"
 #include "../src/version.h"
 #include "../src/visibility.h"
 
@@ -135,6 +136,8 @@ const char *kindLabel(check::Kind k) {
     CGFloat              _sidebarWidth;
     NSButton            *_cloudToggle;
     NSButton            *_voxelToggle;
+    NSWindow            *_reportWindow;
+    NSTextView          *_reportText;
 
     indexer::Survey      _survey;
     // The corpus as opened, so the visibility pass can be run over exactly the
@@ -424,6 +427,7 @@ const char *kindLabel(check::Kind k) {
     NSMenu *procMenu = [[NSMenu alloc] initWithTitle:@"Processing"];
     [procMenu addItemWithTitle:@"Run Visibility Filter…"
                         action:@selector(runVisibilityFilter:) keyEquivalent:@"r"];
+    [procMenu addItemWithTitle:@"Scan Report…" action:@selector(scanReport:) keyEquivalent:@"i"];
     [procMenu addItem:[NSMenuItem separatorItem]];
     [procMenu addItemWithTitle:@"Use the GPU" action:@selector(toggleGpu:) keyEquivalent:@""];
     [procMenu addItemWithTitle:@"Verify the GPU against the CPU"
@@ -525,6 +529,128 @@ const char *kindLabel(check::Kind k) {
     const BOOL on = !_cloudView.showVoxels;
     _cloudView.showVoxels = on;
     _voxelToggle.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+// The scan report, in the app. Everything `e57cov info` prints — the raster,
+// the recovered angular mapping and whether it describes that raster, the blind
+// cone and which way up the instrument was, the decode cross-checks.
+//
+// Here because the CLI is not what gets run: Xcode builds the scheme you have
+// selected, so building the app never builds the command line tool, and a stale
+// e57cov on a path is indistinguishable from a current one.
+- (void)scanReport:(id)sender {
+    (void)sender;
+    if (_busy) return;
+    if (_paths.empty()) {
+        _status.stringValue = @"Open some E57 scans first.";
+        return;
+    }
+
+    _busy = YES;
+    _spinner.hidden = NO;
+    [_spinner startAnimation:nil];
+    _status.stringValue = @"Reading the scans…";
+
+    report::Options ro;
+    ro.maxRange         = _visOptions.maxRange;
+    ro.blindCone        = _visOptions.blindCone;
+    ro.noReturnRadius   = _visOptions.skyRadius;
+    ro.noReturnFraction = _visOptions.skyFraction;
+
+    auto paths = std::make_shared<std::vector<std::string>>(_paths);
+    __weak AppDelegate *weakSelf = self;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      @autoreleasepool {
+        auto text = std::make_shared<std::string>();
+        report::scanReport(*paths, ro, *text);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *me = weakSelf;
+            if (!me) return;
+            me->_busy = NO;
+            [me->_spinner stopAnimation:nil];
+            me->_spinner.hidden = YES;
+
+            NSString *body = [NSString stringWithUTF8String:text->c_str()] ?: @"(unreadable)";
+
+            // Written to a file as well as shown. A report you have to
+            // transcribe out of a window is a report that arrives wrong.
+            NSString *dir = NSSearchPathForDirectoriesInDomains(
+                NSDesktopDirectory, NSUserDomainMask, YES).firstObject
+                ?: NSTemporaryDirectory();
+            NSString *file = [dir stringByAppendingPathComponent:@"e57cov-scan-report.txt"];
+            NSError *werr = nil;
+            const BOOL wrote = [body writeToFile:file atomically:YES
+                                        encoding:NSUTF8StringEncoding error:&werr];
+
+            [me showReport:body savedTo:(wrote ? file : nil)];
+            me->_status.stringValue = wrote
+                ? [NSString stringWithFormat:@"Scan report written to %@", file]
+                : @"Scan report ready (could not write a file)";
+        });
+      }
+    });
+}
+
+// A plain scrollable text window with a Copy button. Selectable and monospaced,
+// because the whole point is getting the text somewhere else intact.
+- (void)showReport:(NSString *)body savedTo:(NSString *)file {
+    const NSRect r = NSMakeRect(0, 0, 900, 640);
+    NSWindow *w = [[NSWindow alloc]
+        initWithContentRect:r
+                  styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                             NSWindowStyleMaskResizable)
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    w.title = file ? [NSString stringWithFormat:@"Scan Report — %@", file.lastPathComponent]
+                   : @"Scan Report";
+    w.releasedWhenClosed = NO;
+
+    NSView *root = [[NSView alloc] initWithFrame:r];
+    NSScrollView *sv = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 40, r.size.width,
+                                                                     r.size.height - 40)];
+    sv.hasVerticalScroller = YES;
+    sv.hasHorizontalScroller = YES;
+    sv.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+    NSTextView *tv = [[NSTextView alloc] initWithFrame:sv.bounds];
+    tv.editable = NO;
+    tv.selectable = YES;
+    tv.richText = NO;
+    tv.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    tv.string = body;
+    tv.minSize = NSMakeSize(0, 0);
+    tv.maxSize = NSMakeSize(FLT_MAX, FLT_MAX);
+    tv.verticallyResizable = YES;
+    tv.horizontallyResizable = YES;
+    tv.textContainer.widthTracksTextView = NO;
+    tv.textContainer.containerSize = NSMakeSize(FLT_MAX, FLT_MAX);
+    sv.documentView = tv;
+    [root addSubview:sv];
+
+    NSButton *copy = [[NSButton alloc] initWithFrame:NSMakeRect(r.size.width - 120, 8, 108, 24)];
+    copy.title = @"Copy all";
+    copy.bezelStyle = NSBezelStyleRounded;
+    copy.target = self;
+    copy.action = @selector(copyReport:);
+    copy.autoresizingMask = NSViewMinXMargin;
+    [root addSubview:copy];
+
+    w.contentView = root;
+    [w center];
+    [w makeKeyAndOrderFront:nil];
+    _reportWindow = w;
+    _reportText = tv;
+}
+
+- (void)copyReport:(id)sender {
+    (void)sender;
+    if (!_reportText) return;
+    NSPasteboard *pb = NSPasteboard.generalPasteboard;
+    [pb clearContents];
+    [pb setString:_reportText.string forType:NSPasteboardTypeString];
+    _status.stringValue = @"Scan report copied to the clipboard.";
 }
 
 - (void)showAbout:(id)sender {

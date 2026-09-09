@@ -22,6 +22,7 @@ add_library(e57cov_core STATIC
   src/indexer.cpp
   src/range_image.cpp
   src/carve.cpp
+  src/report.cpp
   src/voids.cpp
   src/visibility.cpp)
 target_include_directories(e57cov_core PUBLIC src)

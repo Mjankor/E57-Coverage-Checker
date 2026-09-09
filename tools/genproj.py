@@ -16,7 +16,8 @@ GROUPS = {
          ("indexer.cpp","sourcecode.cpp.cpp"),("range_image.h","sourcecode.c.h"),
          ("range_image.cpp","sourcecode.cpp.cpp"),("carve.h","sourcecode.c.h"),
          ("carve.cpp","sourcecode.cpp.cpp"),("visibility.h","sourcecode.c.h"),
-         ("visibility.cpp","sourcecode.cpp.cpp"),("voids.h","sourcecode.c.h"),
+         ("visibility.cpp","sourcecode.cpp.cpp"),("report.h","sourcecode.c.h"),
+         ("report.cpp","sourcecode.cpp.cpp"),("voids.h","sourcecode.c.h"),
          ("voids.cpp","sourcecode.cpp.cpp"),("main.cpp","sourcecode.cpp.cpp")],
  "app": [("CarveGpu.h","sourcecode.c.h"),("CarveGpu.mm","sourcecode.cpp.objcpp"),
          ("Renderer.h","sourcecode.c.h"),("Renderer.mm","sourcecode.cpp.objcpp"),
@@ -42,7 +43,7 @@ for name, ft in DOCS: fref[(".",name)] = (uid(), ft)
 CORE = [("src","e57.cpp"),("src","camera.cpp"),("src","scan_check.cpp"),
         ("src","point_cloud.cpp"),("src","picker.cpp"),("src","frame.cpp"),
         ("src","lod.cpp"),("src","point_store.cpp"),("src","indexer.cpp"),
-        ("src","range_image.cpp"),("src","carve.cpp"),("src","voids.cpp"),
+        ("src","range_image.cpp"),("src","carve.cpp"),("src","voids.cpp"),("src","report.cpp"),
         ("src","visibility.cpp")]
 TARGETS = [
   ("e57cov","com.apple.product-type.tool","e57cov","compiled.mach-o-executable",

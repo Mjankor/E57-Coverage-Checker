@@ -240,6 +240,15 @@ verdict never depends on which tile carried it. The test suite asserts this
 directly, because a carve whose answer depended on how space was partitioned
 could not be validated against anything.
 
+The same report is available in the app as **Processing ▸ Scan Report…** (⌘I),
+which shows it in a window, copies it to the clipboard, and writes it to
+`~/Desktop/e57cov-scan-report.txt`. That is there because Xcode builds the scheme
+you have selected, so building the app never builds `e57cov`, and a stale
+command line tool on a path is indistinguishable from a current one.
+
+Every report names the build that produced it. If the revision at the top is not
+the one you just built, nothing below it is worth reading.
+
 ## Explaining one point — `e57cov probe`
 
 ```sh
