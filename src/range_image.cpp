@@ -228,6 +228,178 @@ struct Sample {
     double   az, el;
 };
 
+// One decoded return, kept until the instrument's own frame is known.
+//
+// The image has to be built about a frame that cannot be worked out until every
+// point has been read, so the points are held rather than the file being decoded
+// twice. Twenty bytes each: about 113 MB on a 5.6 M point scan, released as soon
+// as the image is built.
+struct PointRec {
+    float    x, y, z;
+    uint32_t row, col;
+};
+
+// The rotation that makes a row a line of constant elevation again.
+//
+// A terrestrial scanner exports its points levelled, so the raster's rows are
+// constant elevation about the INSTRUMENT'S axis while the points are about the
+// vertical. Tilt the two apart by tau toward phi and a row's elevation runs as
+// tau*cos(azimuth - phi). Measured on five real setups: 0.55 to 2.49 degrees, a
+// different value and direction each time the tripod was moved, accounting for 80
+// to 98 per cent of how much elevation varies inside a row.
+//
+// Fitted in two steps. The first cycle-per-turn fit is linear and closed form and
+// lands within a few per cent; the refinement then minimises the actual spread
+// under the actual rotation, because the linear form is only the first term of one
+// and the second term is worth several cells at 2.5 degrees.
+constexpr double kTiltSearchHalfWidth = 0.12;   // radians, ~7 degrees: any tripod
+constexpr int    kTiltSweeps  = 3;
+constexpr size_t kTiltSamples = 300000;
+
+// Rodrigues, about a horizontal axis. `t` is the tilt vector: its length is the
+// angle and its direction is the azimuth leaned toward.
+void tiltMatrix(double tx, double ty, double R[9]) {
+    const double tau = std::sqrt(tx * tx + ty * ty);
+    if (tau < 1e-12) {
+        R[0] = 1; R[1] = 0; R[2] = 0;
+        R[3] = 0; R[4] = 1; R[5] = 0;
+        R[6] = 0; R[7] = 0; R[8] = 1;
+        return;
+    }
+    // Rotating about u = (-sin phi, cos phi, 0) by tau changes a horizon
+    // direction's elevation by -tau*cos(azimuth - phi), which is what undoes the
+    // lean.
+    const double ux = -ty / tau, uy = tx / tau, uz = 0.0;
+    const double c = std::cos(tau), s = std::sin(tau), C = 1 - c;
+    R[0] = c + ux * ux * C;      R[1] = ux * uy * C - uz * s; R[2] = ux * uz * C + uy * s;
+    R[3] = uy * ux * C + uz * s; R[4] = c + uy * uy * C;      R[5] = uy * uz * C - ux * s;
+    R[6] = uz * ux * C - uy * s; R[7] = uz * uy * C + ux * s; R[8] = c + uz * uz * C;
+}
+
+// How much elevation varies inside a row, under a given tilt. The quantity the
+// whole raster idea depends on being near zero.
+double rowElevationSpread(const std::vector<PointRec>& pts, size_t stride, size_t rows,
+                          double tx, double ty,
+                          std::vector<double>& sum, std::vector<double>& sum2,
+                          std::vector<uint32_t>& n) {
+    double R[9];
+    tiltMatrix(tx, ty, R);
+    std::fill(sum.begin(), sum.end(), 0.0);
+    std::fill(sum2.begin(), sum2.end(), 0.0);
+    std::fill(n.begin(), n.end(), 0u);
+    for (size_t i = 0; i < pts.size(); i += stride) {
+        const PointRec& p = pts[i];
+        if (p.row >= rows) continue;
+        const double x = R[0] * p.x + R[1] * p.y + R[2] * p.z;
+        const double y = R[3] * p.x + R[4] * p.y + R[5] * p.z;
+        const double z = R[6] * p.x + R[7] * p.y + R[8] * p.z;
+        double az, el, r;
+        toSpherical(x, y, z, az, el, r);
+        if (r < 1e-6) continue;
+        sum[p.row] += el; sum2[p.row] += el * el; ++n[p.row];
+    }
+    double cost = 0;
+    for (size_t r = 0; r < rows; ++r) {
+        if (n[r] < 2) continue;
+        const double c = double(n[r]);
+        cost += std::max(0.0, sum2[r] - sum[r] * sum[r] / c);
+    }
+    return cost;
+}
+
+void estimateTilt(const std::vector<PointRec>& pts, size_t rows, double R[9],
+                  double& tauOut, double& phiOut, double& explainedOut) {
+    tiltMatrix(0, 0, R);
+    tauOut = phiOut = explainedOut = 0.0;
+    if (pts.size() < 5000 || rows < 2) return;
+
+    const size_t stride = std::max<size_t>(1, pts.size() / kTiltSamples);
+    std::vector<double> sum(rows, 0.0), sum2(rows, 0.0);
+    std::vector<uint32_t> n(rows, 0);
+
+    // Step one: the cycle per turn, in closed form, from the deviation of each
+    // return from its own row's mean.
+    {
+        std::vector<double> mean(rows, 0.0);
+        std::vector<uint32_t> cnt(rows, 0);
+        std::vector<double> az(pts.size() / stride + 1), el(pts.size() / stride + 1);
+        std::vector<uint32_t> row(pts.size() / stride + 1);
+        size_t m = 0;
+        for (size_t i = 0; i < pts.size(); i += stride) {
+            const PointRec& p = pts[i];
+            if (p.row >= rows) continue;
+            double a, e, r;
+            toSpherical(p.x, p.y, p.z, a, e, r);
+            if (r < 1e-6) continue;
+            az[m] = a; el[m] = e; row[m] = p.row; ++m;
+            mean[p.row] += e; ++cnt[p.row];
+        }
+        for (size_t r = 0; r < rows; ++r) if (cnt[r]) mean[r] /= double(cnt[r]);
+        double scc = 0, sss = 0, scs = 0, sdc = 0, sds = 0, sdd = 0;
+        uint64_t used = 0;
+        for (size_t i = 0; i < m; ++i) {
+            if (cnt[row[i]] < 8) continue;
+            const double d = el[i] - mean[row[i]];
+            const double c = std::cos(az[i]), si = std::sin(az[i]);
+            scc += c * c; sss += si * si; scs += c * si;
+            sdc += d * c; sds += d * si; sdd += d * d;
+            ++used;
+        }
+        if (used > 1000) {
+            const double det = scc * sss - scs * scs;
+            if (std::fabs(det) > 1e-12) {
+                const double A = ( sss * sdc - scs * sds) / det;
+                const double B = (-scs * sdc + scc * sds) / det;
+                explainedOut = (sdd > 0) ? (A * sdc + B * sds) / sdd : 0.0;
+                tauOut = std::sqrt(A * A + B * B);
+                phiOut = std::atan2(B, A);
+            }
+        }
+    }
+
+    // Step two: refine against the real thing.
+    double best[2] = {tauOut * std::cos(phiOut), tauOut * std::sin(phiOut)};
+    const double none = rowElevationSpread(pts, stride, rows, 0, 0, sum, sum2, n);
+    double bestCost = rowElevationSpread(pts, stride, rows, best[0], best[1], sum, sum2, n);
+    for (int sweep = 0; sweep < kTiltSweeps; ++sweep) {
+        for (int axis = 0; axis < 2; ++axis) {
+            double lo = best[axis] - kTiltSearchHalfWidth;
+            double hi = best[axis] + kTiltSearchHalfWidth;
+            const double phi = 0.6180339887498949;
+            double trial[2] = {best[0], best[1]};
+            double a = hi - phi * (hi - lo), b = lo + phi * (hi - lo);
+            trial[axis] = a;
+            double fa = rowElevationSpread(pts, stride, rows, trial[0], trial[1], sum, sum2, n);
+            trial[axis] = b;
+            double fb = rowElevationSpread(pts, stride, rows, trial[0], trial[1], sum, sum2, n);
+            for (int it = 0; it < 20; ++it) {
+                if (fa < fb) {
+                    hi = b; b = a; fb = fa; a = hi - phi * (hi - lo);
+                    trial[axis] = a;
+                    fa = rowElevationSpread(pts, stride, rows, trial[0], trial[1], sum, sum2, n);
+                } else {
+                    lo = a; a = b; fa = fb; b = lo + phi * (hi - lo);
+                    trial[axis] = b;
+                    fb = rowElevationSpread(pts, stride, rows, trial[0], trial[1], sum, sum2, n);
+                }
+            }
+            best[axis] = 0.5 * (lo + hi);
+            bestCost = rowElevationSpread(pts, stride, rows, best[0], best[1], sum, sum2, n);
+        }
+    }
+
+    // Never make it worse. A level instrument must come out with no correction.
+    if (!(bestCost < none)) {
+        tiltMatrix(0, 0, R);
+        tauOut = phiOut = explainedOut = 0.0;
+        return;
+    }
+    tiltMatrix(best[0], best[1], R);
+    tauOut = std::sqrt(best[0] * best[0] + best[1] * best[1]);
+    phiOut = std::atan2(best[1], best[0]);
+    explainedOut = (none > 0) ? 1.0 - bestCost / none : 0.0;
+}
+
 // How many points to hold back for the round-trip check, and how widely to
 // space them. Spread across the whole scan rather than taken from its start,
 // because a mapping can be right for one band of rows and wrong for another —
@@ -995,6 +1167,8 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     // The inverse mapping, recorded straight from the points. Sized once the
     // raster's dimensions are known, just below.
     std::vector<BinVote> elVote, azVote;
+    // Every decoded return, held until the instrument's frame is known.
+    std::vector<PointRec> pts;
     uint64_t decoded = 0, invalid = 0;
     double   farthest = 0, nearest = 1e300;
 
@@ -1008,6 +1182,7 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
                       BinVote{});
         azVote.assign(std::min<size_t>(kMaxIndexBins, size_t(out.cols) * kReverseBinsPerCell),
                       BinVote{});
+        pts.reserve(size_t(std::min<uint64_t>(s.recordCount, 40000000ull)));
     }
 
     std::string rerr;
@@ -1062,40 +1237,12 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
                 continue;
             }
 
-            const uint32_t r = uint32_t(rr) / step;
-            const uint32_t c = uint32_t(cc) / step;
-            const size_t   i = size_t(r) * out.cols + c;
-
-            // Every so often, hold a point back. These are what the mapping is
-            // then tested against, so they must take no part in building it: a
-            // check fed the same points it was built from is not a check.
-            const bool heldBack =
-                (decoded % kRoundTripStride) == 0 && samples.size() < kRoundTripSamples;
-            if (heldBack) {
-                samples.push_back({r, c, float(range), az, el});
-            } else {
-                // This point looked in this direction and was recorded in this
-                // cell. That pairing is the inverse mapping; nothing else is
-                // needed to write it down.
-                const double ef = (el + 0.5 * kPi) / (kPi / double(elVote.size()));
-                if (ef >= 0.0 && ef < double(elVote.size())) elVote[size_t(ef)].cast(int32_t(r));
-                double aa = az - kTwoPi * std::floor(az / kTwoPi);
-                const double af = aa / (kTwoPi / double(azVote.size()));
-                if (af >= 0.0 && af < double(azVote.size())) azVote[size_t(af)].cast(int32_t(c));
-            }
-
-            const uint32_t cm = uint32_t(std::min(range * 100.0, 65535.0));
-            // Minimum range wins: several source cells can land in one binned
-            // cell, and clearing to the nearest of them never over-clears.
-            if (out.cells[i].status != uint8_t(Status::Hit) || cm < out.cells[i].rangeCm) {
-                out.cells[i].rangeCm = uint16_t(cm);
-            }
-            out.cells[i].status = uint8_t(Status::Hit);
-
-            Accum& ra = rowAcc[r];
-            ra.sumEl += el; ++ra.n;
-            Accum& ca = colAcc[c];
-            ca.sumAzX += std::cos(az); ca.sumAzY += std::sin(az); ++ca.n;
+            // Held, not used. Which direction this return was fired in cannot be
+            // known until the instrument's own frame is, and that takes every
+            // point in the scan — so the raster is built after the read, not
+            // during it. See estimateTilt.
+            pts.push_back({float(x), float(y), float(z),
+                           uint32_t(rr) / step, uint32_t(cc) / step});
         }
         return true;
     }, rerr);
@@ -1156,6 +1303,57 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         out.diag.note = "no grid metadata: no-return rays cannot be identified reliably";
         return false;
     }
+
+    // The instrument's own frame, then the raster about it.
+    //
+    // This has to come first. Until it is known, a row is not a line of constant
+    // elevation and no mapping from a cell to a direction exists to be measured —
+    // which is why every earlier attempt to measure one failed on real data while
+    // passing on every level synthetic fixture ever written for it.
+    estimateTilt(pts, out.rows, out.tilt, out.tiltDeg, out.tiltTowardDeg,
+                 out.tiltExplained);
+    out.tiltDeg *= 57.29577951308232;
+    out.tiltTowardDeg *= 57.29577951308232;
+
+    // Now the raster, from the points, in that frame.
+    for (const PointRec& p : pts) {
+        double x = double(p.x), y = double(p.y), z = double(p.z);
+        out.toInstrument(x, y, z);
+        double az, el, range;
+        toSpherical(x, y, z, az, el, range);
+        if (range <= 1e-6) continue;
+        if (p.row >= out.rows || p.col >= out.cols) continue;
+        const size_t i = size_t(p.row) * out.cols + p.col;
+
+        // Every so often, hold a point back. These are what the mapping is then
+        // tested against, so they must take no part in building it: a check fed
+        // the same points it was built from is not a check.
+        if ((&p - pts.data()) % kRoundTripStride == 0 && samples.size() < kRoundTripSamples) {
+            samples.push_back({p.row, p.col, float(range), az, el});
+        } else {
+            // This return was fired in this direction and recorded in this cell.
+            // That pairing is the inverse mapping; nothing else is needed to write
+            // it down.
+            const double ef = (el + 0.5 * kPi) / (kPi / double(elVote.size()));
+            if (ef >= 0.0 && ef < double(elVote.size())) elVote[size_t(ef)].cast(int32_t(p.row));
+            double aa = az - kTwoPi * std::floor(az / kTwoPi);
+            const double af = aa / (kTwoPi / double(azVote.size()));
+            if (af >= 0.0 && af < double(azVote.size())) azVote[size_t(af)].cast(int32_t(p.col));
+        }
+
+        const uint32_t cm = uint32_t(std::min(range * 100.0, 65535.0));
+        // Minimum range wins: several source cells can land in one binned cell,
+        // and clearing to the nearest of them never over-clears.
+        if (out.cells[i].status != uint8_t(Status::Hit) || cm < out.cells[i].rangeCm)
+            out.cells[i].rangeCm = uint16_t(cm);
+        out.cells[i].status = uint8_t(Status::Hit);
+
+        Accum& ra = rowAcc[p.row];
+        ra.sumEl += el; ++ra.n;
+        Accum& ca = colAcc[p.col];
+        ca.sumAzX += std::cos(az); ca.sumAzY += std::sin(az); ++ca.n;
+    }
+    std::vector<PointRec>().swap(pts);      // 113 MB on a big scan; let it go
 
     // Measure the angular mapping: one elevation per row, one azimuth per column.
     std::vector<uint64_t> rowN(out.rows, 0), colN(out.cols, 0);

@@ -66,6 +66,11 @@ uint8_t evidenceAt(const SetupView& s, const Params& p,
 
     double x = wx, y = wy, z = wz;
     s.worldToScanner.apply(x, y, z);
+    // Into the instrument's own frame, which is not the stored one when the
+    // tripod was not level — and it never quite is. The image's cells were built
+    // about this frame, so the direction asked for and the direction stored agree.
+    // See RangeImage::tilt.
+    s.image->toInstrument(x, y, z);
 
     double az, el, r;
     rimg::toSpherical(x, y, z, az, el, r);

@@ -1113,8 +1113,157 @@ static void testWobblyRowsAreStillUsable() {
     CHECK(wrong == 0, "and every sampled direction reaches its own cell");
 }
 
+// A scanner that was not quite level, which is every scanner.
+//
+// This is the fault that took a real job off the air, and no fixture written for
+// this module could have caught it: every one of them stood the instrument
+// perfectly upright, and on a perfectly upright instrument the bug does not exist.
+//
+// A terrestrial scanner has a dual-axis compensator and exports its points already
+// levelled. So the raster's rows are lines of constant elevation about the
+// INSTRUMENT'S axis while the points are stored about the vertical, and the two
+// differ by however the tripod was standing. A row's elevation then runs as
+// tau*cos(azimuth - phi) — one cycle per turn — and a row stops being a direction.
+// Measured on five real setups of one job: 0.55, 1.94, 0.97, 2.49 and 1.02 degrees
+// in five different directions, accounting for 80 to 98 per cent of how much
+// elevation varied inside a row.
+//
+// It is a rotation, so it leaves no parallax on edges and the merged cloud is
+// perfect — the manufacturer applied it correctly. It is invisible to everything
+// except something that goes looking for the raster.
+static void testInstrumentNotLevel() {
+    std::printf("range image: an instrument that was not quite level\n");
+
+    const int rows = 400, cols = 900;
+    const double elLo = -1.2, elStep = 2.3 / double(rows);
+    const double dAz  = kTau / double(cols);
+    const double tiltDeg = 2.0, tiltTowardDeg = 35.0;
+    const double tau = tiltDeg * kPi / 180.0, phi = tiltTowardDeg * kPi / 180.0;
+
+    auto write = [&](const std::string& path, bool tilted) {
+        fixture::Scan sc;
+        sc.name = "tilted";
+        sc.hasPose = true;
+        sc.q[0] = 1.0;
+        sc.hasIndexBounds = true;
+        sc.rowMin = 0; sc.rowMax = rows - 1;
+        sc.colMin = 0; sc.colMax = cols - 1;
+        sc.fields = {
+            {"cartesianX",  e57::FieldType::FloatDouble},
+            {"cartesianY",  e57::FieldType::FloatDouble},
+            {"cartesianZ",  e57::FieldType::FloatDouble},
+            {"rowIndex",    e57::FieldType::Integer, 0, rows - 1},
+            {"columnIndex", e57::FieldType::Integer, 0, cols - 1},
+        };
+        sc.data.assign(5, {});
+        // The rotation the compensator applied: about the horizontal axis
+        // perpendicular to the lean, which is what turns instrument elevations
+        // into levelled ones.
+        const double ux = -std::sin(phi), uy = std::cos(phi);
+        const double c = std::cos(-tau), s = std::sin(-tau), C = 1 - c;
+        const double R[9] = {
+            c + ux * ux * C,  ux * uy * C,      uy * s,
+            uy * ux * C,      c + uy * uy * C, -ux * s,
+            -uy * s,          ux * s,           c,
+        };
+        for (int r = 0; r < rows; ++r) {
+            const double el = elLo + elStep * double(r), ce = std::cos(el);
+            for (int col = 0; col < cols; ++col) {
+                const double az = dAz * double(col);
+                const double rr = 6.0 + 3.0 * std::sin(2.0 * az) + std::cos(3.0 * el);
+                double dx = ce * std::cos(az), dy = ce * std::sin(az), dz = std::sin(el);
+                if (tilted) {
+                    const double a = dx, b = dy, cc2 = dz;
+                    dx = R[0] * a + R[1] * b + R[2] * cc2;
+                    dy = R[3] * a + R[4] * b + R[5] * cc2;
+                    dz = R[6] * a + R[7] * b + R[8] * cc2;
+                }
+                sc.data[0].push_back(rr * dx);
+                sc.data[1].push_back(rr * dy);
+                sc.data[2].push_back(rr * dz);
+                sc.data[3].push_back(double(r));
+                sc.data[4].push_back(double(col));
+            }
+        }
+        return fixture::write(path, {sc}, 512);
+    };
+
+    // Level: nothing to correct, and it must not invent a correction.
+    {
+        const std::string p = tmpPath("level");
+        CHECK(write(p, false), "level fixture written");
+        e57::Reader rd;
+        std::string err;
+        CHECK(rd.open(p, err), err.empty() ? "opened" : err.c_str());
+        rimg::Options opt;
+        rimg::RangeImage img;
+        CHECK(rimg::build(rd, 0, opt, img, err), err.empty() ? "built" : err.c_str());
+        CHECK(img.tiltDeg < 0.01, "a level instrument is measured as level");
+        CHECK(img.map.valid && img.map.roundTripFraction > 0.99,
+              "and its raster round-trips");
+    }
+
+    // Two degrees of lean, which is an ordinary tripod on a driveway.
+    const std::string p = tmpPath("tilted");
+    CHECK(write(p, true), "tilted fixture written");
+    e57::Reader rd;
+    std::string err;
+    CHECK(rd.open(p, err), err.empty() ? "opened" : err.c_str());
+    rimg::Options opt;
+    rimg::RangeImage img;
+    const bool built = rimg::build(rd, 0, opt, img, err);
+    CHECK(built, err.empty() ? "built" : err.c_str());
+    if (!built) return;
+
+    CHECK(std::fabs(img.tiltDeg - tiltDeg) < 0.05, "the lean is recovered");
+    double dPhi = img.tiltTowardDeg - tiltTowardDeg;
+    dPhi -= 360.0 * std::round(dPhi / 360.0);
+    CHECK(std::fabs(dPhi) < 2.0, "and the direction it leaned in");
+    CHECK(img.tiltExplained > 0.9,
+          "and it accounts for essentially all of the within-row spread");
+
+    // The point of it: without this the raster is not a raster.
+    CHECK(img.map.valid, "the mapping is accepted");
+    CHECK(img.map.roundTripFraction > 0.99,
+          "and the scan's own points reach their own cells");
+
+    // And a lookup in a known direction reaches the cell that measured it — with
+    // the direction expressed the way the world sees it, levelled, since that is
+    // what a voxel's position gives.
+    const double ux = -std::sin(phi), uy = std::cos(phi);
+    const double c = std::cos(-tau), s = std::sin(-tau), C = 1 - c;
+    const double R[9] = {
+        c + ux * ux * C,  ux * uy * C,      uy * s,
+        uy * ux * C,      c + uy * uy * C, -ux * s,
+        -uy * s,          ux * s,           c,
+    };
+    int wrong = 0;
+    for (int r = 20; r < rows - 20; r += 7) {
+        const double el = elLo + elStep * double(r), ce = std::cos(el);
+        for (int col = 0; col < cols; col += 11) {
+            const double az = dAz * double(col);
+            const double a = ce * std::cos(az), b = ce * std::sin(az), cc2 = std::sin(el);
+            const double lx = R[0] * a + R[1] * b + R[2] * cc2;
+            const double ly = R[3] * a + R[4] * b + R[5] * cc2;
+            const double lz = R[6] * a + R[7] * b + R[8] * cc2;
+            double laz, lel, lr;
+            rimg::toSpherical(lx, ly, lz, laz, lel, lr);
+            // What evidenceAt does: into the instrument's frame, then look up.
+            double ix = lx, iy = ly, iz = lz;
+            img.toInstrument(ix, iy, iz);
+            double iaz, iel, ir;
+            rimg::toSpherical(ix, iy, iz, iaz, iel, ir);
+            uint32_t gr, gc;
+            if (!img.cellOf(iaz, iel, gr, gc)) { ++wrong; continue; }
+            if (int(gr) != r || int(gc) != col) ++wrong;
+        }
+    }
+    CHECK(wrong == 0, "every levelled direction reaches the cell that measured it");
+}
+
 int main() {
     std::printf("E57 Coverage Checker — range image tests\n\n");
+    testInstrumentNotLevel();
     testWobblyRowsAreStillUsable();
     testBlindConeFromTheCorpus();
     testGridPath();

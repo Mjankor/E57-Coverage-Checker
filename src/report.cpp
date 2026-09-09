@@ -303,6 +303,21 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                     }
                     // How far a straight line would have been from the measured
                     // tables. Reported, and no longer used: the tables are.
+                    // How the tripod was standing. Not a curiosity: until this is
+                    // taken out, a row is not a line of constant elevation and no
+                    // cell-to-direction mapping exists to be measured at all.
+                    if (img.tiltDeg > 0.001) {
+                        o.add("      levelling : the instrument leaned %.3f deg toward azimuth "
+                              "%.1f deg\n"
+                              "                  (%.1f%% of how much elevation varied inside a "
+                              "row; taken out before\n                  the raster was built, "
+                              "since a row is only a direction about the\n"
+                              "                  instrument's own axis)\n",
+                              img.tiltDeg, img.tiltTowardDeg, 100.0 * img.tiltExplained);
+                    } else {
+                        o.add("      levelling : the instrument was level; no correction "
+                              "needed\n");
+                    }
                     o.add("      mapping   : measured tables, used directly\n"
                                 "                  a straight line through them would sit "
                                 "%.1f rows / %.1f cols out\n"
@@ -1079,6 +1094,9 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
         o.add("      setup at (%.3f, %.3f, %.3f)   raster %u x %u   mapping %s\n",
               fwd.t[0], fwd.t[1], fwd.t[2], im.rows, im.cols,
               im.map.valid ? "accepted" : "*** REFUSED — every lookup returns nothing ***");
+        if (im.tiltDeg > 0.001)
+            o.add("      levelling: leaned %.3f deg toward %.1f deg, %.1f%% of the within-row "
+                  "elevation spread\n", im.tiltDeg, im.tiltTowardDeg, 100.0 * im.tiltExplained);
         if (!im.map.valid) ++failures;
         // The reason, which this left out and should never have: "refused" on its
         // own sends you off to run something else to find out why.

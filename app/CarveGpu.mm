@@ -462,24 +462,37 @@ static NSString *g_unavailable = @"not initialised";
         if (!img.buffer || !img.rowOfEl || !img.colOfAz) { return NO; }   // nothing committed yet
 
         const viewer::Rigid &R = s.worldToScanner;
+        const rimg::RangeImage &im = *s.image;
+        // The instrument's own frame folded straight into the rotation, so the
+        // kernel needs no knowledge of it and costs nothing for it. A tripod is
+        // never quite level, and the image's cells are built about the axis it
+        // actually had — see rimg::RangeImage::tilt.
+        double M[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                M[3 * r + c] = im.tilt[3 * r + 0] * R.R[0 + c] +
+                               im.tilt[3 * r + 1] * R.R[3 + c] +
+                               im.tilt[3 * r + 2] * R.R[6 + c];
         GpuSetup gs{};
-        gs.R0x = float(R.R[0]); gs.R0y = float(R.R[1]); gs.R0z = float(R.R[2]);
-        gs.R1x = float(R.R[3]); gs.R1y = float(R.R[4]); gs.R1z = float(R.R[5]);
-        gs.R2x = float(R.R[6]); gs.R2y = float(R.R[7]); gs.R2z = float(R.R[8]);
-        // R * tileOrigin + t, in double, then cast: the tile origin can be at
-        // UTM magnitudes and this is the one product that must not be formed in
+        gs.R0x = float(M[0]); gs.R0y = float(M[1]); gs.R0z = float(M[2]);
+        gs.R1x = float(M[3]); gs.R1y = float(M[4]); gs.R1z = float(M[5]);
+        gs.R2x = float(M[6]); gs.R2y = float(M[7]); gs.R2z = float(M[8]);
+        // M * tileOrigin + tilt * t, in double, then cast: the tile origin can be
+        // at UTM magnitudes and this is the one product that must not be formed in
         // float.
         for (int r = 0; r < 3; ++r) {
-            const double v = R.R[3 * r + 0] * out.origin[0] +
-                             R.R[3 * r + 1] * out.origin[1] +
-                             R.R[3 * r + 2] * out.origin[2] + R.t[r];
+            const double tr = im.tilt[3 * r + 0] * R.t[0] +
+                              im.tilt[3 * r + 1] * R.t[1] +
+                              im.tilt[3 * r + 2] * R.t[2];
+            const double v = M[3 * r + 0] * out.origin[0] +
+                             M[3 * r + 1] * out.origin[1] +
+                             M[3 * r + 2] * out.origin[2] + tr;
             (&gs.tOffX)[r] = float(v);
         }
         gs.originX = float(s.origin[0] - out.origin[0]);
         gs.originY = float(s.origin[1] - out.origin[1]);
         gs.originZ = float(s.origin[2] - out.origin[2]);
 
-        const rimg::RangeImage &im = *s.image;
         gs.elLo          = float(im.map.elLo);
         gs.elBin         = float(im.map.elBin);
         gs.azLo          = float(im.map.azLo);

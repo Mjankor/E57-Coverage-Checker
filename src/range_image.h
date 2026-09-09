@@ -427,6 +427,42 @@ struct RangeImage {
     Mapping     map;
     Diagnostics diag;
 
+    // The rotation from the stored frame into the instrument's own.
+    //
+    // A terrestrial scanner has a dual-axis compensator and exports its points
+    // already levelled. So the raster's rows are lines of constant elevation about
+    // the INSTRUMENT'S axis, while the points are stored about the vertical, and
+    // the two differ by however the tripod happened to be standing. A row's
+    // elevation then runs as tau*cos(azimuth - phi) — one cycle per turn — and a
+    // row stops being a direction.
+    //
+    // Measured on five real setups of one job: 0.55, 1.94, 0.97, 2.49 and 1.02
+    // degrees, in five different directions, accounting for 80 to 98 per cent of
+    // the spread of elevation within a row. Tripod-on-a-driveway numbers, different
+    // every time the instrument was moved, which is what says it is the setup and
+    // not the instrument.
+    //
+    // It is a ROTATION, so it leaves no parallax on edges and is invisible in the
+    // merged cloud: the manufacturer applied it correctly and the cloud is right.
+    // It is only visible to something that goes looking for the raster. It also
+    // accounts for the azimuth errors, which a tilt moves by tau*tan(elevation) —
+    // nothing at the horizon, and tens of columns near the poles.
+    //
+    // Identity when the instrument was level, or when the fit does not improve on
+    // one, so a file that needs no correction gets none.
+    double    tilt[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    double    tiltDeg = 0.0;         // amplitude, for reporting
+    double    tiltTowardDeg = 0.0;   // the azimuth it leans toward
+    double    tiltExplained = 0.0;   // share of the within-row spread it accounts for
+
+    // Turns a stored-frame direction into the instrument's own frame.
+    void toInstrument(double& x, double& y, double& z) const {
+        const double a = x, b = y, c = z;
+        x = tilt[0] * a + tilt[1] * b + tilt[2] * c;
+        y = tilt[3] * a + tilt[4] * b + tilt[5] * c;
+        z = tilt[6] * a + tilt[7] * b + tilt[8] * c;
+    }
+
     // The setup's position and orientation in the file frame. Voxels are
     // transformed into the scanner frame with the inverse of this.
     e57::Pose pose;
