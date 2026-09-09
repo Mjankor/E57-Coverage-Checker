@@ -20,6 +20,79 @@ namespace {
 // review get their own and this becomes a lookup.
 constexpr uint8_t kUnknownR = 255, kUnknownG = 64, kUnknownB = 96;
 
+// The face directions, in the order visibleFaces reports them.
+const int32_t kFaceDirs[6][3] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
+
+// Shading, so a wall of identical dots reads as a shape.
+//
+// A frontier voxel is drawn as one flat-coloured sprite, and a hundred thousand
+// of them in one colour is a silhouette with no interior: you can see where the
+// unobserved volume is, and nothing at all about its form. Every part of the fix
+// below is free at collection time, which is why it is done here rather than in
+// the renderer — no depth pass, no normals buffer, no second geometry pass.
+//
+// Two cues, because they answer different questions:
+//
+//   Form. visibleFaces already looked at the six face neighbours to decide this
+//   voxel is on the frontier; the visible ones summed give the outward normal,
+//   and a fixed world-space light on that normal turns the blob into a surface
+//   with lit and shaded sides. World-space rather than a headlight on purpose:
+//   the shading then stays put as the model turns, which is what lets you read
+//   which way a face points instead of everything moving together.
+//
+//   Height. A ramp on z within the domain, so a slab seen edge-on still has a
+//   top and a bottom. On its own it is what was asked for and it is weak; under
+//   the lighting it stops distant unrelated surfaces reading as one mass.
+//
+// The base colour stays the unknown red in all cases — this modulates it, it
+// does not replace it, because the colour is what says these voxels are the
+// answer rather than the scene.
+enum class Shade : uint8_t { Flat, Lit, Height, LitAndHeight };
+
+// The light. Above, and off to one side, so no principal face of a voxel is left
+// exactly unlit and none is at full brightness — a light down any axis makes two
+// of the six faces identical and flattens the very thing this is for.
+constexpr double kLight[3] = {-0.35, -0.50, 0.79};
+// How dark a fully turned-away face goes. Not zero: an unlit face still has to
+// read as present, and these are the deliverable, not scenery.
+constexpr double kAmbient = 0.42;
+
+// The lit colour for one frontier voxel.
+void shadeFrontier(uint8_t faces, double heightT, Shade mode,
+                   uint8_t& r, uint8_t& g, uint8_t& b) {
+    double lit = 1.0;
+    if (mode == Shade::Lit || mode == Shade::LitAndHeight) {
+        double n[3] = {0, 0, 0};
+        for (int i = 0; i < 6; ++i) {
+            if (!(faces & (1u << i))) continue;
+            for (int k = 0; k < 3; ++k) n[k] += kFaceDirs[i][k];
+        }
+        const double len = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+        // A voxel with opposite faces both visible — a one-voxel film between two
+        // observed regions — sums to nothing and has no normal to speak of. It
+        // gets flat ambient rather than an arbitrary direction.
+        if (len > 1e-9) {
+            double d = 0;
+            for (int k = 0; k < 3; ++k) d += (n[k] / len) * kLight[k];
+            lit = kAmbient + (1.0 - kAmbient) * std::max(0.0, d);
+        } else {
+            lit = kAmbient + 0.5 * (1.0 - kAmbient);
+        }
+    }
+    double rr = kUnknownR * lit, gg = kUnknownG * lit, bb = kUnknownB * lit;
+    if (mode == Shade::Height || mode == Shade::LitAndHeight) {
+        // Low is the base red, high runs toward yellow: one hue sweep, so it
+        // stays legible to the colour-blind and stays obviously the unknown set
+        // rather than turning into a rainbow that competes with the point cloud.
+        const double t = std::min(1.0, std::max(0.0, heightT));
+        gg += (215.0 - kUnknownG) * t * lit;
+        bb += (40.0  - kUnknownB) * t * lit;
+    }
+    r = uint8_t(std::min(255.0, std::max(0.0, rr)));
+    g = uint8_t(std::min(255.0, std::max(0.0, gg)));
+    b = uint8_t(std::min(255.0, std::max(0.0, bb)));
+}
+
 std::string fmt(const char* f, ...) {
     char buf[512];
     va_list ap;
@@ -31,22 +104,36 @@ std::string fmt(const char* f, ...) {
 
 } // namespace
 
-// A voxel is on the observed frontier when a face neighbour is visible. Faces
-// only, not the 26-neighbourhood: a diagonal touch is a shared edge or corner,
-// which is not a line of sight passing between the two.
-bool touchesVisible(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
-    const int32_t d[6][3] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
-    for (const auto& o : d) {
-        const int64_t nx = int64_t(x) + o[0], ny = int64_t(y) + o[1], nz = int64_t(z) + o[2];
+// Which of a voxel's six face neighbours are visible, as a bit per face.
+//
+// The frontier test only needs to know whether any of them is, but the same six
+// lookups also say which way the frontier faces — and that is a surface normal,
+// for nothing. Summing the directions of the visible faces points from the
+// unobserved voxel out into the space that was seen, which is the outward normal
+// of the shadow's mouth. It is what makes the drawn result readable as a shape
+// rather than as a fog of identical dots. See shadeFrontier.
+//
+// Faces only, not the 26-neighbourhood: a diagonal touch is a shared edge or
+// corner, which is not a line of sight passing between the two.
+uint8_t visibleFaces(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
+    uint8_t mask = 0;
+    for (int i = 0; i < 6; ++i) {
+        const int64_t nx = int64_t(x) + kFaceDirs[i][0];
+        const int64_t ny = int64_t(y) + kFaceDirs[i][1];
+        const int64_t nz = int64_t(z) + kFaceDirs[i][2];
         // The apron guarantees these are in range for every interior voxel, so
         // a tile seam cannot change the answer. Without it this bounds check
         // would silently make the frontier depend on the tiling.
         if (nx < 0 || ny < 0 || nz < 0 ||
             nx >= int64_t(t.dim) || ny >= int64_t(t.dim) || nz >= int64_t(t.dim)) continue;
         if (t.state[t.index(uint32_t(nx), uint32_t(ny), uint32_t(nz))] & carve::kVisible)
-            return true;
+            mask |= uint8_t(1u << i);
     }
-    return false;
+    return mask;
+}
+
+bool touchesVisible(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
+    return visibleFaces(t, x, y, z) != 0;
 }
 
 // A position hash, used to pick which voxels survive the display cap. It has to
@@ -82,7 +169,13 @@ struct Collector {
     uint64_t qualified = 0;
     double   origin[3] = {0, 0, 0};
 
-    void add(const double centre[3], const int64_t gi[3]) {
+    // The shading needs the whole domain's height range before it can place a
+    // voxel within it, so these are set once, before collection starts, for the
+    // same reason `origin` is.
+    Shade  shade = Shade::LitAndHeight;
+    double zLo = 0, zSpan = 0;
+
+    void add(const double centre[3], const int64_t gi[3], uint8_t faces) {
         ++qualified;
         const uint64_t h = voxelHash(gi[0], gi[1], gi[2]);
         if (h >= threshold) return;
@@ -91,7 +184,13 @@ struct Collector {
         p.x = float(centre[0] - origin[0]);
         p.y = float(centre[1] - origin[1]);
         p.z = float(centre[2] - origin[2]);
-        p.r = kUnknownR; p.g = kUnknownG; p.b = kUnknownB; p.a = 255;
+        if (shade == Shade::Flat) {
+            p.r = kUnknownR; p.g = kUnknownG; p.b = kUnknownB;
+        } else {
+            shadeFrontier(faces, zSpan > 0 ? (centre[2] - zLo) / zSpan : 0.5,
+                          shade, p.r, p.g, p.b);
+        }
+        p.a = 255;
         p.scanId = 0;
         out.push_back(p);
         keys.push_back(h);
@@ -414,6 +513,25 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     if (opt.carver) nthreads = 1;
     nthreads = unsigned(std::min<uint64_t>(nthreads, std::max<uint64_t>(1, plannedTiles)));
 
+    // The height range the ramp spans. The domain when it is bounded — that is
+    // the region being asked about, so the ramp uses all of its contrast on the
+    // part of the site anyone is looking at — and the tiles' own extent when it
+    // is not. Fixed before collection for the same reason `origin` is: with
+    // several workers, anything derived as voxels arrive is a race.
+    double shadeZLo = 0, shadeZSpan = 0;
+    if (p.domain.kind == carve::Domain::Kind::Box) {
+        shadeZLo = p.domain.lo[2];
+        shadeZSpan = p.domain.hi[2] - p.domain.lo[2];
+    } else if (!keys.empty()) {
+        int64_t zlo = keys[0].z, zhi = keys[0].z;
+        for (const carve::TileKey& k : keys) {
+            zlo = std::min(zlo, k.z);
+            zhi = std::max(zhi, k.z);
+        }
+        shadeZLo   = double(zlo) * p.tileMetres();
+        shadeZSpan = double(zhi - zlo + 1) * p.tileMetres();
+    }
+
     // Per worker: its own statistics, its own collector, its own tile scratch.
     // Nothing is shared but the tile cursor and the progress lock.
     struct Worker {
@@ -435,6 +553,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         // handed out dynamically, so in practice a worker holds about its share.
         w.col.cap = opt.displayCap;
         for (int k = 0; k < 3; ++k) w.col.origin[k] = origin[k];
+        w.col.shade = Shade(opt.shading);
+        w.col.zLo = shadeZLo; w.col.zSpan = shadeZSpan;
     }
 
     std::atomic<uint64_t> cursor{0};
@@ -513,12 +633,15 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                             // observed it. Anything else is either outside the
                             // question or was seen by something.
                             if (tile.state[tile.index(x, y, z)] != carve::kReachable) continue;
-                            if (!opt.solid && !touchesVisible(tile, x, y, z)) continue;
+                            // The same six lookups decide the frontier and give
+                            // the outward normal — see visibleFaces.
+                            const uint8_t faces = visibleFaces(tile, x, y, z);
+                            if (!opt.solid && !faces) continue;
                             double c[3];
                             tile.centre(x, y, z, p.voxelSize, c);
                             int64_t gi[3];
                             tile.globalIndex(x, y, z, gi);
-                            w.col.add(c, gi);
+                            w.col.add(c, gi, faces);
                         }
                     }
                 }
@@ -549,6 +672,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     // whatever order the tiles finished in.
     Collector col;
     col.cap = opt.displayCap;
+    col.shade = Shade(opt.shading);
+    col.zLo = shadeZLo; col.zSpan = shadeZSpan;
     for (int k = 0; k < 3; ++k) col.origin[k] = origin[k];
     for (Worker& w : workers) {
         out.stats.voxels     += w.stats.voxels;
@@ -582,7 +707,9 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                     double c[3];
                     grid.centre(x, y, z, c);
                     const int64_t gi[3] = {grid.lo[0] + x, grid.lo[1] + y, grid.lo[2] + z};
-                    col.add(c, gi);
+                    // The connectivity grid answers "observed", not "visible", so
+                    // its faces are found here rather than by visibleFaces.
+                    col.add(c, gi, voids::observedFaces(grid, x, y, z));
                 }
             }
         }

@@ -91,6 +91,12 @@ inline bool isEnclosedVoid(uint8_t bits) {
 
 // True when the voxel touches something a scanner observed. An enclosed void's
 // surface is where it meets the geometry that hides it.
+// Which of a voxel's six face neighbours were observed, a bit per face, in the
+// order vis::kFaceDirs lists them. The mouth of a void faces the observed space
+// beside it, so these bits are also its outward normal — which is what the
+// drawn result is shaded by. See vis::shadeFrontier.
+uint8_t observedFaces(const Grid& g, uint32_t x, uint32_t y, uint32_t z);
+
 bool touchesObserved(const Grid& g, uint32_t x, uint32_t y, uint32_t z);
 
 } // namespace voids

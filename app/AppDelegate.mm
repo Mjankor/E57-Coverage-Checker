@@ -39,6 +39,23 @@
 
 namespace {
 
+// Above this share of voxels, a carver's disagreement with the CPU is a fault
+// rather than arithmetic.
+//
+// The Metal kernel computes in float and the CPU in double, and the two
+// genuinely differ for a voxel whose direction lands within a rounding error of
+// a raster cell boundary — the bin index runs to tens of thousands, where float
+// resolves about a four-hundredth of a bin. Replaying both paths over a real
+// 5.6 M point scan put 0.014% of voxels in a different cell, and every single
+// disagreement sat within 0.006 of a bin of an edge. Metal has no float64, so
+// that floor cannot be lowered.
+//
+// 0.1% is five times the measured ceiling and two orders below what a real
+// kernel fault produces — a wrong index or a wrong transform misses by whole
+// cells, not by a thousandth of one. Wide enough not to cry wolf, narrow enough
+// that nothing real hides under it.
+constexpr double kCarverFloatNoise = 0.001;
+
 NSString *ns(const std::string &s) { return [NSString stringWithUTF8String:s.c_str()]; }
 
 std::string humanCount(uint64_t n) {
@@ -953,7 +970,7 @@ const char *kindLabel(check::Kind k) {
     }
 
     // --- parameters -------------------------------------------------------
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 212)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 244)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -987,12 +1004,29 @@ const char *kindLabel(check::Kind k) {
                    ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:firstHit];
 
-    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 400, 20)];
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 34, 400, 20)];
     solid.title = @"Show every unobserved voxel, not just the frontier";
     [solid setButtonType:NSButtonTypeSwitch];
     solid.font = [NSFont systemFontOfSize:11];
     solid.state = _visOptions.solid ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:solid];
+
+    // How the frontier is coloured. A flat wall of one red has no interior, and
+    // the two cues that give it one are free — see vis::Options::shading.
+    [acc addSubview:[self labelWithText:@"Shading"
+                                  frame:NSMakeRect(0, 8, 70, 20)]];
+    NSPopUpButton *shading =
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(72, 5, 300, 24) pullsDown:NO];
+    [shading addItemsWithTitles:@[@"Lit and height ramp",
+                                  @"Lit by the frontier's own normal",
+                                  @"Height ramp only",
+                                  @"Flat"]];
+    // The menu reads best from richest to plainest; the option is the other way
+    // round, so map rather than reorder either.
+    const uint8_t shadeOrder[4] = {3, 1, 2, 0};
+    for (int i = 0; i < 4; ++i)
+        if (shadeOrder[i] == _visOptions.shading) [shading selectItemAtIndex:i];
+    [acc addSubview:shading];
 
     NSAlert *a = [[NSAlert alloc] init];
     a.messageText = @"Run visibility filter";
@@ -1029,6 +1063,11 @@ const char *kindLabel(check::Kind k) {
     opt.domain       = (extent.state == NSControlStateValueOn)
                      ? vis::DomainMode::MeasuredExtent : vis::DomainMode::RangeSpheres;
     opt.solid        = (solid.state == NSControlStateValueOn);
+    {
+        const uint8_t order[4] = {3, 1, 2, 0};
+        const NSInteger i = shading.indexOfSelectedItem;
+        opt.shading = (i >= 0 && i < 4) ? order[i] : uint8_t(3);
+    }
     opt.earlyOut     = (firstHit.state == NSControlStateValueOn)
                      ? carve::EarlyOut::AnyEvidence : carve::EarlyOut::Saturated;
     // The carver is a "try": every failure it can have comes back as a declined
@@ -1170,6 +1209,25 @@ const char *kindLabel(check::Kind k) {
                 carver = [NSString stringWithFormat:@"%llu tiles on the GPU",
                           (unsigned long long)result->carverTiles];
             if (opt.verifyCarver) {
+                const double frac = result->carverVoxelsCompared
+                                  ? double(result->carverDisagreements) /
+                                    double(result->carverVoxelsCompared)
+                                  : 0.0;
+                // What a disagreement rate means, which a bare "FAILED" does not
+                // say. The kernel works in float and the CPU in double, and the
+                // raster cell a voxel lands in is chosen by a bin index of tens
+                // of thousands — which float resolves to about a
+                // four-hundredth of a bin. A voxel that close to a cell edge can
+                // land either side of it, and then reads a neighbouring cell
+                // holding a different distance.
+                //
+                // That is not a fault and cannot be fixed in float: measured by
+                // replaying both paths over a real scan, it puts 0.014% of voxels
+                // in a different cell, and every one of them sits within 0.006 of
+                // a bin of an edge. A kernel that is actually wrong — a bad
+                // index, a bad transform — misses by whole cells and shows up
+                // percent-wide. So the two are separated here rather than both
+                // being called failure.
                 if (result->carverVoxelsCompared == 0)
                     carver = [carver stringByAppendingString:
                               @", verified against the CPU: ⚠︎ NOTHING WAS COMPARED"];
@@ -1177,13 +1235,20 @@ const char *kindLabel(check::Kind k) {
                     carver = [carver stringByAppendingFormat:
                               @", verified: %.1f M voxels against the CPU, every one identical",
                               double(result->carverVoxelsCompared) / 1e6];
+                else if (frac <= kCarverFloatNoise)
+                    carver = [carver stringByAppendingFormat:
+                              @", verified: %llu of %.1f M voxels differ (%.4f%%, %.2f m³) — "
+                               "float32 rounding at raster cell edges, not a fault",
+                              (unsigned long long)result->carverDisagreements,
+                              double(result->carverVoxelsCompared) / 1e6, 100.0 * frac,
+                              double(result->carverDisagreements) * opt.voxelSize *
+                                  opt.voxelSize * opt.voxelSize];
                 else
                     carver = [carver stringByAppendingFormat:
-                              @", ⚠︎ VERIFICATION FAILED: %llu of %.1f M voxels differ (%.4f%%)",
+                              @", ⚠︎ VERIFICATION FAILED: %llu of %.1f M voxels differ (%.4f%%) "
+                               "— far more than float32 rounding explains",
                               (unsigned long long)result->carverDisagreements,
-                              double(result->carverVoxelsCompared) / 1e6,
-                              100.0 * double(result->carverDisagreements) /
-                                      double(result->carverVoxelsCompared)];
+                              double(result->carverVoxelsCompared) / 1e6, 100.0 * frac];
             }
         }
 

@@ -21,6 +21,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <cstdlib>
 #include <memory>
 #include <set>
@@ -741,6 +742,85 @@ static void testImageBudgetAndWhatCoarseningCosts() {
           "having cleared less space than the full-resolution rasters did");
 }
 
+// Shading has to vary with the shape, or it is not telling anyone anything.
+//
+// The failure this guards is not a crash, it is a picture that looks shaded and
+// is not: a normal computed from the wrong bits, a ramp over a zero height
+// range, a light pointing down an axis so that whole faces coincide. All of
+// those still produce colours, and all of them still produce a flat red blob.
+// So the test asks for variety, and asks for it in the two cues separately.
+static void testShadingVariesWithShapeAndHeight() {
+    std::printf("shaded voxels, so the frontier reads as a shape\n");
+
+    const std::string path = tmpPath("shade");
+    CHECK(fixture::write(path, {roomScan("west", -3.0, 2.0, 1.5),
+                                roomScan("east",  3.0, 2.0, 1.5)}, 512),
+          "fixture written");
+
+    vis::Options opt;
+    opt.voxelSize  = 0.25;
+    opt.maxRange   = 8.0;
+    opt.tileVoxels = 32;
+
+    auto run = [&](uint8_t shading, vis::Result& r) {
+        vis::Options o = opt;
+        o.shading = shading;
+        std::string err;
+        CHECK(vis::run({path}, o, nullptr, r, err), err.empty() ? "ran" : err.c_str());
+    };
+    // How many distinct colours came back, and how much the green channel — the
+    // one both cues move — spreads.
+    auto spread = [](const vis::Result& r, size_t& distinct, int& gLo, int& gHi) {
+        std::map<uint32_t, int> seen;
+        gLo = 255; gHi = 0;
+        for (const lod::StorePoint& p : r.voxels) {
+            seen[(uint32_t(p.r) << 16) | (uint32_t(p.g) << 8) | p.b] = 1;
+            gLo = std::min(gLo, int(p.g));
+            gHi = std::max(gHi, int(p.g));
+        }
+        distinct = seen.size();
+    };
+
+    vis::Result flat, lit, height, both;
+    run(0, flat); run(1, lit); run(2, height); run(3, both);
+    if (flat.voxels.empty()) return;
+
+    size_t nFlat, nLit, nHeight, nBoth;
+    int loF, hiF, loL, hiL, loH, hiH, loB, hiB;
+    spread(flat,   nFlat,   loF, hiF);
+    spread(lit,    nLit,    loL, hiL);
+    spread(height, nHeight, loH, hiH);
+    spread(both,   nBoth,   loB, hiB);
+
+    CHECK(nFlat == 1, "flat really is one colour, so the comparison means something");
+    CHECK(nLit > 4, "lighting gives the frontier a range of tones");
+    CHECK(nHeight > 4, "the height ramp gives it another");
+    CHECK(nBoth >= nLit && nBoth >= nHeight, "and together they give at least as many");
+    CHECK(hiL - loL > 10, "the lit range is wide enough to see");
+    CHECK(hiH - loH > 10, "and so is the ramp's");
+
+    // Same voxels either way. Shading is a colour, and a colour that changed
+    // which voxels came back would be changing the answer.
+    CHECK(lit.voxels.size() == flat.voxels.size(), "shading does not change how many");
+    CHECK(lit.stats.unknown == flat.stats.unknown, "nor the unobserved count");
+    CHECK(both.stats.unknown == flat.stats.unknown, "under either cue");
+    // As sets: tiles are handed out dynamically, so the order voxels come back
+    // in is the order the workers finished, not something to assert on.
+    auto places = [](const vis::Result& r) {
+        std::vector<std::array<float, 3>> v;
+        v.reserve(r.voxels.size());
+        for (const lod::StorePoint& p : r.voxels) v.push_back({p.x, p.y, p.z});
+        std::sort(v.begin(), v.end());
+        return v;
+    };
+    CHECK(places(lit) == places(both), "and not where they are");
+
+    // Nothing goes black: an unlit face still has to read as present.
+    int darkest = 255;
+    for (const lod::StorePoint& p : both.voxels) darkest = std::min(darkest, int(p.r));
+    CHECK(darkest > 60, "the darkest face is still clearly there");
+}
+
 static void testKnownSceneFromFiveSetups() {
     std::printf("one scene, five setups, answers known in advance\n");
 
@@ -946,6 +1026,7 @@ int main() {
     testRebase();
     testEndToEnd();
     testImageBudgetAndWhatCoarseningCosts();
+    testShadingVariesWithShapeAndHeight();
     testKnownSceneFromFiveSetups();
     testDatumSetupWithNoTranslation();
 

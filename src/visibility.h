@@ -145,6 +145,19 @@ struct Options {
     uint64_t imageBudgetBytes = 48ull << 30;
     uint32_t minImageCells    = 1u << 20;   // never bin below this per scan
 
+    // How the drawn voxels are coloured. 0 flat, 1 lit, 2 height ramp, 3 both.
+    //
+    // Both by default. A frontier drawn in one flat colour is a silhouette with
+    // no interior — you can see where the unobserved volume is and nothing about
+    // its shape — and the two cues that fix it are free: the frontier test
+    // already looked at the six face neighbours, which is an outward normal, and
+    // the domain's height range is known before any voxel is collected. See
+    // shadeFrontier in visibility.cpp.
+    //
+    // A plain integer rather than an enum because it crosses to the app's
+    // options struct and back; the values are vis::Shade.
+    uint8_t  shading = 3;
+
     // Upper bound on voxels handed back for drawing. 6 M is 120 MB as
     // StorePoints, which is a fraction of what the point cloud itself costs.
     uint64_t displayCap = 6ull << 20;
