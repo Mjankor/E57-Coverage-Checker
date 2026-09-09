@@ -1170,6 +1170,11 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     if (gridPath) {
         while ((uint64_t(gridRows + step - 1) / step) * (uint64_t(gridCols + step - 1) / step)
                > opt.maxCells) ++step;
+        // Recorded, because a step above one changes the answer rather than only
+        // the resolution: a coarse cell keeps the nearest of the returns that land
+        // in it, so it clears less space and observed space starts reporting as
+        // unobserved. Whoever reads the result is entitled to know this happened.
+        out.diag.binStep = step;
     }
 
     std::vector<Sample> samples;   // for the angular fallback and the mapping fit

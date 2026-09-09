@@ -670,6 +670,77 @@ static bool writeSetup(const std::string& path, const Setup& s, double far,
 
 } // namespace scene
 
+// The image budget, and what happens when a corpus does not fit it.
+//
+// Two separate things are checked because they fail separately. First the
+// sizing: the default has to admit a real thousand-scan job at full resolution,
+// which is pure arithmetic on a raster size and needs no corpus. Second the
+// reporting: when the budget is genuinely too small the rasters get coarsened,
+// and coarsening is not a blurrier answer but a different one — coarse cells
+// keep the nearest return landing in them, so they clear less space and
+// unobserved volume comes out overstated. A run that did that without saying so
+// hands back a number nobody can interpret, which is the failure this guards.
+static void testImageBudgetAndWhatCoarseningCosts() {
+    std::printf("the image budget, and saying when a corpus does not fit it\n");
+
+    // A terrestrial raster, and the corpus size this is built for.
+    constexpr uint64_t kRealRasterCells = 2500ull * 5280;      // 13.2 M
+    const vis::Options def;
+    CHECK(vis::imageCellsPerScan(def, 1000) >= kRealRasterCells,
+          "the default budget holds a thousand 2500 x 5280 rasters at full resolution");
+    CHECK(vis::imageCellsPerScan(def, 1) >= kRealRasterCells,
+          "and one of them, obviously");
+    // Not unbounded generosity: it is a budget, and it has to bite eventually.
+    CHECK(vis::imageCellsPerScan(def, 100000) < kRealRasterCells,
+          "a hundred thousand scans does not fit, and is not pretended to");
+    // The floor holds regardless of how the division comes out.
+    vis::Options tiny;
+    tiny.imageBudgetBytes = 1;
+    CHECK(vis::imageCellsPerScan(tiny, 1000) == tiny.minImageCells,
+          "and no scan is ever given less than the floor");
+
+    const std::string path = tmpPath("budget");
+    CHECK(fixture::write(path, {roomScan("west", -3.0, 2.0, 1.5),
+                                roomScan("east",  3.0, 2.0, 1.5)}, 512),
+          "fixture written");
+
+    vis::Options opt;
+    opt.voxelSize  = 0.25;
+    opt.maxRange   = 8.0;
+    opt.tileVoxels = 32;
+
+    vis::Result full;
+    std::string err;
+    CHECK(vis::run({path}, opt, nullptr, full, err), err.empty() ? "ran" : err.c_str());
+    if (full.stats.reachable == 0) return;
+    CHECK(full.setupsBinned == 0, "at the default budget nothing is coarsened");
+    CHECK(full.worstBinStep == 1, "so the step stays at one");
+    CHECK(full.imageCellsAllowed >= uint64_t(kRows) * kCols,
+          "and each raster was allowed more cells than it has");
+
+    // Now a budget too small for these rasters. The floor has to come down with
+    // it, or the floor is what decides and the budget never bites.
+    vis::Options squeezed = opt;
+    squeezed.imageBudgetBytes = 40000;
+    squeezed.minImageCells    = 4000;
+    vis::Result coarse;
+    CHECK(vis::run({path}, squeezed, nullptr, coarse, err),
+          err.empty() ? "ran squeezed" : err.c_str());
+
+    CHECK(coarse.setupsBinned == 2, "both rasters were coarsened");
+    CHECK(coarse.worstBinStep >= 2, "by at least two declared cells per raster cell");
+    CHECK(coarse.imageCellsAllowed < uint64_t(kRows) * kCols,
+          "because the budget allowed fewer cells than the raster has");
+    CHECK(coarse.setupsUsed == full.setupsUsed, "the same setups still contribute");
+    // The cost, stated as a number rather than as a warning about sharpness: a
+    // coarse cell clears to the nearest return in it, so less space is cleared
+    // and more of the site reports as never observed.
+    CHECK(coarse.stats.unknown > full.stats.unknown,
+          "and coarsening overstates the unobserved volume, which is why it is reported");
+    CHECK(coarse.stats.visible < full.stats.visible,
+          "having cleared less space than the full-resolution rasters did");
+}
+
 static void testKnownSceneFromFiveSetups() {
     std::printf("one scene, five setups, answers known in advance\n");
 
@@ -874,6 +945,7 @@ int main() {
     testTouchesVisible();
     testRebase();
     testEndToEnd();
+    testImageBudgetAndWhatCoarseningCosts();
     testKnownSceneFromFiveSetups();
     testDatumSetupWithNoTranslation();
 

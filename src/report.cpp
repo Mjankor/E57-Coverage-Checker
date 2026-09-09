@@ -277,6 +277,15 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                     o.add("      grid      : %u x %u = %.2f M cells, %.1f%% filled\n",
                                 img.rows, img.cols,
                                 double(img.cellCount()) / 1e6, 100.0 * img.diag.fillFraction);
+                    // Coarsening is not a loss of sharpness, it is a change of
+                    // answer: a coarse cell keeps the nearest return landing in
+                    // it, so it clears less space than the cells it replaced.
+                    if (img.diag.binStep > 1)
+                        o.add("                  *** COARSENED %ux: %u x %u declared cells "
+                              "binned into one, to fit the\n                  cell budget. "
+                              "Coarse cells clear less space, so unobserved volume\n"
+                              "                  comes out overstated ***\n",
+                              img.diag.binStep, img.diag.binStep, img.diag.binStep);
                     o.add("      rays      : %llu returns, %llu no-returns "
                                 "(these are what clear space)\n",
                                 (unsigned long long)img.diag.hits,

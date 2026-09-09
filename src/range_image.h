@@ -347,6 +347,13 @@ struct Diagnostics {
     // Returns surround the instrument, so the origin should sit inside their
     // box. When it does not, the frame decision was probably wrong and every
     // lookup is being made from the wrong place.
+    // How many declared grid cells went into one raster cell, per edge: 1 when
+    // the raster was taken at full resolution, and more when it had to be binned
+    // down to fit the cell budget. See vis::Options::imageBudgetBytes for why
+    // this is worth carrying — binning changes the answer, not just its
+    // sharpness, so a run that did it has to be able to say so.
+    uint32_t binStep = 1;
+
     // Cells that received more than one return, and how many of those extra
     // returns were further away than one already held. Together they say which
     // of the two causes is at work: binning several source cells into one gives

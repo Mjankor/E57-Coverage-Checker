@@ -111,8 +111,39 @@ struct Options {
     bool     classifyVoids = false;
     uint64_t classifyBudgetBytes = 6ull << 30;
 
-    uint64_t totalImageCells = 512ull << 20;
-    uint32_t minImageCells   = 1u << 20;   // never bin below this per scan
+    // How much memory the range images may occupy, every scan at once.
+    //
+    // They are the largest thing the filter holds and the only part of it that
+    // grows with the number of scans, so this is the number that decides whether
+    // a corpus fits. 48 GB, for the 64 GB machines this is built for.
+    //
+    // In bytes rather than cells because bytes are what runs out, and because
+    // what a cell costs is an implementation detail — it is three bytes of
+    // raster plus about a third of a byte of pyramid over it, and vis::run does
+    // the conversion.
+    //
+    // Sized from what a real corpus needs: a 2500 x 5280 terrestrial raster is
+    // 13.2 M cells, about 44 MB with its pyramid, and a thousand of them is
+    // 44 GB. So a thousand-scan job runs at full resolution with a little room
+    // left, which is the case this is for.
+    //
+    // What happens when a corpus does NOT fit is why this is generous rather
+    // than cautious. The budget is divided by the number of scans and each
+    // raster is binned down to fit its share — and binning does not blur the
+    // answer, it changes it. A coarse cell keeps the nearest of the several
+    // returns that land in it, because line of sight stops at the first surface,
+    // so a coarse raster clears less space and space that WAS observed starts
+    // reporting as unobserved. Measured on a 36-setup site: squeezing the images
+    // to 1 M cells each took the unobserved volume from zero voxels to 96.8
+    // million, and made the carve three times slower into the bargain. The
+    // previous 512 M cell budget would have given each of a thousand rasters
+    // 512 k cells — half that again.
+    //
+    // Which is a silent wrong answer, so it is no longer silent: Result reports
+    // how many scans were binned and by how much. Set this lower deliberately,
+    // never by accident.
+    uint64_t imageBudgetBytes = 48ull << 30;
+    uint32_t minImageCells    = 1u << 20;   // never bin below this per scan
 
     // Upper bound on voxels handed back for drawing. 6 M is 120 MB as
     // StorePoints, which is a fraction of what the point cloud itself costs.
@@ -147,6 +178,19 @@ struct Result {
     uint64_t     tilesTotal  = 0;
     uint64_t     setupsUsed  = 0;
     uint64_t     scansSkipped = 0;
+    // Whether the images fitted the memory budget at full resolution, and what
+    // was given up if not. `setupsBinned` counts rasters that had to be coarsened
+    // and `worstBinStep` is how far the worst of them went, in declared grid cells
+    // per raster cell per edge.
+    //
+    // Reported because binning is not a loss of sharpness, it is a change of
+    // answer in one direction: coarse cells clear less space, so observed space
+    // reports as unobserved and the unknown volume is overstated. A run that did
+    // this quietly would hand back a number nobody could interpret. See
+    // Options::imageBudgetBytes.
+    uint64_t     imageCellsAllowed = 0;
+    uint64_t     setupsBinned = 0;
+    uint32_t     worstBinStep = 1;
     // Setups whose angular mapping was refused. They are in the corpus and in
     // the setup list, and they contribute nothing at all: every lookup against
     // them is outside the raster. Counted because a scan that silently says
@@ -214,6 +258,13 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
 // needs: the point store picks its own origin and the two have to agree or the
 // voxels float away from the cloud.
 void rebase(const Result& r, const double origin[3], std::vector<lod::StorePoint>& out);
+
+// How many cells each scan's raster may occupy, given the memory budget and how
+// many scans have to share it. What run() uses, exposed so the sizing can be
+// checked against a real raster without reading a corpus to do it: a terrestrial
+// 2500 x 5280 raster is 13.2 M cells, and whether a thousand of them fit is a
+// question about this function and nothing else.
+uint64_t imageCellsPerScan(const Options& opt, uint64_t scanCount);
 
 // Exposed for testing: the frontier rule and the sampling decision.
 bool touchesVisible(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z);

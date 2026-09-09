@@ -135,6 +135,19 @@ struct Collector {
 
 } // namespace
 
+uint64_t imageCellsPerScan(const Options& opt, uint64_t scanCount) {
+    if (scanCount == 0) return opt.minImageCells;
+    // Bytes into cells. A cell is three bytes of raster, and the min/max pyramid
+    // over it adds one node per 4x4 block at every level — five bytes a node,
+    // which summed over the levels is a third of a byte per cell. Kept as thirds
+    // of a byte in integers so there is no rounding to argue about.
+    constexpr uint64_t kThirdBytesPerCell = 10;          // 3 + 1/3, times three
+    uint64_t cells = (opt.imageBudgetBytes / kThirdBytesPerCell * 3) / scanCount;
+    cells = std::max<uint64_t>(cells, opt.minImageCells);
+    // rimg::Options::maxCells is 32 bits, and no raster approaches it.
+    return std::min<uint64_t>(cells, 0xFFFFFFFFull);
+}
+
 void rebase(const Result& r, const double origin[3], std::vector<lod::StorePoint>& out) {
     out = r.voxels;
     const float dx = float(r.origin[0] - origin[0]);
@@ -171,9 +184,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     }
     if (scanCount == 0) { err = "no scans in the selected files"; return false; }
 
-    uint64_t perImage = opt.totalImageCells / scanCount;
-    perImage = std::max<uint64_t>(perImage, opt.minImageCells);
-    perImage = std::min<uint64_t>(perImage, 0xFFFFFFFFull);
+    const uint64_t perImage = imageCellsPerScan(opt, scanCount);
+    out.imageCellsAllowed = perImage;
 
     rimg::Options ro;
     ro.maxRange = opt.maxRange;
@@ -198,6 +210,10 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                 if (!img->map.valid) {
                     ++out.setupsWithoutMapping;
                     if (out.mappingRefusedWhy.empty()) out.mappingRefusedWhy = img->diag.note;
+                }
+                if (img->diag.binStep > 1) {
+                    ++out.setupsBinned;
+                    out.worstBinStep = std::max(out.worstBinStep, img->diag.binStep);
                 }
                 images.push_back(std::move(img));
             } else {
@@ -592,8 +608,19 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     }
 
     std::string note;
-    if (perImage < (32ull << 20))
-        note += fmt("range images binned to %llu cells each; ",
+    // Whether rasters were actually coarsened, not whether the budget looked
+    // tight. This used to fire whenever the per-image allowance fell below 32 M
+    // cells, which is a guess about what probably happened rather than a report of
+    // what did: at a thousand scans the allowance is 15 M cells and a 13.2 M cell
+    // raster fits inside it untouched, so the guess cries coarsening over a run
+    // that coarsened nothing — and the real thing, which overstates the answer,
+    // would read the same as the false alarm.
+    if (out.setupsBinned)
+        note += fmt("%llu of %llu raster(s) COARSENED, up to %u declared cells into one per "
+                    "edge, to fit %llu cells each — coarse cells clear less space, so the "
+                    "unobserved volume below is OVERSTATED; raise the image budget; ",
+                    (unsigned long long)out.setupsBinned,
+                    (unsigned long long)out.setupsUsed, out.worstBinStep,
                     (unsigned long long)perImage);
     if (out.scansSkipped)
         note += fmt("%llu scan(s) skipped for want of a sampling grid; ",

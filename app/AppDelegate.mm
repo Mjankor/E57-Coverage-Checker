@@ -1128,6 +1128,15 @@ const char *kindLabel(check::Kind k) {
         if (result->setupsInverted)
             warn = [warn stringByAppendingFormat:@"   ·   %llu inverted",
                     (unsigned long long)result->setupsInverted];
+        // A corpus too large for the image budget gets its rasters coarsened, and
+        // coarse cells clear less space — so the unobserved volume on this line is
+        // overstated by however much. That is a different answer, not a blurrier
+        // one, and it has to be on the line the number is on.
+        if (result->setupsBinned)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   ⚠︎ %llu raster(s) COARSENED up to %ux to fit memory — "
+                     "unobserved volume is overstated; raise the image budget",
+                    (unsigned long long)result->setupsBinned, result->worstBinStep];
         // Which end of the raster the blind cone is at decides whether a band of
         // empty cells clears space to the rated range or establishes nothing, and
         // nothing else on this line changes the picture as much. Undecided leaves

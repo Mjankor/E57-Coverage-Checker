@@ -386,6 +386,15 @@ void usage() {
         "  --threads <n>\n"
         "          (carve) Worker threads over the tile list. Default 0, the\n"
         "          machine's count. The answer is identical at any count.\n"
+        "  --image-budget <GB>\n"
+        "          (carve) Memory the range images may occupy, all scans at once.\n"
+        "          Default 48, for a 64 GB machine: a 2500 x 5280 raster is 44 MB\n"
+        "          with its pyramid, so a thousand of them fit at full resolution.\n"
+        "          Too small and each raster is coarsened to fit its share, which\n"
+        "          does not blur the answer but changes it — a coarse cell clears\n"
+        "          to the nearest return in it, so less space is cleared and the\n"
+        "          unobserved volume comes out overstated. The report says when\n"
+        "          this happened, and by how much.\n"
         "  --solid (carve) Keep every unknown voxel rather than only those on the\n"
         "          frontier with observed space. Far more voxels, same answer:\n"
         "          an opaque volume hides its own interior anyway.\n");
@@ -478,6 +487,19 @@ int main(int argc, char** argv) {
             const long v = std::strtol(argv[++i], nullptr, 10);
             if (v < 0 || v > 1024) { std::printf("--threads must be in 0..1024\n"); return 2; }
             co.threads = uint32_t(v);
+            continue;
+        }
+        // In gigabytes, because that is the unit the machine is sold in and the
+        // unit this decision gets made in. See vis::Options::imageBudgetBytes:
+        // too small a budget coarsens the rasters, and coarse rasters overstate
+        // the unobserved volume rather than merely softening it.
+        if (std::strcmp(argv[i], "--image-budget") == 0 && i + 1 < argc) {
+            const double gb = std::strtod(argv[++i], nullptr);
+            if (!(gb > 0.0) || gb > 1024.0) {
+                std::printf("--image-budget is in GB and must be in 0..1024\n");
+                return 2;
+            }
+            co.imageBudgetBytes = uint64_t(gb * 1073741824.0);
             continue;
         }
         paths.push_back(argv[i]);
