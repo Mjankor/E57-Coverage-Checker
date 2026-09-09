@@ -119,6 +119,16 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
         std::printf("            %llu with an identified blind cone, %llu of those inverted\n",
                     (unsigned long long)res.setupsWithBlindCone,
                     (unsigned long long)res.setupsInverted);
+    // Which empty cells clear space and which establish nothing is the single
+    // decision that most changes the answer, so it is stated outright rather than
+    // being inferred from a count.
+    if (!res.coneVerdict.why.empty())
+        std::printf("blind cone: %s\n            %s\n",
+                    res.coneVerdict.decided
+                        ? (res.coneVerdict.atFirstRow ? "the START of each raster"
+                                                      : "the END of each raster")
+                        : "*** NOT IDENTIFIED — empty cells at both ends are believed ***",
+                    res.coneVerdict.why.c_str());
     std::printf("voxel     : %.3f m   ·   tile %u^3   ·   max range %.0f m   ·   %u thread(s)\n",
                 opt.voxelSize, opt.tileVoxels, opt.maxRange,
                 opt.threads ? opt.threads : std::thread::hardware_concurrency());

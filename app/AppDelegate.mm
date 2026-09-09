@@ -1063,6 +1063,18 @@ const char *kindLabel(check::Kind k) {
         if (result->setupsInverted)
             warn = [warn stringByAppendingFormat:@"   ·   %llu inverted",
                     (unsigned long long)result->setupsInverted];
+        // Which end of the raster the blind cone is at decides whether a band of
+        // empty cells clears space to the rated range or establishes nothing, and
+        // nothing else on this line changes the picture as much. Undecided leaves
+        // both ends believed, which carves a cone through the ground under every
+        // setup — a warning, not a footnote.
+        if (!result->coneVerdict.decided)
+            warn = [warn stringByAppendingString:
+                    @"   ·   ⚠︎ blind cone NOT identified — empty cells at both ends "
+                     "of the raster are believed"];
+        else
+            warn = [warn stringByAppendingFormat:@"   ·   cone at the %@ of the raster",
+                    result->coneVerdict.atFirstRow ? @"start" : @"end"];
 
         NSString *line = [NSString stringWithFormat:
             @"%llu setups   ·   %.0f m³ unobserved (%.1f%% of what was in range)   ·   "
