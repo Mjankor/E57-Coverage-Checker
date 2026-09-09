@@ -781,6 +781,58 @@ static void spreadAudit(e57::Reader& r, size_t scanIndex, const rimg::RangeImage
               med(dEl[i]), p95(dEl[i]), med(dAz[i]), p95(dAz[i]));
     }
     o.add("        (deviation from the row's or column's own far-return angle, in cells)\n");
+
+    // Is the elevation deviation a single cycle around the azimuth?
+    //
+    // If it is, the instrument was not level. Every terrestrial scanner has a
+    // compensator and exports its points already levelled, so the raster's rows are
+    // lines of constant elevation ABOUT THE INSTRUMENT'S OWN AXIS while the stored
+    // points are about the vertical. Tilt the one against the other by tau and a
+    // row's elevation runs as tau*cos(azimuth - phi): one cycle per turn, amplitude
+    // tau, and almost nothing in azimuth near the horizon.
+    //
+    // That is a rotation, not an offset, so it leaves no parallax on edges and is
+    // invisible in the merged cloud — the manufacturer applied it correctly. It is
+    // only visible if you go looking for the raster, which is what this module does
+    // and nothing else in the pipeline does.
+    //
+    // Fitted globally by least squares, and reported with the share of the spread
+    // it accounts for. A high share is the whole answer; a low one rules it out.
+    {
+        std::vector<double> rowMean(size_t(spanR), 0.0);
+        std::vector<uint32_t> rowAll(size_t(spanR), 0);
+        for (const Obs& p : obs) { rowMean[size_t(p.row)] += p.el; ++rowAll[size_t(p.row)]; }
+        for (size_t i = 0; i < rowMean.size(); ++i)
+            if (rowAll[i]) rowMean[i] /= double(rowAll[i]);
+
+        double scc = 0, sss = 0, scs = 0, sdc = 0, sds = 0, sdd = 0;
+        uint64_t n = 0;
+        for (const Obs& p : obs) {
+            if (rowAll[size_t(p.row)] < 8) continue;
+            const double d = double(p.el) - rowMean[size_t(p.row)];
+            const double c = std::cos(double(p.az)), si = std::sin(double(p.az));
+            scc += c * c; sss += si * si; scs += c * si;
+            sdc += d * c; sds += d * si; sdd += d * d;
+            ++n;
+        }
+        if (n > 1000) {
+            const double det = scc * sss - scs * scs;
+            if (std::fabs(det) > 1e-12) {
+                const double A = ( sss * sdc - scs * sds) / det;
+                const double B = (-scs * sdc + scc * sds) / det;
+                const double explained = A * sdc + B * sds;
+                const double frac = (sdd > 0) ? explained / sdd : 0.0;
+                const double amp = std::sqrt(A * A + B * B);
+                const double resid = std::sqrt(std::max(0.0, (sdd - explained) / double(n)));
+                o.add("        one cycle per turn: amplitude %.3f deg toward azimuth %.1f deg,\n"
+                      "        accounting for %.1f%% of the elevation spread; %.2f cells left "
+                      "after it\n",
+                      amp * 57.29577951308232,
+                      std::atan2(B, A) * 57.29577951308232,
+                      100.0 * frac, resid / elCell);
+            }
+        }
+    }
 }
 
 // Are the setups where the files say they are?
