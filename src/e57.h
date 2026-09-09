@@ -177,9 +177,39 @@ struct Scan {
     bool     hasIndexBounds = false;
     int64_t  rowMin = 0, rowMax = 0, colMin = 0, colMax = 0;
 
+    // indexBounds/returnMinimum and returnMaximum: how many returns one fired ray
+    // produced. A multi-return instrument records the first, the last and
+    // sometimes intermediate surfaces along the same ray, so several points can
+    // legitimately share one (rowIndex, columnIndex).
+    //
+    // That matters to a visibility filter in one specific way. A cell holding
+    // several returns is one ray that met several surfaces, and what the cell must
+    // report is the NEAREST of them: line of sight stops at the first surface, and
+    // clearing to a further one would carve straight through the nearer one.
+    // range_image's "minimum range wins" does exactly that. These bounds are what
+    // let the report say whether a file is in that case at all, instead of leaving
+    // the behaviour correct but never exercised.
+    bool     hasReturnIndexBounds = false;
+    int64_t  returnIndexMin = 0, returnIndexMax = 0;
+    bool     multiReturn() const {
+        return hasReturnIndexBounds && returnIndexMax > returnIndexMin;
+    }
+
     // pointGroupingSchemes/groupingByLine: the file explicitly describing how
     // points map onto scan lines, which only a single-setup scan can do.
     bool     hasPointGrouping = false;
+    // groupingByLine/idElementName: which field indexes a scan line, named by the
+    // producer — normally "rowIndex" or "columnIndex". Empty when not declared,
+    // and `groupCount` is how many lines the file says there are.
+    //
+    // Corroboration, not a dependency. Nothing here assumes rows are elevation:
+    // the mapping from cell to direction is measured from the points, so a
+    // transposed raster fails the round trip and is refused rather than believed.
+    // But a producer's own statement of which axis is the line belongs beside that
+    // measurement — agreement is reassurance, and disagreement says the file and
+    // its data do not describe the same raster.
+    std::string groupingIdElement;
+    uint64_t    groupCount = 0;
 
     // The file's own declared extent. Worth carrying because it is an
     // independent statement of what the data should contain: decoding the
