@@ -22,6 +22,7 @@
 #include "e57.h"
 #include "frame.h"
 #include "range_image.h"
+#include "version.h"
 #include "visibility.h"
 
 #include <chrono>
@@ -620,6 +621,9 @@ void usage() {
 } // namespace
 
 int main(int argc, char** argv) {
+    // First line of every run. A report that cannot say which binary made it is
+    // a report you cannot act on.
+    std::printf("e57cov %s\n\n", ver::describe());
     if (argc < 2) { usage(); return 2; }
 
     const std::string cmd = argv[1];

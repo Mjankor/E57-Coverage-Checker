@@ -24,6 +24,7 @@
 #include "../src/indexer.h"
 #include "../src/point_store.h"
 #include "../src/scan_check.h"
+#include "../src/version.h"
 #include "../src/visibility.h"
 
 #include <algorithm>
@@ -239,8 +240,11 @@ const char *kindLabel(check::Kind k) {
         f.textColor = [NSColor secondaryLabelColor];
         [_rightPane addSubview:f];
     }
-    _status.stringValue = @"File ▸ Open to load E57 scans.   left drag pan · right drag orbit · "
-                          @"right click sets orbit centre · wheel zoom · F frames all";
+    // The build, on screen from the first frame. Two rounds of diagnosis were
+    // spent on a stale binary that looked identical to a current one.
+    _status.stringValue = [NSString stringWithFormat:
+        @"build %s   ·   File ▸ Open to load E57 scans.   left drag pan · right drag orbit · "
+        @"right click sets orbit centre · wheel zoom · F frames all", ver::describe()];
 
     _spinner = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
     _spinner.style = NSProgressIndicatorStyleSpinning;
@@ -400,7 +404,7 @@ const char *kindLabel(check::Kind k) {
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     NSMenu *appMenu = [[NSMenu alloc] init];
     [appMenu addItemWithTitle:@"About E57 Coverage Checker"
-                       action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+                       action:@selector(showAbout:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:@"Quit" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
@@ -521,6 +525,13 @@ const char *kindLabel(check::Kind k) {
     const BOOL on = !_cloudView.showVoxels;
     _cloudView.showVoxels = on;
     _voxelToggle.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (void)showAbout:(id)sender {
+    (void)sender;
+    [NSApp orderFrontStandardAboutPanel:@{
+        NSAboutPanelOptionApplicationVersion: [NSString stringWithUTF8String:ver::describe()],
+    }];
 }
 
 - (void)clearVoxels:(id)sender {

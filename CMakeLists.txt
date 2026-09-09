@@ -25,6 +25,17 @@ add_library(e57cov_core STATIC
   src/voids.cpp
   src/visibility.cpp)
 target_include_directories(e57cov_core PUBLIC src)
+
+# Stamp the build with its revision, so a report can say which binary produced
+# it. Diagnosing a stale build from its output alone is not possible otherwise.
+execute_process(COMMAND git rev-parse --short HEAD
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                OUTPUT_VARIABLE E57COV_GIT_REV
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+if(E57COV_GIT_REV)
+  target_compile_definitions(e57cov_core PUBLIC E57COV_REV="${E57COV_GIT_REV}")
+endif()
 # The tile loop is parallel; the standard library needs the platform's thread
 # support explicitly on some toolchains.
 find_package(Threads REQUIRED)
