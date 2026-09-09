@@ -279,7 +279,9 @@ static void testSelectionScales() {
     // is empty space, so there are no deep nodes to descend into.
     viewer::OrbitCamera close = cam;
     close.setPivotKeepingEye({pts[0].x, pts[0].y, pts[0].z});
-    for (int i = 0; i < 40; ++i) close.zoom(1.0f);
+    // Negative ticks zoom in: scrolling towards you pulls the model closer,
+    // matching the rest of the system. See OrbitCamera::zoom.
+    for (int i = 0; i < 40; ++i) close.zoom(-1.0f);
 
     const lod::Selection near =
         lod::selectNodes(t, close.viewProjection(), close.eye(), pixelsPerRadian, sopt);

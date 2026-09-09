@@ -293,7 +293,10 @@
 }
 
 - (void)magnifyWithEvent:(NSEvent *)event {
-    _camera.zoom((float)event.magnification * 10.0f);
+    // Negated against the wheel, so pinching apart still zooms in. A pinch is
+    // direct manipulation of the content and reads the opposite way round from
+    // a wheel, which scrolls a viewport.
+    _camera.zoom(-(float)event.magnification * 10.0f);
     [self viewChanged];
 }
 

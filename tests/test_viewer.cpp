@@ -94,6 +94,20 @@ static void testCameraNavigation() {
     const float d0 = cam.distance();
     const m3::Vec3 pivot0 = cam.pivot();
 
+    // The sign conventions, pinned. These are the two the operator notices
+    // immediately and nobody notices in a diff: dragging up tips the camera
+    // down, turntable style, so the model appears to rotate away from you.
+    {
+        viewer::OrbitCamera turn;
+        turn.setViewport(1000, 700);
+        turn.frameBounds({-1, -1, -1}, {1, 1, 1});
+        const float z0 = turn.eye().z;
+        turn.orbit(0.0f, 80.0f);
+        CHECK(turn.eye().z < z0, "dragging up moves the eye down");
+        turn.orbit(0.0f, -160.0f);
+        CHECK(turn.eye().z > z0, "and dragging down moves it up");
+    }
+
     cam.orbit(150.0f, 60.0f);
     CHECK_NEAR(cam.distance(), d0, 1e-4, "orbit preserves distance to pivot");
     CHECK_NEAR(m3::length(cam.eye() - cam.pivot()), d0, 1e-3, "eye stays on the orbit sphere");
@@ -105,7 +119,7 @@ static void testCameraNavigation() {
 
     const float d1 = cam.distance();
     cam.zoom(3.0f);
-    CHECK(cam.distance() < d1, "wheel forward zooms in");
+    CHECK(cam.distance() > d1, "scrolling away pulls back");
     cam.zoom(-3.0f);
     CHECK_NEAR(cam.distance(), d1, 1e-3, "zoom is symmetric");
 

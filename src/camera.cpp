@@ -72,9 +72,14 @@ Mat4 OrbitCamera::projection() const {
 void OrbitCamera::orbit(float dxPx, float dyUpPx) {
     // A full window width is a half turn: fast enough to spin round, slow
     // enough to place a view precisely.
+    //
+    // Dragging up tips the camera DOWN, which is the turntable convention: the
+    // drag moves the model, not the camera, so pushing the top of the scene away
+    // from you rotates it away. The pitch term is negated for that reason and
+    // not by accident — flipping it back inverts the whole feel of the control.
     const float perPixel = 3.14159265f / float(vpW_);
     yaw_  -= dxPx * perPixel;
-    pitch_ += dyUpPx * perPixel;
+    pitch_ -= dyUpPx * perPixel;
     pitch_ = std::clamp(pitch_, -kPitchLimit, kPitchLimit);
 }
 
@@ -88,8 +93,10 @@ void OrbitCamera::pan(float dxPx, float dyUpPx) {
 }
 
 void OrbitCamera::zoom(float wheelTicks) {
-    // Multiplicative, so zooming feels the same at every scale.
-    distance_ *= std::exp(-wheelTicks * 0.15f);
+    // Multiplicative, so zooming feels the same at every scale. Scrolling the
+    // wheel away from you pulls back: the content moves with the fingers, as it
+    // does everywhere else on the system.
+    distance_ *= std::exp(wheelTicks * 0.15f);
     distance_  = std::clamp(distance_, minDistance_, maxDistance_);
 }
 

@@ -100,9 +100,10 @@ byte-budgeted LRU of per-node buffers.
 | input | action |
 |---|---|
 | left drag | pan |
-| right drag | orbit |
+| right drag | orbit — dragging up tips the camera down, turntable style |
 | **right click** | set the orbit centre to the point under the crosshair |
-| wheel / pinch | zoom |
+| wheel | zoom — scrolling towards you pulls the model closer |
+| pinch | zoom — pinching apart zooms in |
 | `F` | frame all |
 | `⇧F` | frame the voxels |
 | `⌘1` `⌘2` | show / hide the clouds, show / hide the voxels |

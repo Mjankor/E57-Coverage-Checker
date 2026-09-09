@@ -85,6 +85,11 @@ constexpr CGFloat kSidebarMinWidth = 240;
 constexpr CGFloat kSidebarMaxWidth = 620;
 // The cloud never gets squeezed to nothing, however far the divider is dragged.
 constexpr CGFloat kCloudMinWidth   = 360;
+constexpr CGFloat kDividerWidth    = 1;
+// Wider than the line it sits over: a one-pixel drag target is unusable.
+constexpr CGFloat kGripWidth       = 9;
+// The strip under the cloud holding the status and progress lines.
+constexpr CGFloat kStatusStripHeight = 44;
 // Space left around the window on the desktop. Not zero, so it still reads as a
 // window rather than as a takeover, and so the corners stay grabbable.
 constexpr CGFloat kScreenInset     = 20;
@@ -100,8 +105,17 @@ const char *kindLabel(check::Kind k) {
 
 } // namespace
 
+// The strip between the list and the cloud. A one-pixel line reads correctly but
+// is impossible to grab, so the line and the grab area are separate views: a
+// hairline that is drawn, and a wider transparent one over it that is dragged.
+@class AppDelegate;
+
+@interface DividerGrip : NSView
+@property (nonatomic, weak) AppDelegate *owner;
+@end
+
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSTableViewDataSource,
-                                   NSTableViewDelegate, NSSplitViewDelegate,
+                                   NSTableViewDelegate, NSWindowDelegate,
                                    CloudViewDelegate>
 @end
 
@@ -113,6 +127,11 @@ const char *kindLabel(check::Kind k) {
     NSTextField         *_progress;
     NSProgressIndicator *_spinner;
 
+    NSScrollView        *_scroll;
+    NSView              *_divider;
+    DividerGrip         *_grip;
+    NSView              *_rightPane;
+    CGFloat              _sidebarWidth;
     NSButton            *_cloudToggle;
     NSButton            *_voxelToggle;
 
@@ -151,87 +170,94 @@ const char *kindLabel(check::Kind k) {
                       defer:NO];
     _window.title = @"E57 Coverage Checker";
     _window.contentMinSize = NSMakeSize(900, 600);
+    _window.delegate = self;
     [_window center];
 
-    NSSplitView *split = [[NSSplitView alloc] initWithFrame:frame];
-    split.vertical = YES;
-    split.dividerStyle = NSSplitViewDividerStyleThin;
-    split.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    split.delegate = self;
+    // A plain container, laid out by hand in -layoutPanes.
+    //
+    // This was an NSSplitView twice, and twice the cloud stopped short of the
+    // window's right edge with a band of empty background beside it. Split views
+    // manage their subviews' frames through a delegate protocol that interacts
+    // with autoresizing masks, and getting that combination wrong is invisible
+    // until you see the window. The layout here is thirty lines and reads its
+    // size from contentView.bounds, which is by definition the window's content
+    // size. Nothing to get subtly wrong, and nothing that needs a Mac to check.
+    NSView *root = [[NSView alloc] initWithFrame:frame];
+    root.autoresizesSubviews = NO;
 
     _table = [[NSTableView alloc] initWithFrame:NSZeroRect];
     _table.dataSource = self;
     _table.delegate = self;
     _table.usesAlternatingRowBackgroundColors = YES;
     _table.rowHeight = 30;
-    // Sized so the three columns fit the sidebar at its default width: the list
-    // is for identifying a setup, not for reading paths, and every pixel it
-    // takes is one the cloud does not get.
-    struct { NSString *ident; NSString *title; CGFloat width; CGFloat minWidth; BOOL right; }
-    cols[] = {
-        {@"scan",   @"Setup",  150, 80, NO},
-        {@"status", @"Status", 104, 70, NO},
-        {@"points", @"Points",  60, 52, YES},
+    // Widths are set in -layoutPanes from the width actually available, so all
+    // three columns are visible whatever the sidebar has been dragged to. These
+    // are only the starting proportions.
+    struct { NSString *ident; NSString *title; CGFloat minWidth; BOOL right; } cols[] = {
+        {@"scan",   @"Setup",  80, NO},
+        {@"status", @"Status", 70, NO},
+        {@"points", @"Points", 56, YES},
     };
     for (auto &c : cols) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:c.ident];
         col.title    = c.title;
-        col.width    = c.width;
         col.minWidth = c.minWidth;
+        col.width    = c.minWidth;
         if (c.right) col.headerCell.alignment = NSTextAlignmentRight;
         [_table addTableColumn:col];
     }
-    // Widening the sidebar lengthens the name column, which is the one that
-    // truncates; status and point count already fit what they hold.
-    _table.columnAutoresizingStyle = NSTableViewFirstColumnOnlyAutoresizingStyle;
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:
-        NSMakeRect(0, 0, kSidebarWidth, frame.size.height)];
-    scroll.documentView = _table;
-    scroll.hasVerticalScroller = YES;
-    // An overlay scroller would sit on top of the last column; a legacy one
-    // takes its own width, which is what the sidebar width above allows for.
-    scroll.scrollerStyle = NSScrollerStyleLegacy;
-    scroll.borderType = NSNoBorder;
-    scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    // The columns are sized explicitly, so the table must not resize them back.
+    _table.columnAutoresizingStyle = NSTableViewNoColumnAutoresizing;
 
-    const CGFloat rightWidth = std::max(kCloudMinWidth, frame.size.width - kSidebarWidth);
-    NSView *rightPane = [[NSView alloc] initWithFrame:
-        NSMakeRect(0, 0, rightWidth, frame.size.height)];
-    rightPane.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    rightPane.autoresizesSubviews = YES;
+    _scroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+    _scroll.documentView = _table;
+    _scroll.hasVerticalScroller = YES;
+    // An overlay scroller would float over the last column; a legacy one takes
+    // its own width, which -layoutPanes subtracts before sizing the columns.
+    _scroll.scrollerStyle = NSScrollerStyleLegacy;
+    _scroll.borderType = NSNoBorder;
+    [root addSubview:_scroll];
 
-    _cloudView = [[CloudView alloc] initWithFrame:
-        NSMakeRect(0, 44, rightWidth, frame.size.height - 44)];
-    _cloudView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    _divider = [[NSView alloc] initWithFrame:NSZeroRect];
+    _divider.wantsLayer = YES;
+    _divider.layer.backgroundColor = NSColor.separatorColor.CGColor;
+    [root addSubview:_divider];
+
+    _rightPane = [[NSView alloc] initWithFrame:NSZeroRect];
+    _rightPane.autoresizesSubviews = NO;
+    [root addSubview:_rightPane];
+
+    _cloudView = [[CloudView alloc] initWithFrame:NSZeroRect];
     _cloudView.cloudDelegate = self;
-    [rightPane addSubview:_cloudView];
+    [_rightPane addSubview:_cloudView];
 
-    _status = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 22, rightWidth - 50, 18)];
-    _progress = [[NSTextField alloc] initWithFrame:NSMakeRect(8, 4, rightWidth - 50, 18)];
+    _status = [[NSTextField alloc] initWithFrame:NSZeroRect];
+    _progress = [[NSTextField alloc] initWithFrame:NSZeroRect];
     for (NSTextField *f in @[_status, _progress]) {
         f.bezeled = NO; f.editable = NO; f.drawsBackground = NO;
         f.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
         f.textColor = [NSColor secondaryLabelColor];
-        f.autoresizingMask = NSViewWidthSizable | NSViewMaxYMargin;
-        [rightPane addSubview:f];
+        [_rightPane addSubview:f];
     }
     _status.stringValue = @"File ▸ Open to load E57 scans.   left drag pan · right drag orbit · "
                           @"right click sets orbit centre · wheel zoom · F frames all";
 
-    _spinner = [[NSProgressIndicator alloc] initWithFrame:
-        NSMakeRect(rightWidth - 28, 12, 18, 18)];
+    _spinner = [[NSProgressIndicator alloc] initWithFrame:NSZeroRect];
     _spinner.style = NSProgressIndicatorStyleSpinning;
     _spinner.hidden = YES;
-    _spinner.autoresizingMask = NSViewMinXMargin | NSViewMaxYMargin;
-    [rightPane addSubview:_spinner];
+    [_rightPane addSubview:_spinner];
 
-    [self buildLayerTogglesInPane:rightPane width:rightWidth height:frame.size.height];
+    [self buildLayerToggles];
 
-    [split addSubview:scroll];
-    [split addSubview:rightPane];
-    [split setPosition:kSidebarWidth ofDividerAtIndex:0];
+    // Added last so it sits above the cloud pane: the grip straddles the
+    // divider, and a pane added after it would swallow half its hit area.
+    _grip = [[DividerGrip alloc] initWithFrame:NSZeroRect];
+    _grip.owner = self;
+    [root addSubview:_grip];
 
-    _window.contentView = split;
+    _sidebarWidth = kSidebarWidth;
+    _window.contentView = root;
+    [self layoutPanes];
     [_window makeKeyAndOrderFront:nil];
 
     NSString *err = nil;
@@ -245,6 +271,88 @@ const char *kindLabel(check::Kind k) {
     [NSApp activateIgnoringOtherApps:YES];
 }
 
+// --- layout ---------------------------------------------------------------
+//
+// Everything visible is positioned here, from the window's own content bounds.
+// One method, called at startup and on every resize, so the window can never be
+// a size the layout has not seen.
+
+- (void)layoutPanes {
+    NSView *root = _window.contentView;
+    if (!root) return;
+    const CGFloat W = root.bounds.size.width;
+    const CGFloat H = root.bounds.size.height;
+
+    CGFloat side = _sidebarWidth;
+    side = std::max(kSidebarMinWidth, std::min(kSidebarMaxWidth, side));
+    // The cloud is never squeezed away, however narrow the window.
+    side = std::min(side, std::max<CGFloat>(0, W - kDividerWidth - kCloudMinWidth));
+    _sidebarWidth = side;
+
+    _scroll.frame    = NSMakeRect(0, 0, side, H);
+    _divider.frame   = NSMakeRect(side, 0, kDividerWidth, H);
+    _grip.frame      = NSMakeRect(side - kGripWidth * 0.5, 0, kGripWidth, H);
+    // Every pixel that is not the list or the divider is the cloud. This is the
+    // line that was wrong: the right pane has to reach the window's edge, not
+    // the edge of whatever size it was created at.
+    _rightPane.frame = NSMakeRect(side + kDividerWidth, 0,
+                                  std::max<CGFloat>(0, W - side - kDividerWidth), H);
+
+    const CGFloat RW = _rightPane.bounds.size.width;
+    _cloudView.frame = NSMakeRect(0, kStatusStripHeight, RW,
+                                  std::max<CGFloat>(0, H - kStatusStripHeight));
+    _status.frame    = NSMakeRect(8, 22, std::max<CGFloat>(0, RW - 50), 18);
+    _progress.frame  = NSMakeRect(8, 4,  std::max<CGFloat>(0, RW - 50), 18);
+    _spinner.frame   = NSMakeRect(RW - 28, 12, 18, 18);
+
+    const CGFloat bw = 128, bh = 24, margin = 12, gap = 6;
+    _cloudToggle.frame = NSMakeRect(RW - margin - bw, H - margin - bh, bw, bh);
+    _voxelToggle.frame = NSMakeRect(RW - margin - bw, H - margin - 2 * bh - gap, bw, bh);
+
+    [self layoutTableColumns];
+}
+
+// Column widths from the width actually available, so the point count cannot be
+// pushed off the end of the list. Hard-coded widths were wrong twice: they have
+// to fit inside the sidebar minus the scroller minus the gaps between columns,
+// and that arithmetic belongs here rather than in a comment.
+- (void)layoutTableColumns {
+    if (_table.tableColumns.count < 3) return;
+    const CGFloat scroller = _scroll.hasVerticalScroller ? 16 : 0;
+    const CGFloat gaps = _table.intercellSpacing.width * 2;
+    CGFloat avail = _sidebarWidth - scroller - gaps - 2;
+    if (avail <= 0) return;
+
+    NSTableColumn *name   = _table.tableColumns[0];
+    NSTableColumn *status = _table.tableColumns[1];
+    NSTableColumn *points = _table.tableColumns[2];
+
+    CGFloat statusW = 104, pointsW = 62;
+    if (avail < name.minWidth + statusW + pointsW) {
+        // Not enough room for the preferred fixed widths: fall back to the
+        // minimums, and if even those do not fit, share what there is.
+        statusW = status.minWidth;
+        pointsW = points.minWidth;
+        if (avail < name.minWidth + statusW + pointsW) {
+            const CGFloat scale = avail / (name.minWidth + statusW + pointsW);
+            statusW *= scale;
+            pointsW *= scale;
+        }
+    }
+    points.width = pointsW;
+    status.width = statusW;
+    name.width   = std::max(name.minWidth, avail - statusW - pointsW);
+}
+
+- (void)windowDidResize:(NSNotification *)note { (void)note; [self layoutPanes]; }
+
+// The divider is draggable: the list keeps what it is dragged to and the cloud
+// takes the rest.
+- (void)dragSidebarTo:(CGFloat)x {
+    _sidebarWidth = x;
+    [self layoutPanes];
+}
+
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
     (void)sender; return YES;
 }
@@ -256,16 +364,13 @@ const char *kindLabel(check::Kind k) {
 // geometry means flicking between them repeatedly, and a menu round trip for
 // that gets old within a minute.
 
-- (void)buildLayerTogglesInPane:(NSView *)pane width:(CGFloat)width height:(CGFloat)height {
-    const CGFloat w = 128, h = 24, margin = 12, gap = 6;
-    struct { NSString *title; SEL action; NSButton * __strong *slot; int index; } defs[] = {
-        {@"Original clouds", @selector(toggleClouds:), &_cloudToggle, 0},
-        {@"Voxels",          @selector(toggleVoxels:), &_voxelToggle, 1},
+- (void)buildLayerToggles {
+    struct { NSString *title; SEL action; NSButton * __strong *slot; } defs[] = {
+        {@"Original clouds", @selector(toggleClouds:), &_cloudToggle},
+        {@"Voxels",          @selector(toggleVoxels:), &_voxelToggle},
     };
     for (auto &d : defs) {
-        const CGFloat y = height - margin - h - d.index * (h + gap);
-        NSButton *b = [[NSButton alloc] initWithFrame:
-            NSMakeRect(width - margin - w, y, w, h)];
+        NSButton *b = [[NSButton alloc] initWithFrame:NSZeroRect];
         b.title       = d.title;
         b.bezelStyle  = NSBezelStyleRounded;
         [b setButtonType:NSButtonTypePushOnPushOff];
@@ -275,10 +380,8 @@ const char *kindLabel(check::Kind k) {
         b.action      = d.action;
         // MTKView forces the window layer-backed, so a sibling drawn over it
         // needs its own layer or it renders underneath.
-        b.wantsLayer = YES;
-        // Pinned to the top right corner as the window resizes.
-        b.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
-        [pane addSubview:b];
+        b.wantsLayer  = YES;
+        [_rightPane addSubview:b];
         *d.slot = b;
     }
 }
@@ -289,53 +392,6 @@ const char *kindLabel(check::Kind k) {
 
 - (void)toggleVoxels:(id)sender {
     _cloudView.showVoxels = (((NSButton *)sender).state == NSControlStateValueOn);
-}
-
-// --- split view -----------------------------------------------------------
-//
-// The geometry is done here rather than left to NSSplitView's own adjustment
-// and the subviews' autoresizing masks. Those interact in ways that are easy to
-// get subtly wrong — the first version of this left the cloud at its original
-// width while the window grew, so a wide window had a band of empty desktop
-// grey down its right-hand side — and this is small enough to just state.
-
-- (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposed
-         ofSubviewAt:(NSInteger)index {
-    (void)splitView; (void)proposed; (void)index;
-    return kSidebarMinWidth;
-}
-
-- (CGFloat)splitView:(NSSplitView *)splitView constrainMaxCoordinate:(CGFloat)proposed
-         ofSubviewAt:(NSInteger)index {
-    (void)proposed; (void)index;
-    // Never past the point where the cloud would be squeezed to nothing.
-    const CGFloat room = splitView.bounds.size.width - splitView.dividerThickness -
-                         kCloudMinWidth;
-    return std::max(kSidebarMinWidth, std::min(kSidebarMaxWidth, room));
-}
-
-// The list keeps whatever width it has been dragged to; every pixel of a resize
-// goes to the cloud.
-- (void)splitView:(NSSplitView *)splitView resizeSubviewsWithOldSize:(NSSize)oldSize {
-    (void)oldSize;
-    if (splitView.subviews.count < 2) return;
-    NSView *list  = splitView.subviews[0];
-    NSView *cloud = splitView.subviews[1];
-
-    const CGFloat total    = splitView.bounds.size.width;
-    const CGFloat height   = splitView.bounds.size.height;
-    const CGFloat divider  = splitView.dividerThickness;
-
-    CGFloat listWidth = list.frame.size.width;
-    if (listWidth <= 0) listWidth = kSidebarWidth;
-    listWidth = std::max(kSidebarMinWidth, std::min(kSidebarMaxWidth, listWidth));
-    // A window narrower than both minimums together: the list yields first, so
-    // the cloud never disappears entirely.
-    listWidth = std::min(listWidth, std::max<CGFloat>(0, total - divider - kCloudMinWidth));
-
-    list.frame  = NSMakeRect(0, 0, listWidth, height);
-    cloud.frame = NSMakeRect(listWidth + divider, 0,
-                             std::max<CGFloat>(0, total - listWidth - divider), height);
 }
 
 - (void)buildMenu {
@@ -938,6 +994,22 @@ const char *kindLabel(check::Kind k) {
         label.textColor = [NSColor secondaryLabelColor];
     }
     return label;
+}
+
+@end
+
+
+@implementation DividerGrip
+
+- (void)resetCursorRects {
+    [self addCursorRect:self.bounds cursor:NSCursor.resizeLeftRightCursor];
+}
+
+// Dragging reports a position in the container's coordinates, which is exactly
+// what the sidebar width is measured in — no accumulated deltas to drift.
+- (void)mouseDragged:(NSEvent *)event {
+    const NSPoint p = [self.superview convertPoint:event.locationInWindow fromView:nil];
+    [self.owner dragSidebarTo:p.x];
 }
 
 @end
