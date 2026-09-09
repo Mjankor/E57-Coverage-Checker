@@ -428,6 +428,7 @@ const char *kindLabel(check::Kind k) {
     [procMenu addItemWithTitle:@"Run Visibility Filter…"
                         action:@selector(runVisibilityFilter:) keyEquivalent:@"r"];
     [procMenu addItemWithTitle:@"Scan Report…" action:@selector(scanReport:) keyEquivalent:@"i"];
+    [procMenu addItemWithTitle:@"Evidence Self-Test…" action:@selector(selfTest:) keyEquivalent:@"t"];
     [procMenu addItem:[NSMenuItem separatorItem]];
     [procMenu addItemWithTitle:@"Use the GPU" action:@selector(toggleGpu:) keyEquivalent:@""];
     [procMenu addItemWithTitle:@"Verify the GPU against the CPU"
@@ -588,6 +589,64 @@ const char *kindLabel(check::Kind k) {
             me->_status.stringValue = wrote
                 ? [NSString stringWithFormat:@"Scan report written to %@", file]
                 : @"Scan report ready (could not write a file)";
+        });
+      }
+    });
+}
+
+// The same window, for the self-test: the evidence primitive asked about each
+// scan's own cells, where the right answer is not in doubt, plus whether the
+// setups are where the files say they are.
+//
+// Here rather than only in the CLI for the same reason the scan report is: the
+// command line tool is not what gets run, and a diagnostic nobody can reach is
+// not a diagnostic.
+- (void)selfTest:(id)sender {
+    (void)sender;
+    if (_busy) return;
+    if (_paths.empty()) {
+        _status.stringValue = @"Open some E57 scans first.";
+        return;
+    }
+
+    _busy = YES;
+    _spinner.hidden = NO;
+    [_spinner startAnimation:nil];
+    _status.stringValue = @"Testing the evidence path…";
+
+    report::Options ro;
+    ro.maxRange         = _visOptions.maxRange;
+    ro.blindCone        = _visOptions.blindCone;
+    ro.noReturnRadius   = _visOptions.skyRadius;
+    ro.noReturnFraction = _visOptions.skyFraction;
+
+    auto paths = std::make_shared<std::vector<std::string>>(_paths);
+    __weak AppDelegate *weakSelf = self;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      @autoreleasepool {
+        auto text = std::make_shared<std::string>();
+        report::selfTest(*paths, ro, *text);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *me = weakSelf;
+            if (!me) return;
+            me->_busy = NO;
+            [me->_spinner stopAnimation:nil];
+            me->_spinner.hidden = YES;
+
+            NSString *body = [NSString stringWithUTF8String:text->c_str()] ?: @"(unreadable)";
+            NSString *dir = NSSearchPathForDirectoriesInDomains(
+                NSDesktopDirectory, NSUserDomainMask, YES).firstObject
+                ?: NSTemporaryDirectory();
+            NSString *file = [dir stringByAppendingPathComponent:@"e57cov-self-test.txt"];
+            NSError *werr = nil;
+            const BOOL wrote = [body writeToFile:file atomically:YES
+                                        encoding:NSUTF8StringEncoding error:&werr];
+            [me showReport:body savedTo:(wrote ? file : nil)];
+            me->_status.stringValue = wrote
+                ? [NSString stringWithFormat:@"Self-test written to %@", file]
+                : @"Self-test ready (could not write a file)";
         });
       }
     });

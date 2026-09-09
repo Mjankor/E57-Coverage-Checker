@@ -725,7 +725,36 @@ ConeVerdict markBlindConeAcrossCorpus(const std::vector<RangeImage*>& images,
         usable.push_back(im);
     }
     ConeVerdict v = decideBlindConeEnd(bands, opt);
-    if (!v.decided) return v;
+    if (!v.decided) {
+        // The corpus looked and found no band that is the same in every scan.
+        // That is not "no opinion": an instrument's blind cone IS the same in
+        // every scan, so its absence means there is no instrument cone here and
+        // every empty band is scene. Any per-scan guess build() made has to go.
+        //
+        // It has to go because of which way that guess fails. The single-scan
+        // fallback, faced with a raster empty at one end only, asks whether the
+        // returns bordering that end are near — and near is exactly what the sky
+        // border looks like on a site ringed by trees and eaves. Believed, it
+        // marks the sky unsampled, and then nothing clears at all: the site comes
+        // back as a solid ball of "unobserved", which is the shape this whole
+        // stage exists to avoid.
+        if (usable.size() >= 2 && opt.blindCone == BlindCone::Auto) {
+            size_t undone = 0;
+            for (RangeImage* im : usable)
+                if (im->diag.blindConeRows) { unmarkBlindCone(*im, opt); ++undone; }
+            if (undone) {
+                v.corrected = undone;
+                char buf[300];
+                std::snprintf(buf, sizeof(buf),
+                              "; %zu scan(s) had guessed a cone on their own, and those "
+                              "bands are believed again — a cone the corpus cannot see in "
+                              "every scan is not the instrument's",
+                              undone);
+                v.why += buf;
+            }
+        }
+        return v;
+    }
     for (const RangeImage* im : usable)
         if (im->diag.blindConeRows == 0 || im->diag.blindConeAtFirstRow != v.atFirstRow)
             ++v.corrected;

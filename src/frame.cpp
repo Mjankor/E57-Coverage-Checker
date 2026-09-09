@@ -58,6 +58,12 @@ std::string fmt2(const char* f, double a, double b) {
     return buf;
 }
 
+std::string fmt4(const char* f, double a, double b, double c, double d) {
+    char buf[420];
+    std::snprintf(buf, sizeof(buf), f, a, b, c, d);
+    return buf;
+}
+
 } // namespace
 
 FrameDecision decideFrame(e57::Reader& reader, size_t scanIndex, size_t sampleTarget) {
@@ -118,6 +124,35 @@ FrameDecision decideFrame(e57::Reader& reader, size_t scanIndex, size_t sampleTa
 
     d.medianFromLocalOrigin = median(dLocal);
     d.medianFromPoseOrigin  = median(dPose);
+
+    // How much is actually at stake, and how much evidence there could be about
+    // it. The rotation is what moves the cloud; the translation is the only thing
+    // these two medians can see.
+    d.poseTranslationM = std::sqrt(s.pose.t[0] * s.pose.t[0] + s.pose.t[1] * s.pose.t[1] +
+                                   s.pose.t[2] * s.pose.t[2]);
+    {
+        const double n = std::sqrt(s.pose.q[0] * s.pose.q[0] + s.pose.q[1] * s.pose.q[1] +
+                                   s.pose.q[2] * s.pose.q[2] + s.pose.q[3] * s.pose.q[3]);
+        const double w = (n > 1e-12) ? std::fabs(s.pose.q[0]) / n : 1.0;
+        d.poseRotationDeg = 2.0 * std::acos(std::min(1.0, w)) * 57.29577951308232;
+    }
+
+    // A translation this small cannot separate the two medians, so whatever they
+    // come out as is noise. Say that, rather than reporting two equal numbers as
+    // though one had beaten the other. A twentieth of the points' own spread: below
+    // that the difference between the two hypotheses is smaller than the sampling.
+    if (d.poseTranslationM < 0.05 * d.medianFromLocalOrigin) {
+        d.uninformative = true;
+        d.convention = FrameConvention::ScannerLocal;      // the standard, by default
+        d.reason = fmt4("the pose is a %.1f degree rotation with a %.3f m translation and the "
+                        "points sit a median %.1f m out. A translation that small cannot move "
+                        "either median, so NOTHING here says whether the pose belongs on these "
+                        "points; the standard is assumed, and applying it turns this cloud by "
+                        "%.1f degrees",
+                        d.poseRotationDeg, d.poseTranslationM, d.medianFromLocalOrigin,
+                        d.poseRotationDeg);
+        return d;
+    }
 
     // Whichever centre the points actually surround is where the scanner is.
     // The two differ by the magnitude of the site coordinates, so a factor of

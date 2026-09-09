@@ -13,6 +13,7 @@
 //      chosen by hashing the global lattice index rather than by counting —
 //      the same voxels, drawn in the same places.
 
+#include "../src/report.h"
 #include "../src/visibility.h"
 #include "e57_fixture.h"
 
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -510,12 +512,370 @@ static void testEndToEnd() {
     CHECK(stopped.tilesCarved < frontier.tilesCarved, "it really stopped early");
 }
 
+// ---------------------------------------------------------------------------
+// One scene, five setups, answers known in advance.
+//
+// Everything above tests the machinery around the method. This tests the method:
+// a world with a ground plane and a building in it, observed from five places, in
+// files shaped the way a real job's are — points stored scanner-local, a pose per
+// scan carrying a real translation and a real rotation, and no record at all
+// where the ray came back with nothing.
+//
+// Three claims, and together they are the whole method:
+//
+//   1. Space along a ray that returned nothing is CLEARED, out to the rated range
+//      and no further. That is the sky, and it is what makes the answer mean
+//      anything: without it every site comes back a solid ball of "unobserved".
+//   2. Space in front of a surface that DID return is cleared up to that surface,
+//      and space behind it is not. That is occlusion.
+//   3. The five agree in one world frame, so a hole one setup cannot see is
+//      filled by another.
+//
+// The scene is deliberately outdoor-shaped, because that is where the sky matters:
+// the volume above a site is most of the range sphere, and it clears only if a
+// ray that came back empty is believed.
+
+namespace scene {
+
+// Ground at z = 0 and a solid box. Chosen so a probe point can be classified by
+// hand: inside the box nothing can see, below the ground nothing can see, and
+// above both the sky is open.
+// Buildings, plural, and a ground plane that stops.
+//
+// One box on an unbounded plane is not a site, it is a symmetry: a flat ground
+// sheet is unchanged by turning it about a vertical axis or sliding it sideways,
+// which are exactly the transforms a registration check has to be able to tell
+// apart. A scene made mostly of ground can be reassembled wrongly and still look
+// perfectly consistent. Real sites are not like that, and neither is this one.
+static constexpr double kBoxLo[3] = {10.0, -8.0, 0.0};
+static constexpr double kBoxHi[3] = {25.0,  8.0, 6.0};
+static constexpr double kGroundHalf = 42.0;      // beyond it, sky
+
+struct Box { double lo[3], hi[3]; };
+static const Box kBoxes[4] = {
+    {{ 10.0,  -8.0, 0.0}, { 25.0,   8.0, 6.0}},
+    {{-32.0,  -6.0, 0.0}, {-22.0,   6.0, 9.0}},
+    {{ -8.0,  18.0, 0.0}, {  0.0,  28.0, 5.0}},
+    {{  2.0, -30.0, 0.0}, { 10.0, -22.0, 7.0}},
+};
+
+// Distance along a ray to the nearest surface, or -1 for nothing within `far`.
+static double castRay(const double o[3], const double d[3], double far,
+                      double groundZ = 0.0) {
+    double best = -1.0;
+    if (d[2] < -1e-9) {                       // the ground, which stops
+        const double t = (groundZ - o[2]) / d[2];
+        if (t > 1e-6 && t < far &&
+            std::fabs(o[0] + t * d[0]) < kGroundHalf &&
+            std::fabs(o[1] + t * d[1]) < kGroundHalf) best = t;
+    }
+    for (const Box& box : kBoxes) {
+        double t0 = 0.0, t1 = far;
+        bool miss = false;
+        for (int k = 0; k < 3; ++k) {
+            const double lo = box.lo[k] + (k == 2 ? groundZ : 0.0);
+            const double hi = box.hi[k] + (k == 2 ? groundZ : 0.0);
+            if (std::fabs(d[k]) < 1e-12) {
+                if (o[k] < lo || o[k] > hi) { miss = true; break; }
+                continue;
+            }
+            double a = (lo - o[k]) / d[k], b = (hi - o[k]) / d[k];
+            if (a > b) std::swap(a, b);
+            t0 = std::max(t0, a);
+            t1 = std::min(t1, b);
+        }
+        if (miss || t1 < t0) continue;
+        const double t = (t0 > 1e-6) ? t0 : t1;
+        if (t > 1e-6 && t < far && (best < 0 || t < best)) best = t;
+    }
+    return best;
+}
+
+static bool insideBox(const double p[3]) {
+    for (int k = 0; k < 3; ++k)
+        if (p[k] < kBoxLo[k] || p[k] > kBoxHi[k]) return false;
+    return true;
+}
+
+// Modest rasters: enough that a 0.5 m voxel at 20 m is several cells across,
+// which is what the method needs and all it needs.
+static constexpr int kSceneRows = 150, kSceneCols = 400;
+static constexpr double kPiS = 3.14159265358979323846;
+static double elOfRow(int r) {
+    const double lo = -50.0 * kPiS / 180.0, hi = 80.0 * kPiS / 180.0;
+    return lo + (hi - lo) * double(r) / double(kSceneRows - 1);
+}
+static double azOfCol(int c) { return kTau * double(c) / double(kSceneCols); }
+
+struct Setup { double x, y, z, yawDeg; };
+
+// One scan: rays cast from the setup into the scene, hits stored in the SCANNER's
+// frame with the pose carrying the setup's place in the world. A ray that reaches
+// nothing stores no record, which is exactly how a real file represents a ray that
+// came back empty.
+// `groundZ` moves the ground plane, so a fixture can put its instruments at
+// exactly z = 0 and give the datum setup a pose translation of exactly zero.
+//
+// `preRotated` stores the points already in the world frame while still declaring
+// the pose — the non-conformant case, and on a datum setup the one the per-scan
+// frame test cannot see at all.
+static bool writeSetup(const std::string& path, const Setup& s, double far,
+                       double groundZ = 0.0, bool preRotated = false) {
+    const double yaw = s.yawDeg * kPiS / 180.0;
+    const double cy = std::cos(yaw), sy = std::sin(yaw);
+
+    fixture::Scan sc;
+    sc.name = "setup";
+    sc.hasPose = true;
+    sc.q[0] = std::cos(0.5 * yaw); sc.q[1] = 0; sc.q[2] = 0; sc.q[3] = std::sin(0.5 * yaw);
+    sc.t[0] = s.x; sc.t[1] = s.y; sc.t[2] = s.z;
+    sc.hasIndexBounds = true;
+    sc.rowMin = 0; sc.rowMax = kSceneRows - 1;
+    sc.colMin = 0; sc.colMax = kSceneCols - 1;
+    sc.fields = {
+        {"cartesianX",  e57::FieldType::FloatDouble},
+        {"cartesianY",  e57::FieldType::FloatDouble},
+        {"cartesianZ",  e57::FieldType::FloatDouble},
+        {"rowIndex",    e57::FieldType::Integer, 0, kSceneRows - 1},
+        {"columnIndex", e57::FieldType::Integer, 0, kSceneCols - 1},
+    };
+    sc.data.assign(5, {});
+
+    const double o[3] = {s.x, s.y, s.z};
+    for (int r = 0; r < kSceneRows; ++r) {
+        const double el = elOfRow(r), ce = std::cos(el), se = std::sin(el);
+        for (int c = 0; c < kSceneCols; ++c) {
+            const double az = azOfCol(c);
+            const double lx = ce * std::cos(az), ly = ce * std::sin(az), lz = se;
+            const double d[3] = {cy * lx - sy * ly, sy * lx + cy * ly, lz};
+            const double t = castRay(o, d, far, groundZ);
+            if (t < 0) continue;                      // nothing came back
+            if (preRotated) {
+                // Already turned into the world frame, but still relative to the
+                // setup, which is where a producer that pre-transforms leaves them.
+                sc.data[0].push_back(t * d[0]);
+                sc.data[1].push_back(t * d[1]);
+                sc.data[2].push_back(t * d[2]);
+            } else {
+                sc.data[0].push_back(t * lx);         // stored scanner-local
+                sc.data[1].push_back(t * ly);
+                sc.data[2].push_back(t * lz);
+            }
+            sc.data[3].push_back(double(r));
+            sc.data[4].push_back(double(c));
+        }
+    }
+    return fixture::write(path, {sc}, 512);
+}
+
+} // namespace scene
+
+static void testKnownSceneFromFiveSetups() {
+    std::printf("one scene, five setups, answers known in advance\n");
+
+    const double maxRange = 45.0;
+    const scene::Setup setups[5] = {
+        {  0.0,   0.0, 1.6,    0.0},
+        {  0.0,  14.0, 1.6,   90.0},
+        {-14.0,   0.0, 1.6,  180.0},
+        {  6.0, -14.0, 1.6,  270.0},
+        { 32.0,  12.0, 1.6,   45.0},
+    };
+    std::vector<std::string> paths;
+    for (int k = 0; k < 5; ++k) {
+        const std::string p = tmpPath(("scene" + std::to_string(k)).c_str());
+        CHECK(scene::writeSetup(p, setups[k], 55.0), "scene fixture written");
+        paths.push_back(p);
+    }
+
+    // Built the way the pipeline builds them, and combined the way the carve
+    // combines them — through the same primitive, so this is the method under
+    // test rather than a restatement of it.
+    rimg::Options ro;
+    ro.maxRange = maxRange;
+    std::vector<std::unique_ptr<rimg::RangeImage>> images;
+    std::vector<std::unique_ptr<e57::Reader>> readers;
+    std::vector<carve::SetupView> views;
+    for (size_t k = 0; k < paths.size(); ++k) {
+        auto rd = std::make_unique<e57::Reader>();
+        std::string err;
+        CHECK(rd->open(paths[k], err), err.empty() ? "opened" : err.c_str());
+        auto im = std::make_unique<rimg::RangeImage>();
+        const bool built = rimg::build(*rd, 0, ro, *im, err);
+        CHECK(built, err.empty() ? "range image built" : err.c_str());
+        if (!built) return;
+        CHECK(im->map.valid, "the measured mapping is accepted");
+        CHECK(im->map.roundTripFraction > 0.99, "and the scan's own points find their cells");
+        images.push_back(std::move(im));
+        readers.push_back(std::move(rd));
+    }
+    // The blind cone, decided across the corpus exactly as vis::run decides it.
+    // Not an optional extra: left to itself, a scan whose only empty band is the
+    // sky guesses that band is the instrument's cone, and then nothing clears at
+    // all. This scene has no instrument cone — its rasters reach the ground at
+    // every setup — and the corpus is what establishes that.
+    {
+        std::vector<rimg::RangeImage*> raw;
+        for (auto& im : images) raw.push_back(im.get());
+        const rimg::ConeVerdict cv = rimg::markBlindConeAcrossCorpus(raw, ro);
+        CHECK(!cv.decided, "no band is the same in every scan, so there is no instrument cone");
+        for (auto& im : images)
+            CHECK(im->diag.blindConeRows == 0,
+                  "and no scan is left having guessed one on its own");
+    }
+    for (auto& im : images) views.push_back(carve::makeSetupView(*im));
+
+    carve::Params p;
+    p.voxelSize     = 0.5;
+    p.surfaceMargin = 0.5 * p.voxelSize * 1.7320508075688772;
+    p.maxRange      = maxRange;
+
+    auto verdict = [&](double x, double y, double z) {
+        uint8_t bits = 0;
+        for (const carve::SetupView& v : views) bits |= carve::evidenceAt(v, p, x, y, z);
+        return bits;
+    };
+
+    // --- claim 1: a ray that returned nothing clears, and only so far --------
+    CHECK(verdict(0, 0, 12.0) & carve::kVisible, "12 m above a setup, open sky: cleared");
+    CHECK(verdict(0, 0, 30.0) & carve::kVisible, "30 m above it: still cleared");
+    CHECK(verdict(-30.0, -30.0, 20.0) & carve::kVisible, "and away over open ground");
+    CHECK(verdict(0, 0, 1.6 + 46.0) == 0, "past the rated range a no-return says nothing");
+
+    // Most of the sky, not a few lucky points. This is the number that was wrong
+    // in the field: low here and the whole site comes back a solid ball.
+    uint64_t skyTested = 0, skyClear = 0;
+    for (int i = -30; i <= 30; i += 3)
+        for (int j = -30; j <= 30; j += 3)
+            for (int h = 10; h <= 25; h += 3) {
+                const double d = std::sqrt(double(i * i + j * j + (h - 2) * (h - 2)));
+                if (d > 38.0) continue;                    // well inside the range
+                ++skyTested;
+                if (verdict(i, j, h) & carve::kVisible) ++skyClear;
+            }
+    CHECK(skyTested > 200, "the sky sample is worth something");
+    CHECK(skyClear * 100 >= skyTested * 99,
+          "essentially all of the open sky within range is cleared");
+
+    // --- claim 2: a surface stops the clearing ------------------------------
+    CHECK(verdict(5.0, 0.0, 1.6) & carve::kVisible, "open air in front of the building");
+    CHECK(verdict(10.0, 0.0, 3.0) & carve::kOccupied, "the building's near wall is measured");
+
+    uint64_t insideTested = 0, insideSeen = 0;
+    for (double x = 11.0; x < 24.5; x += 1.0)
+        for (double y = -7.0; y < 7.5; y += 1.0)
+            for (double z = 0.5; z < 5.5; z += 1.0) {
+                const double q[3] = {x, y, z};
+                if (!scene::insideBox(q)) continue;
+                ++insideTested;
+                if (verdict(x, y, z) & carve::kVisible) ++insideSeen;
+            }
+    CHECK(insideTested > 200, "the interior sample is worth something");
+    CHECK(insideSeen == 0, "nothing inside the building is ever cleared");
+
+    uint64_t underTested = 0, underSeen = 0;
+    for (int i = -20; i <= 20; i += 2)
+        for (int j = -20; j <= 20; j += 2)
+            for (double z = -1.5; z > -6.0; z -= 1.0) {
+                ++underTested;
+                if (verdict(i, j, z) & carve::kVisible) ++underSeen;
+            }
+    CHECK(underTested > 200, "the underground sample is worth something");
+    CHECK(underSeen == 0, "nothing below the ground is ever cleared");
+
+    // --- claim 3: the five agree in one world frame -------------------------
+    // Straight down from setup 0 is outside its own field of view; setup 1
+    // measures the ground there. Only a shared world frame makes that work.
+    CHECK((verdict(0, 0, 0.0) & (carve::kVisible | carve::kOccupied)) != 0,
+          "ground under one setup is covered by another");
+
+    // And the whole job end to end, so the aggregate cannot be right by accident.
+    vis::Options vo;
+    vo.voxelSize  = 0.5;
+    vo.maxRange   = maxRange;
+    vo.tileVoxels = 64;
+    vo.domain     = vis::DomainMode::RangeSpheres;
+    vis::Result res;
+    std::string err;
+    CHECK(vis::run(paths, vo, nullptr, res, err), err.empty() ? "carve ran" : err.c_str());
+    CHECK(res.setupsUsed == 5, "all five setups contribute");
+    CHECK(res.setupsWithoutMapping == 0, "and none had its mapping refused");
+    const double seen = double(res.stats.visible + res.stats.occupied);
+    const double reach = double(res.stats.reachable);
+    CHECK(reach > 0 && seen / reach > 0.25,
+          "a real fraction of the space in range was observed, not a sliver");
+    CHECK(seen / reach < 0.95, "and the ground and the building still hide plenty");
+}
+
+// A datum setup, and the one mistake nothing inside a scan can catch.
+//
+// The frame test compares how far the points sit from the local origin against
+// how far they sit from the pose translation. That sees the translation and
+// nothing else — a rotation leaves every one of those distances exactly as it
+// was. So on the first setup of a job, registered as the datum with a translation
+// of millimetres and a rotation of ninety degrees, the test has no information at
+// all, and whichever way it falls it turns that cloud a quarter turn.
+//
+// Between scans it is easy: registered scans of one site describe the same
+// surfaces, so the right hypothesis is the one whose cloud lands on the others.
+// This builds both cases and checks that the diagnostic says so.
+static void testDatumSetupWithNoTranslation() {
+    std::printf("a datum setup with no translation, framed both ways\n");
+
+    // Ground below the instruments, so the datum's pose translation is exactly
+    // zero — the case the per-scan test cannot judge.
+    // The datum sits at the world origin; the others are spread around the site
+    // and outside the building, so between them they describe the same surfaces.
+    const scene::Setup datum{0.0, 0.0, 0.0, 90.0};
+    const scene::Setup others[2] = {{-12.0, 6.0, 0.0, 0.0}, {6.0, -13.0, 0.0, 200.0}};
+
+    auto build = [&](bool datumPreRotated, std::vector<std::string>& paths) {
+        paths.clear();
+        const char* tag = datumPreRotated ? "framebad" : "framegood";
+        const std::string a = tmpPath((std::string(tag) + "0").c_str());
+        CHECK(scene::writeSetup(a, datum, 55.0, -1.6, datumPreRotated), "datum written");
+        paths.push_back(a);
+        for (int k = 0; k < 2; ++k) {
+            const std::string b = tmpPath((std::string(tag) + std::to_string(k + 1)).c_str());
+            CHECK(scene::writeSetup(b, others[k], 55.0, -1.6, false), "setup written");
+            paths.push_back(b);
+        }
+    };
+
+    report::Options ro;
+    ro.maxRange = 45.0;
+
+    // Stored the way the standard says: scanner-local, pose applied. Both land.
+    std::vector<std::string> good;
+    build(false, good);
+    std::string goodText;
+    report::selfTest(good, ro, goodText);
+    CHECK(goodText.find("A translation that small cannot move") != std::string::npos,
+          "the per-scan test admits it has no evidence about the datum");
+    CHECK(goodText.find("THE POSE IS BEING APPLIED THE WRONG WAY") == std::string::npos,
+          "and with the scan stored correctly, nothing is flagged");
+    CHECK(goodText.find("All scans land on each other") != std::string::npos,
+          "the two agree in one world frame");
+
+    // The same datum, its points already turned into the world frame while the
+    // file still declares the pose. Applying it turns the cloud a second time.
+    std::vector<std::string> bad;
+    build(true, bad);
+    std::string badText;
+    const int failures = report::selfTest(bad, ro, badText);
+    CHECK(badText.find("THE POSE IS BEING APPLIED THE WRONG WAY") != std::string::npos,
+          "the corpus catches what no single scan could");
+    CHECK(failures >= 0, "the self-test still completes on a mis-framed corpus");
+}
+
 int main() {
     testDefaultsAgreeWithTheLibrary();
     testVoxelHash();
     testTouchesVisible();
     testRebase();
     testEndToEnd();
+    testKnownSceneFromFiveSetups();
+    testDatumSetupWithNoTranslation();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

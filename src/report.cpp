@@ -1,5 +1,6 @@
 #include "report.h"
 
+#include "carve.h"
 #include "e57.h"
 #include "frame.h"
 #include "version.h"
@@ -9,7 +10,9 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace report {
@@ -420,6 +423,457 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
 
     o.add("\n");
     return failures == 0 ? 0 : 1;
+}
+
+namespace {
+
+// One scan's points, in the world frame, plus a coarse occupancy set.
+struct Cloud {
+    std::string name;
+    double setup[3] = {0, 0, 0};          // where the file says the scanner was
+    double lo[3] = {0, 0, 0}, hi[3] = {0, 0, 0};
+    std::vector<float> xyz;               // under the chosen hypothesis
+    std::vector<float> alt;               // under the other one
+    std::unordered_set<int64_t> cells;    // of `xyz`
+    bool   applied = false;               // the chosen hypothesis: pose applied?
+    bool   uninformative = false;
+    double rotationDeg = 0, translationM = 0;
+    std::string reason;
+};
+
+// Coarse enough that registration error and scan-to-scan sampling do not matter,
+// fine enough that a cloud turned by a few degrees stops matching.
+constexpr double kAgreeCell = 0.5;
+
+// How far in front of another setup's measured surface a point has to sit before
+// it counts as contradicted. Well clear of the surface margin, so a point on a
+// shared surface — which is agreement, not conflict — is never counted.
+constexpr double kContradictSlack = 0.75;
+
+int64_t cellKey(double x, double y, double z) {
+    const int64_t i = int64_t(std::floor(x / kAgreeCell));
+    const int64_t j = int64_t(std::floor(y / kAgreeCell));
+    const int64_t k = int64_t(std::floor(z / kAgreeCell));
+    return ((i & 0x1FFFFF) << 42) | ((j & 0x1FFFFF) << 21) | (k & 0x1FFFFF);
+}
+
+// The share of `pts` that another setup saw straight through.
+//
+// This is the measurement that settles it, and simple overlap is not: a ground
+// plane is unchanged by turning it about a vertical axis, so most of a mis-yawed
+// cloud still lands on ground and "agreement" stays high whichever way round it
+// is. Contradiction cannot be faked that way. A point is a surface something
+// measured, and no setup can have had a clear line of sight through a surface —
+// so a point sitting well in front of another setup's own measured surface, in
+// space that setup cleared, is a physical impossibility. Under the right
+// transform these are rare; under a wrong one the building lands in the middle of
+// space everyone else saw through, and the rate goes through the roof.
+struct Conflict {
+    double rate = -1.0;      // of the points anyone could speak to
+    double judged = 0.0;     // what share of the scan that was
+};
+
+Conflict contradicted(const std::vector<float>& pts,
+                      const std::vector<carve::SetupView>& views, size_t skip,
+                      const carve::Params& p) {
+    Conflict c;
+    if (pts.empty()) return c;
+    carve::Params loose = p;
+    loose.surfaceMargin = kContradictSlack;
+    uint64_t total = 0, n = 0, bad = 0;
+    for (size_t i = 0; i + 2 < pts.size(); i += 3) {
+        ++total;
+        bool judged = false, through = false;
+        for (size_t v = 0; v < views.size(); ++v) {
+            if (v == skip) continue;
+            const uint8_t e = carve::evidenceAt(views[v], loose, pts[i], pts[i + 1], pts[i + 2]);
+            if (e & (carve::kVisible | carve::kOccupied)) judged = true;
+            if (e & carve::kVisible) through = true;
+        }
+        if (!judged) continue;            // nobody could speak to this point
+        ++n;
+        if (through) ++bad;
+    }
+    // Coverage matters as much as the rate. A hypothesis that flings a cloud
+    // somewhere nobody is looking scores a beautiful conflict rate over a handful
+    // of points, so a rate is only worth comparing against one measured over a
+    // comparable share of the scan.
+    c.judged = total ? double(n) / double(total) : 0.0;
+    c.rate   = n ? double(bad) / double(n) : -1.0;
+    return c;
+}
+
+// The share of `pts` that land on or beside an occupied cell of `set`.
+double agreement(const std::vector<float>& pts, const std::unordered_set<int64_t>& set) {
+    if (pts.empty() || set.empty()) return -1.0;
+    uint64_t hit = 0, n = 0;
+    for (size_t i = 0; i + 2 < pts.size(); i += 3) {
+        ++n;
+        bool found = false;
+        for (int dx = -1; dx <= 1 && !found; ++dx)
+            for (int dy = -1; dy <= 1 && !found; ++dy)
+                for (int dz = -1; dz <= 1 && !found; ++dz)
+                    if (set.count(cellKey(pts[i] + dx * kAgreeCell,
+                                          pts[i + 1] + dy * kAgreeCell,
+                                          pts[i + 2] + dz * kAgreeCell))) found = true;
+        if (found) ++hit;
+    }
+    return n ? double(hit) / double(n) : -1.0;
+}
+
+constexpr uint64_t kCloudSamples = 120000;
+
+} // namespace
+
+// Are the setups where the files say they are?
+//
+// Every voxel this tool produces is placed by one transform per scan: the pose,
+// applied or not according to viewer::decideFrame. That decision is made from a
+// single scan's points, and it can only see the pose's TRANSLATION — a rotation
+// leaves every distance-to-a-centre exactly as it was. So on a file whose first
+// setup is the registration datum, with a translation of millimetres and a
+// rotation of ninety degrees, the test has no information and the answer is a
+// coin toss that turns the whole cloud a quarter turn.
+//
+// Nothing inside one scan can settle that. Between scans it is easy: registered
+// scans of one site describe the same surfaces, so the right hypothesis is the one
+// whose cloud lands on the others. This tries both for every scan and reports what
+// each is worth, which turns "the setups look wrong" into a number.
+static void registrationCheck(const std::vector<std::string>& paths, const Options& opt,
+                              const std::vector<carve::SetupView>& views,
+                              const carve::Params& params, Out& o) {
+    std::vector<Cloud> clouds;
+    for (const std::string& path : paths) {
+        e57::Reader r;
+        std::string e;
+        if (!r.open(path, e)) continue;
+        for (size_t i = 0; i < r.scanCount(); ++i) {
+            const e57::Scan& s = r.scan(i);
+            if (!(s.field("cartesianX") && s.field("cartesianY") && s.field("cartesianZ")))
+                continue;
+            const viewer::FrameDecision fd = viewer::decideFrame(r, i);
+            const viewer::Rigid R = viewer::rigidFromPose(s.pose);
+
+            Cloud c;
+            c.name = s.name.empty() ? path : s.name;
+            c.applied       = fd.applyPose();
+            c.uninformative = fd.uninformative;
+            c.rotationDeg   = fd.poseRotationDeg;
+            c.translationM  = fd.poseTranslationM;
+            c.reason        = fd.reason;
+            for (int k = 0; k < 3; ++k) c.setup[k] = s.pose.t[k];
+
+            std::vector<std::string> want{"cartesianX", "cartesianY", "cartesianZ"};
+            size_t invIdx = SIZE_MAX;
+            if (s.field("cartesianInvalidState")) { invIdx = 3; want.push_back("cartesianInvalidState"); }
+            const uint64_t stride =
+                std::max<uint64_t>(1, s.recordCount / std::max<uint64_t>(1, kCloudSamples));
+            uint64_t seen = 0;
+            bool first = true;
+            std::string err;
+            r.readPoints(i, want, [&](const e57::PointBlock& b) {
+                for (size_t k = 0; k < b.count; ++k, ++seen) {
+                    if (seen % stride) continue;
+                    if (invIdx != SIZE_MAX && b.columns[invIdx][k] != 0.0) continue;
+                    const double x = b.columns[0][k], y = b.columns[1][k], z = b.columns[2][k];
+                    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+                    const double raw[3] = {x, y, z};
+                    double w[3] = {x, y, z};
+                    R.apply(w[0], w[1], w[2]);
+                    // Both hypotheses are kept: the chosen one, and the one the
+                    // decision rejected. Judging them against the same corpus is
+                    // the whole point.
+                    const double* use   = c.applied ? w : raw;
+                    const double* other = c.applied ? raw : w;
+                    for (int a = 0; a < 3; ++a) {
+                        c.xyz.push_back(float(use[a]));
+                        c.alt.push_back(float(other[a]));
+                    }
+                    if (first) {
+                        first = false;
+                        for (int a = 0; a < 3; ++a) { c.lo[a] = c.hi[a] = use[a]; }
+                    } else {
+                        for (int a = 0; a < 3; ++a) {
+                            c.lo[a] = std::min(c.lo[a], use[a]);
+                            c.hi[a] = std::max(c.hi[a], use[a]);
+                        }
+                    }
+                }
+                return true;
+            }, err);
+            for (size_t k = 0; k + 2 < c.xyz.size(); k += 3)
+                c.cells.insert(cellKey(c.xyz[k], c.xyz[k + 1], c.xyz[k + 2]));
+            if (!c.xyz.empty()) clouds.push_back(std::move(c));
+        }
+    }
+    if (clouds.size() < 2) {
+        o.add("registration: needs two or more scans to check\n\n");
+        return;
+    }
+
+    o.add("registration\n");
+    for (size_t i = 0; i < clouds.size(); ++i) {
+        const Cloud& c = clouds[i];
+        o.add("  [%zu] %s\n", i, c.name.c_str());
+        o.add("      setup at (%.3f, %.3f, %.3f)   pose %.1f deg / %.3f m   pose is %s\n",
+              c.setup[0], c.setup[1], c.setup[2], c.rotationDeg, c.translationM,
+              c.applied ? "APPLIED" : "not applied");
+        o.add("      its returns span x[%.1f, %.1f] y[%.1f, %.1f] z[%.1f, %.1f]\n",
+              c.lo[0], c.hi[0], c.lo[1], c.hi[1], c.lo[2], c.hi[2]);
+        if (c.uninformative)
+            o.add("      *** %s\n", c.reason.c_str());
+    }
+
+    // Each scan judged against the rest of the corpus, under both hypotheses.
+    //
+    // Two numbers, and only the second decides. Overlap says how much of this
+    // scan the others also saw, which is useful context but cannot settle
+    // anything — a ground plane is unchanged by turning it about a vertical axis.
+    // Contradiction says how much of this scan sits in space the others saw
+    // straight through, which is impossible for a real surface and which no
+    // symmetry of the scene can hide.
+    o.add("\n  Each scan against the rest of the corpus, under both hypotheses:\n");
+    o.add("      %-22s %9s %9s   %9s %9s   %s\n", "scan",
+          "overlap", "(other)", "conflict", "(other)", "verdict");
+    size_t suspect = 0;
+    const bool haveViews = views.size() == clouds.size();
+    for (size_t i = 0; i < clouds.size(); ++i) {
+        std::unordered_set<int64_t> others;
+        for (size_t j = 0; j < clouds.size(); ++j) {
+            if (j == i) continue;
+            others.insert(clouds[j].cells.begin(), clouds[j].cells.end());
+        }
+        const double oa = agreement(clouds[i].xyz, others);
+        const double ob = agreement(clouds[i].alt, others);
+        const Conflict ca = haveViews ? contradicted(clouds[i].xyz, views, i, params) : Conflict{};
+        const Conflict cb = haveViews ? contradicted(clouds[i].alt, views, i, params) : Conflict{};
+
+        const char* verdict = "ok";
+        // Only the comparison decides, and only when the alternative was judged
+        // over a comparable share of the scan. Both rates carry a floor from the
+        // raster itself: ground at grazing incidence puts a cell's near edge
+        // metres in front of its far edge, and a point on the far edge reads as
+        // being in cleared space through no fault of the registration.
+        if (ca.rate >= 0 && cb.rate >= 0 && cb.judged > 0.5 * ca.judged &&
+            ca.rate > 0.20 && cb.rate < ca.rate * 0.6) {
+            verdict = "*** THE POSE IS BEING APPLIED THE WRONG WAY ***";
+            ++suspect;
+        }
+        o.add("      %-22s %8.1f%% %8.1f%%   %8.1f%% %8.1f%%   %s\n",
+              clouds[i].name.c_str(), 100.0 * oa, 100.0 * ob,
+              100.0 * ca.rate, 100.0 * cb.rate, verdict);
+    }
+    if (suspect)
+        o.add("\n  %zu scan(s) do not agree with the rest. Every voxel is placed by these\n"
+              "  transforms, so a scan in the wrong place carves its evidence into the\n"
+              "  wrong part of the site and leaves the right part unobserved.\n", suspect);
+    else
+        o.add("\n  All scans land on each other under the transform being used.\n");
+    o.add("\n");
+    (void)opt;
+}
+
+int selfTest(const std::vector<std::string>& paths, const Options& opt, std::string& out) {
+    Out o{out};
+    o.add("e57cov evidence self-test — build %s\n", ver::describe());
+    o.add("%zu file(s), max range %.1f m\n\n", paths.size(), opt.maxRange);
+
+    rimg::Options ro;
+    ro.maxRange         = opt.maxRange;
+    ro.blindCone        = opt.blindCone;
+    ro.noReturnRadius   = opt.noReturnRadius;
+    ro.noReturnFraction = opt.noReturnFraction;
+
+    std::vector<std::unique_ptr<e57::Reader>> readers;
+    std::vector<std::unique_ptr<rimg::RangeImage>> images;
+    std::vector<std::string> names;
+    for (const std::string& path : paths) {
+        auto r = std::make_unique<e57::Reader>();
+        std::string e;
+        if (!r->open(path, e)) { o.add("%s: %s\n", path.c_str(), e.c_str()); continue; }
+        for (size_t i = 0; i < r->scanCount(); ++i) {
+            auto img = std::make_unique<rimg::RangeImage>();
+            std::string rerr;
+            if (!rimg::build(*r, i, ro, *img, rerr)) {
+                o.add("%s [%zu]: range image failed — %s\n", path.c_str(), i, rerr.c_str());
+                continue;
+            }
+            images.push_back(std::move(img));
+            names.push_back(r->scan(i).name.empty() ? path : r->scan(i).name);
+        }
+        readers.push_back(std::move(r));
+    }
+    if (images.empty()) { o.add("no usable scans\n"); return 1; }
+
+    // The same corpus-wide cone decision the carve makes, so this describes the
+    // run rather than a differently-decided one.
+    {
+        std::vector<rimg::RangeImage*> raw;
+        for (auto& im : images) raw.push_back(im.get());
+        const rimg::ConeVerdict v = rimg::markBlindConeAcrossCorpus(raw, ro);
+        o.add("blind cone: %s\n            %s\n\n",
+              v.decided ? (v.atFirstRow ? "the START of each raster" : "the END of each raster")
+                        : "not identified",
+              v.why.c_str());
+    }
+
+    carve::Params p;
+    p.voxelSize     = 0.05;
+    p.surfaceMargin = 0.5 * p.voxelSize * 1.7320508075688772;
+    p.maxRange      = opt.maxRange;
+
+    // The registration check needs the setups the carve would use, because the
+    // question it asks — did another setup see through this point? — is answered
+    // by the same primitive everything else is.
+    std::vector<carve::SetupView> views;
+    views.reserve(images.size());
+    for (auto& im : images) views.push_back(carve::makeSetupView(*im));
+    registrationCheck(paths, opt, views, p, o);
+
+    // Roughly this many cells per scan, spread evenly over the whole raster
+    // rather than taken from one corner: a mapping can be right for one band and
+    // wrong for another, and that is the failure worth catching.
+    constexpr uint64_t kSamplesWanted = 40000;
+
+    int failures = 0;
+    double totalPredicted = 0;
+    for (size_t k = 0; k < images.size(); ++k) {
+        const rimg::RangeImage& im = *images[k];
+        const carve::SetupView& s = views[k];
+        const viewer::Rigid fwd = im.hasPose ? viewer::rigidFromPose(im.pose) : viewer::Rigid{};
+
+        o.add("  [%zu] %s\n", k, names[k].c_str());
+        if (im.rows == 0 || im.cols == 0 || im.map.elByRow.size() != im.rows ||
+            im.map.azByCol.size() != im.cols) {
+            o.add("      no usable raster\n\n");
+            ++failures;
+            continue;
+        }
+        o.add("      setup at (%.3f, %.3f, %.3f)   raster %u x %u   mapping %s\n",
+              fwd.t[0], fwd.t[1], fwd.t[2], im.rows, im.cols,
+              im.map.valid ? "accepted" : "*** REFUSED — every lookup returns nothing ***");
+        if (!im.map.valid) ++failures;
+
+        // A world point in the direction cell (r, c) looked, at range rho.
+        auto pointAt = [&](uint32_t r, uint32_t c, double rho, double w[3]) {
+            const double el = im.map.elByRow[r], az = im.map.azByCol[c];
+            const double ce = std::cos(el);
+            const double q[3] = {rho * ce * std::cos(az), rho * ce * std::sin(az),
+                                 rho * std::sin(el)};
+            for (int i = 0; i < 3; ++i)
+                w[i] = fwd.R[3 * i + 0] * q[0] + fwd.R[3 * i + 1] * q[1] +
+                       fwd.R[3 * i + 2] * q[2] + fwd.t[i];
+        };
+        auto ask = [&](uint32_t r, uint32_t c, double rho) {
+            double w[3];
+            pointAt(r, c, rho, w);
+            return carve::evidenceAt(s, p, w[0], w[1], w[2]);
+        };
+
+        const uint64_t cells = uint64_t(im.rows) * im.cols;
+        const uint32_t stride = uint32_t(std::max<uint64_t>(1, cells / kSamplesWanted));
+
+        uint64_t nHit = 0, nHitTested = 0, hitNearOk = 0, hitOnOk = 0, hitBeyondOk = 0;
+        uint64_t nEmpty = 0, emptyHalfOk = 0, emptyPastOk = 0, emptyClean = 0;
+        uint64_t nUnsampled = 0, unsampledOk = 0;
+        uint64_t skipped = 0;
+
+        uint64_t i = 0;
+        for (uint32_t r = 0; r < im.rows; ++r) {
+            for (uint32_t c = 0; c < im.cols; ++c, ++i) {
+                if (i % stride) continue;
+                const rimg::Status st = im.statusAt(r, c);
+                const double d = im.rangeAt(r, c);
+
+                if (st == rimg::Status::OutsideFov) {
+                    ++nUnsampled;
+                    if (ask(r, c, 5.0) == 0 && ask(r, c, 0.4 * opt.maxRange) == 0) ++unsampledOk;
+                    continue;
+                }
+                if (st == rimg::Status::NoReturn) {
+                    ++nEmpty;
+                    const double clear = std::min(d, opt.maxRange);
+                    if (clear < 2.0) { ++skipped; continue; }
+                    if (ask(r, c, 0.5 * clear) == carve::kVisible) ++emptyHalfOk;
+                    if (ask(r, c, clear + 2.0) == 0) ++emptyPastOk;
+                    // Cleanly, not just at one point: every metre of the ray.
+                    bool clean = true;
+                    for (double rho = 1.0; rho <= clear - 0.5; rho += 1.0)
+                        if (ask(r, c, rho) != carve::kVisible) { clean = false; break; }
+                    if (clean) ++emptyClean;
+                    continue;
+                }
+                // A return. Too near and the three probes are not separable; past
+                // the rated range and the setting, not the surface, decides.
+                ++nHit;
+                if (d < 2.0 || d > opt.maxRange - 2.0) { ++skipped; continue; }
+                ++nHitTested;
+                if (ask(r, c, 0.5 * d) == carve::kVisible)  ++hitNearOk;
+                if (ask(r, c, d)       == carve::kOccupied) ++hitOnOk;
+                if (ask(r, c, d + 1.0) == 0)                ++hitBeyondOk;
+            }
+        }
+
+        auto pct = [](uint64_t a, uint64_t b) { return b ? 100.0 * double(a) / double(b) : -1.0; };
+        auto line = [&](const char* what, uint64_t ok, uint64_t n, const char* should) {
+            if (!n) { o.add("      %-22s none in this scan\n", what); return; }
+            const double f = pct(ok, n);
+            o.add("      %-22s %7.2f%% of %llu  %s%s\n", what, f,
+                  (unsigned long long)n, should, f >= 99.0 ? "" : "   *** BROKEN ***");
+            if (f < 99.0) ++failures;
+        };
+        o.add("      cells: %llu returns, %llu empty, %llu unsampled  (%llu sampled, "
+              "%llu skipped as too near or too far)\n",
+              (unsigned long long)nHit, (unsigned long long)nEmpty,
+              (unsigned long long)nUnsampled,
+              (unsigned long long)(nHit + nEmpty + nUnsampled),
+              (unsigned long long)skipped);
+        line("in front of a return", hitNearOk,   nHitTested, "read VISIBLE");
+        line("on a return",          hitOnOk,     nHitTested, "read OCCUPIED");
+        line("behind a return",      hitBeyondOk, nHitTested, "read nothing");
+        line("halfway along empty",  emptyHalfOk, nEmpty, "read VISIBLE");
+        line("all along empty",      emptyClean,  nEmpty, "clear with no gaps");
+        line("past an empty ray",    emptyPastOk, nEmpty, "read nothing");
+        line("along unsampled",      unsampledOk, nUnsampled, "read nothing");
+
+        // What this raster says the setup ought to clear, from the file alone.
+        // Each cell is a pencil of solid angle dAz*dEl*cos(el) reaching however
+        // far that cell established; the volume of a pencil of solid angle W out
+        // to rho is W*rho^3/3. Setups overlap, so this over-counts the union — but
+        // a carve reporting a small fraction of it is not overlapping, it is
+        // failing.
+        double predicted = 0;
+        const double dAz = std::fabs(im.map.azSpanRad) / double(std::max(1u, im.cols - 1));
+        for (uint32_t r = 0; r < im.rows; ++r) {
+            const double elLo = (r == 0) ? im.map.elByRow[0]
+                                         : 0.5 * (im.map.elByRow[r - 1] + im.map.elByRow[r]);
+            const double elHi = (r + 1 == im.rows)
+                                    ? im.map.elByRow[r]
+                                    : 0.5 * (im.map.elByRow[r] + im.map.elByRow[r + 1]);
+            const double dEl = std::fabs(elHi - elLo);
+            const double w = dAz * dEl * std::cos(im.map.elByRow[r]);
+            for (uint32_t c = 0; c < im.cols; ++c) {
+                const rimg::Status st = im.statusAt(r, c);
+                if (st == rimg::Status::OutsideFov) continue;
+                double rho = im.rangeAt(r, c);
+                if (st == rimg::Status::Hit) rho = std::max(0.0, rho - p.surfaceMargin);
+                rho = std::min(rho, opt.maxRange);
+                predicted += w * rho * rho * rho / 3.0;
+            }
+        }
+        totalPredicted += predicted;
+        o.add("      this raster alone should clear about %.0f m^3\n\n", predicted);
+    }
+
+    const double sphere = 4.0 / 3.0 * 3.14159265358979323846 *
+                          opt.maxRange * opt.maxRange * opt.maxRange;
+    o.add("Together the rasters say these setups clear about %.0f m^3, before any\n"
+          "overlap between them is taken off. One setup's whole range sphere is\n"
+          "%.0f m^3, so a carve that reports far less visible than this has a fault\n"
+          "between the raster and the voxels, not in the data.\n\n",
+          totalPredicted, sphere);
+    o.add(failures ? "*** SELF-TEST FAILED ***\n" : "Self-test passed.\n");
+    return failures;
 }
 
 int scanReport(const std::vector<std::string>& paths, const Options& opt, std::string& out) {

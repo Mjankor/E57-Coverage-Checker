@@ -39,6 +39,27 @@ struct FrameDecision {
     FrameConvention convention = FrameConvention::Unknown;
     double medianFromLocalOrigin = -1.0;
     double medianFromPoseOrigin  = -1.0;
+    // The test compares how far the points sit from the local origin against how
+    // far they sit from the pose translation. That measures the TRANSLATION and
+    // nothing else: a rotation leaves every one of those distances exactly as it
+    // was, so nothing sampled here can say whether the pose's rotation belongs on
+    // these points.
+    //
+    // Fine when the translation is large — it settles the question, and the
+    // rotation comes along with the answer. Not fine when the translation is near
+    // zero: the two medians are then the same number, the test has no information
+    // at all, and the decision it makes still turns the cloud by the pose's whole
+    // rotation angle. Real files do exactly this — a first setup registered as the
+    // datum has a translation of a few millimetres and a rotation of ninety
+    // degrees, and the report printed "median 2.6 m, not 2.6 m" as though that
+    // were evidence.
+    //
+    // So the case is now detected and reported rather than answered. These say how
+    // much rotation is at stake, and whether the translation could carry any
+    // evidence about it at all.
+    double poseRotationDeg  = 0.0;
+    double poseTranslationM = 0.0;
+    bool   uninformative = false;
     std::string reason;
 
     bool applyPose() const {

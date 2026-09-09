@@ -310,6 +310,13 @@ void usage() {
         "usage: e57cov info  [--crc] [--max-range <m>] <file.e57> [more.e57 ...]\n"
         "       e57cov carve [options] <file.e57> [more.e57 ...]\n"
         "       e57cov probe <x> <y> <z> <file.e57> [more.e57 ...]\n"
+        "       e57cov selftest [--max-range <m>] <file.e57> [more.e57 ...]\n"
+        "\n"
+        "  selftest  Ask the evidence primitive about each scan's own cells, where\n"
+        "          the right answer is not in doubt: in front of a return must read\n"
+        "          visible, on it occupied, behind it nothing, and every metre of an\n"
+        "          empty ray must clear. Reports percentages, and what each raster\n"
+        "          says the setup ought to clear.\n"
         "\n"
         "  info    Inspect scans and audit format conventions. Reports how each\n"
         "          file represents no-return rays and which coordinate frame its\n"
@@ -391,7 +398,7 @@ int main(int argc, char** argv) {
 
     const std::string cmd = argv[1];
     if (cmd == "-h" || cmd == "--help" || cmd == "help") { usage(); return 0; }
-    if (cmd != "info" && cmd != "carve" && cmd != "probe") {
+    if (cmd != "info" && cmd != "carve" && cmd != "probe" && cmd != "selftest") {
         std::printf("unknown command '%s'\n\n", cmd.c_str());
         usage();
         return 2;
@@ -486,6 +493,17 @@ int main(int argc, char** argv) {
         return probePoint(files, co, world);
     }
     if (cmd == "carve") return carveCorpus(paths, co);
+    if (cmd == "selftest") {
+        report::Options ro;
+        ro.maxRange         = co.maxRange;
+        ro.blindCone        = co.blindCone;
+        ro.noReturnRadius   = co.skyRadius;
+        ro.noReturnFraction = co.skyFraction;
+        std::string text;
+        const int failures = report::selfTest(paths, ro, text);
+        std::fputs(text.c_str(), stdout);
+        return failures == 0 ? 0 : 1;
+    }
 
     return info(paths, crc, co.maxRange, co) == 0 ? 0 : 1;
 }
