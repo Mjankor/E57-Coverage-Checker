@@ -621,7 +621,13 @@ static void rasterAudit(e57::Reader& r, size_t scanIndex, const rimg::RangeImage
         return 100.0 * double(n) / double(v.size());
     };
 
-    o.add("      raster audit: %llu points, %.1f%% resolved to no cell\n",
+    // Returns only — every record in the file is one. A return came from a
+    // direction the scanner looked in, so this figure is near zero by
+    // construction and says nothing whatever about the empty cells that are the
+    // sky. Reported only so that a non-zero value, which would mean the index does
+    // not even cover the directions the scan measured in, is visible.
+    o.add("      raster audit (returns only; empty cells are not sampled here)\n"
+          "        %llu points, %.1f%% resolved to no cell\n",
           (unsigned long long)used, 100.0 * double(unresolved) / double(used));
     o.add("        %-14s %8s %10s %10s %10s %10s\n", "range", "points",
           "row err", "row ok", "col err", "col ok");
@@ -634,6 +640,147 @@ static void rasterAudit(e57::Reader& r, size_t scanIndex, const rimg::RangeImage
         o.add("        %-14s %8.0f %10.1f %9.1f%% %10.1f %9.1f%%\n",
               names[i], n, med(dRow[i]), rw, med(dCol[i]), cw);
     }
+}
+
+// Does a row actually have one elevation, and a column one azimuth?
+//
+// Everything this module does rests on that and nothing checks it. A raster cell
+// is only a direction if every return in a row left at the same elevation and
+// every return in a column at the same azimuth. If that is not true of the data,
+// no mapping from (row, column) to a direction can be built, however it is fitted
+// or measured — and the round trip will fail without saying why.
+//
+// So this measures the spread itself, with no model on top and nothing taken from
+// what build() constructed. Each row's elevation is taken from its FAR returns
+// only, which are the ones any ray-origin offset barely moves; then every return
+// is compared against its own row's figure, and the deviation reported in cells,
+// bucketed by range.
+//
+// The shape of the answer names the cause:
+//
+//   deviation grows as range falls   the rays do not start where the points are
+//                                    measured from, by about (deviation x range)
+//   deviation flat in range          rows and columns are not lines of constant
+//                                    angle at all, and the raster is not one
+//   deviation near zero everywhere   the raster is fine and the fault is in the
+//                                    index built from it
+static void spreadAudit(e57::Reader& r, size_t scanIndex, const rimg::RangeImage& im,
+                        Out& o) {
+    const e57::Scan& s = r.scan(scanIndex);
+    if (!s.hasIndexBounds || !s.field("rowIndex") || !s.field("columnIndex")) return;
+    if (im.rows < 2 || im.cols < 2) return;
+
+    std::vector<std::string> want{"cartesianX", "cartesianY", "cartesianZ",
+                                  "rowIndex", "columnIndex"};
+    size_t invIdx = SIZE_MAX;
+    if (s.field("cartesianInvalidState")) { invIdx = want.size(); want.push_back("cartesianInvalidState"); }
+
+    const viewer::FrameDecision fd = viewer::decideFrame(r, scanIndex);
+    const bool subtractPose = !fd.applyPose() && s.hasPose;
+    const viewer::Rigid poseRot = viewer::rigidFromPose(s.pose);
+
+    const int64_t spanR = s.rowMax - s.rowMin + 1, spanC = s.colMax - s.colMin + 1;
+    if (spanR < 2 || spanC < 2) return;
+
+    struct Obs { float el, az, range; int32_t row, col; };
+    std::vector<Obs> obs;
+    const uint64_t stride = std::max<uint64_t>(1, s.recordCount / 400000);
+    obs.reserve(s.recordCount / stride + 16);
+
+    uint64_t seen = 0;
+    std::string err;
+    r.readPoints(scanIndex, want, [&](const e57::PointBlock& b) {
+        for (size_t k = 0; k < b.count; ++k, ++seen) {
+            if (seen % stride) continue;
+            if (invIdx != SIZE_MAX && b.columns[invIdx][k] != 0.0) continue;
+            double x = b.columns[0][k], y = b.columns[1][k], z = b.columns[2][k];
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+            if (subtractPose) {
+                const double a = x - s.pose.t[0], bb = y - s.pose.t[1], c = z - s.pose.t[2];
+                x = poseRot.R[0] * a + poseRot.R[3] * bb + poseRot.R[6] * c;
+                y = poseRot.R[1] * a + poseRot.R[4] * bb + poseRot.R[7] * c;
+                z = poseRot.R[2] * a + poseRot.R[5] * bb + poseRot.R[8] * c;
+            }
+            double az, el, range;
+            rimg::toSpherical(x, y, z, az, el, range);
+            if (range <= 1e-6) continue;
+            const int64_t rr = int64_t(b.columns[3][k]) - s.rowMin;
+            const int64_t cc = int64_t(b.columns[4][k]) - s.colMin;
+            if (rr < 0 || cc < 0 || rr >= spanR || cc >= spanC) continue;
+            obs.push_back({float(el), float(az), float(range), int32_t(rr), int32_t(cc)});
+        }
+        return true;
+    }, err);
+    if (obs.size() < 1000) return;
+
+    // Each row's and column's angle, from far returns only. Ten metres is far
+    // enough that a few centimetres of anything is a fraction of a cell, and near
+    // enough that most scans have plenty.
+    constexpr float kFar = 10.0f;
+    std::vector<double> rowEl(size_t(spanR), 0.0), colX(size_t(spanC), 0.0),
+                        colY(size_t(spanC), 0.0);
+    std::vector<uint32_t> rowN(size_t(spanR), 0), colN(size_t(spanC), 0);
+    for (const Obs& p : obs) {
+        if (p.range < kFar) continue;
+        rowEl[size_t(p.row)] += p.el; ++rowN[size_t(p.row)];
+        colX[size_t(p.col)] += std::cos(double(p.az));
+        colY[size_t(p.col)] += std::sin(double(p.az));
+        ++colN[size_t(p.col)];
+    }
+    uint32_t rowsWithFar = 0, colsWithFar = 0;
+    for (uint32_t v : rowN) if (v >= 4) ++rowsWithFar;
+    for (uint32_t v : colN) if (v >= 4) ++colsWithFar;
+
+    // A cell, in radians, from the raster's own extent.
+    double elLo = 1e9, elHi = -1e9;
+    for (size_t i = 0; i < rowN.size(); ++i)
+        if (rowN[i] >= 4) { const double e = rowEl[i] / rowN[i];
+                            elLo = std::min(elLo, e); elHi = std::max(elHi, e); }
+    const double elCell = (elHi > elLo) ? (elHi - elLo) / double(spanR - 1) : 0.0;
+    const double azCell = 6.28318530717958648 / double(spanC);
+    if (!(elCell > 0)) return;
+
+    const double edges[7] = {0.0, 2.0, 5.0, 10.0, 20.0, 45.0, 1e9};
+    std::vector<double> dEl[6], dAz[6];
+    for (const Obs& p : obs) {
+        if (rowN[size_t(p.row)] < 4 || colN[size_t(p.col)] < 4) continue;
+        int band = 0;
+        while (band < 5 && p.range >= edges[band + 1]) ++band;
+        dEl[band].push_back(std::fabs(double(p.el) - rowEl[size_t(p.row)] / rowN[size_t(p.row)])
+                            / elCell);
+        const double ca = std::atan2(colY[size_t(p.col)], colX[size_t(p.col)]);
+        double da = double(p.az) - ca;
+        da -= 6.28318530717958648 * std::round(da / 6.28318530717958648);
+        dAz[band].push_back(std::fabs(da) / azCell);
+    }
+
+    auto med = [](std::vector<double>& v) {
+        if (v.empty()) return -1.0;
+        std::nth_element(v.begin(), v.begin() + ptrdiff_t(v.size() / 2), v.end());
+        return v[v.size() / 2];
+    };
+    auto p95 = [](std::vector<double>& v) {
+        if (v.empty()) return -1.0;
+        const size_t k = std::min(v.size() - 1, (v.size() * 95) / 100);
+        std::nth_element(v.begin(), v.begin() + ptrdiff_t(k), v.end());
+        return v[k];
+    };
+
+    o.add("      spread audit: is a row one elevation and a column one azimuth?\n"
+          "        %llu returns sampled; %u of %lld rows and %u of %lld columns have "
+          "returns past %.0f m\n",
+          (unsigned long long)obs.size(), rowsWithFar, (long long)spanR,
+          colsWithFar, (long long)spanC, double(kFar));
+    o.add("        %-14s %8s %9s %9s %9s %9s\n", "range", "points",
+          "el med", "el p95", "az med", "az p95");
+    const char* names[6] = {"under 2 m", "2 - 5 m", "5 - 10 m",
+                            "10 - 20 m", "20 - 45 m", "over 45 m"};
+    for (int i = 0; i < 6; ++i) {
+        if (dEl[i].empty()) continue;
+        o.add("        %-14s %8zu %9.2f %9.2f %9.2f %9.2f\n", names[i], dEl[i].size(),
+              med(dEl[i]), p95(dEl[i]), med(dAz[i]), p95(dAz[i]));
+    }
+    o.add("        (deviation from the row's or column's own far-return angle, in cells)\n");
 }
 
 // Are the setups where the files say they are?
@@ -885,6 +1032,7 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
         // own sends you off to run something else to find out why.
         if (!im.diag.note.empty()) o.add("      why: %s\n", im.diag.note.c_str());
         rasterAudit(*readers[readerOf[k]], scanOf[k], im, o);
+        spreadAudit(*readers[readerOf[k]], scanOf[k], im, o);
 
         // A world point in the direction cell (r, c) looked, at range rho.
         auto pointAt = [&](uint32_t r, uint32_t c, double rho, double w[3]) {
