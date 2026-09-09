@@ -227,25 +227,69 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                     "measured\n                  surfaces sit beyond where "
                                     "no-return rays stop clearing\n");
                     }
+                    // The measured mapping: what the tables actually span, and how
+                    // far from a straight line they run. The residual is in cells
+                    // rather than radians because that is the unit a lookup cares
+                    // about — a line is wrong by so many rows and columns, and one
+                    // cell is all the slack a lookup has.
+                    const double kDeg = 57.29577951308232;
+                    const double rowErr = img.map.elResidualRad /
+                                          std::max(1e-12, std::fabs(img.map.dElPerRow));
+                    const double colErr = img.map.azResidualRad /
+                                          std::max(1e-12, std::fabs(img.map.dAzPerCol));
                     o.add("      raster    : %s\n"
-                                "                  residuals %.5f rad row, %.5f rad col\n",
-                                img.map.valid ? "uniform"
-                                              : "*** REFUSED — lookups would reach the wrong "
-                                                "direction ***",
-                                img.map.elResidualRad, img.map.azResidualRad);
-                    // The mapping itself, and the field of view it implies. A
-                    // vertical span near 360 degrees means the mirror covers
-                    // each column twice and a single line cannot describe it.
-                    o.add("      mapping   : el = %+.6f %+.8f * row   "
-                                "(%.1f deg over %u rows)\n"
-                                "                  az = %+.6f %+.8f * col   "
-                                "(%.1f deg over %u cols)\n",
+                                "                  sweep %.2f deg over %u rows, %.2f deg over "
+                                "%u cols\n",
+                                img.map.valid
+                                    ? (rowErr > 1.0 || colErr > 1.0 ? "measured, not uniform"
+                                                                    : "measured, uniform")
+                                    : "*** REFUSED — lookups would reach the wrong "
+                                      "direction ***",
+                                img.map.elSpanRad * kDeg, img.rows,
+                                img.map.azSpanRad * kDeg, img.cols);
+                    // A sweep past 360 degrees is the fault that broke every
+                    // lookup past the seam, so it is stated rather than left to be
+                    // noticed in the figure above.
+                    if (std::fabs(img.map.azSpanRad) > rimg::kTwoPi) {
+                        const double extra = (std::fabs(img.map.azSpanRad) - rimg::kTwoPi) /
+                                             std::max(1e-12, std::fabs(img.map.dAzPerCol));
+                        o.add("                  the sweep runs %.0f columns past a full turn, "
+                                    "so those bearings\n                  were looked at twice; "
+                                    "one of each pair answers a lookup\n", extra);
+                    }
+                    // How far a straight line would have been from the measured
+                    // tables. Reported, and no longer used: the tables are.
+                    o.add("      mapping   : measured tables, used directly\n"
+                                "                  a straight line through them would sit "
+                                "%.1f rows / %.1f cols out\n"
+                                "                  (el = %+.6f %+.8f * row, "
+                                "az = %+.6f %+.8f * col)\n",
+                                rowErr, colErr,
                                 img.map.el0, img.map.dElPerRow,
-                                std::fabs(img.map.dElPerRow) * img.rows * 57.29577951308232,
-                                img.rows,
-                                img.map.az0, img.map.dAzPerCol,
-                                std::fabs(img.map.dAzPerCol) * img.cols * 57.29577951308232,
-                                img.cols);
+                                img.map.az0, img.map.dAzPerCol);
+                    if (!img.map.monotonicEl || !img.map.monotonicAz)
+                        o.add("                  *** %s turns back on itself — a mirror past "
+                                    "the pole ***\n",
+                                    !img.map.monotonicEl ? "elevation" : "azimuth");
+                    // A sample of the tables themselves, so the raster's actual
+                    // shape is visible rather than only its summary. Five points
+                    // across each axis, with the step between them: a uniform
+                    // raster shows the same step five times, and anything else
+                    // shows where it varies.
+                    if (img.map.elByRow.size() == img.rows && img.rows >= 5 &&
+                        img.map.azByCol.size() == img.cols && img.cols >= 5) {
+                        o.add("      el by row :");
+                        for (int k = 0; k < 5; ++k) {
+                            const uint32_t r = uint32_t(uint64_t(k) * (img.rows - 1) / 4);
+                            o.add("  %u:%+.2f", r, img.map.elByRow[r] * kDeg);
+                        }
+                        o.add("  deg\n      az by col :");
+                        for (int k = 0; k < 5; ++k) {
+                            const uint32_t c = uint32_t(uint64_t(k) * (img.cols - 1) / 4);
+                            o.add("  %u:%+.1f", c, img.map.azByCol[c] * kDeg);
+                        }
+                        o.add("  deg\n");
+                    }
                     // The check that matters: the scan's own points put back
                     // through the mapping. A low figure here with low residuals
                     // means lookups land in the wrong place while the fit looks
