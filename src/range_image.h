@@ -462,6 +462,15 @@ struct RangeImage {
         y = tilt[3] * a + tilt[4] * b + tilt[5] * c;
         z = tilt[6] * a + tilt[7] * b + tilt[8] * c;
     }
+    // And back. A rotation, so the inverse is the transpose. Needed by anything
+    // that starts from a CELL — whose direction is in the instrument's frame — and
+    // wants the world position that cell was looking at.
+    void fromInstrument(double& x, double& y, double& z) const {
+        const double a = x, b = y, c = z;
+        x = tilt[0] * a + tilt[3] * b + tilt[6] * c;
+        y = tilt[1] * a + tilt[4] * b + tilt[7] * c;
+        z = tilt[2] * a + tilt[5] * b + tilt[8] * c;
+    }
 
     // The setup's position and orientation in the file frame. Voxels are
     // transformed into the scanner frame with the inverse of this.

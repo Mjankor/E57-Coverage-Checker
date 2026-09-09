@@ -598,6 +598,10 @@ static void rasterAudit(e57::Reader& r, size_t scanIndex, const rimg::RangeImage
                 y = poseRot.R[1] * a + poseRot.R[4] * bb + poseRot.R[7] * c;
                 z = poseRot.R[2] * a + poseRot.R[5] * bb + poseRot.R[8] * c;
             }
+            // Into the instrument's frame, because that is the frame the mapping
+            // was built in — a row is only a line of constant elevation about the
+            // axis the instrument actually had.
+            im.toInstrument(x, y, z);
             double az, el, range;
             rimg::toSpherical(x, y, z, az, el, range);
             if (range <= 1e-6) continue;
@@ -716,6 +720,9 @@ static void spreadAudit(e57::Reader& r, size_t scanIndex, const rimg::RangeImage
                 y = poseRot.R[1] * a + poseRot.R[4] * bb + poseRot.R[7] * c;
                 z = poseRot.R[2] * a + poseRot.R[5] * bb + poseRot.R[8] * c;
             }
+            // Same frame the raster was built in; without this the audit measures
+            // the tripod's lean and calls it a fault in the mapping.
+            im.toInstrument(x, y, z);
             double az, el, range;
             rimg::toSpherical(x, y, z, az, el, range);
             if (range <= 1e-6) continue;
@@ -1108,8 +1115,14 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
         auto pointAt = [&](uint32_t r, uint32_t c, double rho, double w[3]) {
             const double el = im.map.elByRow[r], az = im.map.azByCol[c];
             const double ce = std::cos(el);
-            const double q[3] = {rho * ce * std::cos(az), rho * ce * std::sin(az),
-                                 rho * std::sin(el)};
+            // The tables are angles in the INSTRUMENT'S frame, so the direction has
+            // to come back out of that frame before the pose puts it in the world.
+            // Skipping this misplaces every probe by the tripod's lean, which is
+            // nothing next to "is it in front of the surface" and everything next
+            // to "is it within half a voxel of it".
+            double q[3] = {rho * ce * std::cos(az), rho * ce * std::sin(az),
+                           rho * std::sin(el)};
+            im.fromInstrument(q[0], q[1], q[2]);
             for (int i = 0; i < 3; ++i)
                 w[i] = fwd.R[3 * i + 0] * q[0] + fwd.R[3 * i + 1] * q[1] +
                        fwd.R[3 * i + 2] * q[2] + fwd.t[i];
