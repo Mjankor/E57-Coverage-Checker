@@ -522,18 +522,38 @@ bool indexMapping(Mapping& m) {
 // which is what covers the rows a blind cone left empty.
 struct BinVote {
     int32_t  candidate = -1;
-    uint32_t count = 0;
+    uint32_t count = 0;      // Boyer-Moore's surviving margin
+    uint32_t total = 0;
     void cast(int32_t v) {
+        ++total;
         if (count == 0) { candidate = v; count = 1; }
         else if (candidate == v) ++count;
         else --count;
     }
 };
 
+// A vote decides a bin only when it is decisive.
+//
+// Bins are eight to a cell, so the ones straddling a boundary between two cells
+// collect votes from both and Boyer-Moore leaves them with whichever happened to
+// arrive in surplus — a coin toss, and about an eighth of all bins. Points landing
+// in one then resolve to either neighbour, which on real data cost ten per cent of
+// the columns.
+//
+// A bin that cannot make up its mind should not: the stamped default is the
+// nearest entry of the measured table, which is the smooth, sensible answer
+// exactly where the vote is ambiguous. So a vote has to carry a clear margin —
+// a quarter of the votes cast in that bin — before it overrules it.
+constexpr uint32_t kVoteMarginNumer = 1, kVoteMarginDenom = 4;
+
 void applyVotes(std::vector<int32_t>& index, const std::vector<BinVote>& votes) {
     if (index.size() != votes.size()) return;
-    for (size_t i = 0; i < index.size(); ++i)
-        if (votes[i].count > 0) index[i] = votes[i].candidate;
+    for (size_t i = 0; i < index.size(); ++i) {
+        const BinVote& v = votes[i];
+        if (v.count == 0) continue;
+        if (v.count * kVoteMarginDenom < v.total * kVoteMarginNumer) continue;
+        index[i] = v.candidate;
+    }
 }
 
 bool RangeImage::cellOf(double az, double el, uint32_t& row, uint32_t& col) const {
