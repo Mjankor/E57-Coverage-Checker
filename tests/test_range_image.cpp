@@ -676,8 +676,17 @@ static void testSweepPastATurnAndNonUniformRows() {
             // The fractional coordinates `judgeBrick` bounds a brick with have to
             // agree with the cell a lookup then reads, or a brick can be culled
             // against a rectangle of the image that does not contain it.
+            //
+            // On the column axis "agree" means to within a whole turn, because a
+            // sweep past 360 degrees resolves a bearing to either of two columns
+            // that saw it. judgeBrick opens the column bound to the whole raster
+            // on such a scan for exactly that reason, so the two need only name
+            // the same bearing, not the same index.
+            double dcc = img.colCoord(azAt(c)) - double(gc);
+            const double perTurn = kTau / (std::fabs(img.map.azSpanRad) / double(cols - 1));
+            dcc -= perTurn * std::round(dcc / perTurn);
             if (std::fabs(img.rowCoord(elAt(r)) - double(gr)) > 0.51 ||
-                std::fabs(img.colCoord(azAt(c)) - double(gc)) > 0.51) ++disagree;
+                std::fabs(dcc) > 0.51) ++disagree;
         }
     }
     CHECK(unresolved == 0, "every direction the scanner looked resolves to a cell");
@@ -1010,8 +1019,103 @@ static void testBlindConeFromTheCorpus() {
     CHECK(sv.why.find("one scan") != std::string::npos, "and the report says so");
 }
 
+// A raster whose measured rows do not rise strictly, which must still be used.
+//
+// This is the regression that took a whole job off the air. A row's elevation is
+// measured as the mean of however many points landed in it, and on real data that
+// mean wobbles — a few hundredths of a cell, from sparse rows and from a surface
+// that is not equally far away all along the row. The tables therefore do not rise
+// strictly, and a monotonicity test on them fails.
+//
+// A previous version of this made that test a gate, reasoning that a mirror
+// sweeping past the pole would show up as a fold-back. It does — but so does
+// ordinary noise, and no threshold separates them reliably. All five scans of a
+// real job were refused, every lookup against them returned nothing, and the site
+// came back as a solid ball of "unobserved" with the tool reporting 100% of the
+// space in range as unseen.
+//
+// The round trip is the gate, and the only one. It asks the question that matters
+// — does a direction the scanner looked in reach the cell it was recorded in — and
+// a table that wobbles by a third of a cell answers it perfectly well.
+static void testWobblyRowsAreStillUsable() {
+    std::printf("range image: rows that do not rise strictly are still usable\n");
+
+    const int rows = 200, cols = 300;
+    const double elLo = -1.0, elStep = 2.0 / double(rows);
+    const double dAz = kTau / double(cols);
+    // A third of a cell either way, which is several times the quarter-cell slack
+    // a monotonicity test allows, and well inside the half cell that would start
+    // making neighbouring rows genuinely ambiguous.
+    auto jitter = [&](int r) { return 0.33 * elStep * std::sin(11.0 * double(r)); };
+    auto elAt   = [&](int r) { return elLo + elStep * double(r) + jitter(r); };
+    auto azAt   = [&](int c) { return dAz * double(c); };
+
+    const std::string path = tmpPath("wobbly");
+    fixture::Scan sc;
+    sc.name = "wobbly";
+    sc.hasPose = true;
+    sc.q[0] = 1.0;
+    sc.hasIndexBounds = true;
+    sc.rowMin = 0; sc.rowMax = rows - 1;
+    sc.colMin = 0; sc.colMax = cols - 1;
+    sc.fields = {
+        {"cartesianX",  e57::FieldType::FloatDouble},
+        {"cartesianY",  e57::FieldType::FloatDouble},
+        {"cartesianZ",  e57::FieldType::FloatDouble},
+        {"rowIndex",    e57::FieldType::Integer, 0, rows - 1},
+        {"columnIndex", e57::FieldType::Integer, 0, cols - 1},
+    };
+    sc.data.assign(5, {});
+    Lcg rng;
+    for (int r = 0; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            if (rng.next() < 0.4) continue;          // sparse, as a real raster is
+            const double az = azAt(c), el = elAt(r);
+            const double rr = 12.0 + 3.0 * std::sin(2.0 * az);
+            const double ce = std::cos(el);
+            sc.data[0].push_back(rr * ce * std::cos(az));
+            sc.data[1].push_back(rr * ce * std::sin(az));
+            sc.data[2].push_back(rr * std::sin(el));
+            sc.data[3].push_back(double(r));
+            sc.data[4].push_back(double(c));
+        }
+    }
+    CHECK(fixture::write(path, {sc}, 512), "fixture written");
+
+    e57::Reader rd;
+    std::string err;
+    CHECK(rd.open(path, err), err.empty() ? "opened" : err.c_str());
+    rimg::Options opt;
+    rimg::RangeImage img;
+    const bool built = rimg::build(rd, 0, opt, img, err);
+    CHECK(built, err.empty() ? "built" : err.c_str());
+    if (!built) return;
+
+    // Whether the wobble is large enough to break strict monotonicity depends on
+    // how sparse the rows are, and that is exactly why it must not be a gate: the
+    // property is a fact about the sampling, not about whether lookups work.
+    CHECK(img.map.valid, "the mapping is used, wobble or no wobble");
+    CHECK(img.map.roundTripFraction > 0.99,
+          "because the scan's own points reach their own cells");
+    CHECK(img.map.rowErrorCells >= 0.0 && img.map.rowErrorCells <= 1.0,
+          "with the row error reported, and small");
+
+    // The thing a refusal costs: a scan that contributes nothing looks exactly
+    // like a scan that saw nothing. Here every direction the scanner looked in
+    // resolves to the cell it was recorded in, sparse rows included.
+    int wrong = 0;
+    for (int r = 0; r < rows; r += 3)
+        for (int c = 0; c < cols; c += 7) {
+            uint32_t gr, gc;
+            if (!img.cellOf(azAt(c), elAt(r), gr, gc)) { ++wrong; continue; }
+            if (int(gr) != r || int(gc) != c) ++wrong;
+        }
+    CHECK(wrong == 0, "and every sampled direction reaches its own cell");
+}
+
 int main() {
     std::printf("E57 Coverage Checker — range image tests\n\n");
+    testWobblyRowsAreStillUsable();
     testBlindConeFromTheCorpus();
     testGridPath();
     testPyramid();

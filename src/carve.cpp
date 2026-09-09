@@ -304,8 +304,20 @@ BrickVerdict judgeBrick(const SetupView& s, const Params& p,
     // land on the neighbouring cell.
     const int64_t row0 = int64_t(std::floor(std::min(ra, rb))) - 1;
     const int64_t row1 = int64_t(std::ceil(std::max(ra, rb))) + 1;
-    const int64_t col0 = int64_t(std::floor(std::min(ca, cb))) - 1;
-    const int64_t col1 = int64_t(std::ceil(std::max(ca, cb))) + 1;
+    int64_t col0 = int64_t(std::floor(std::min(ca, cb))) - 1;
+    int64_t col1 = int64_t(std::ceil(std::max(ca, cb))) + 1;
+    // A sweep that runs past a full turn looked at some bearings twice, so a
+    // direction can resolve to either of two columns a whole turn apart while
+    // colCoord — a fractional position in one continuous table — can only name
+    // one of them. Rather than choose, which is what the last two attempts at this
+    // did and got wrong, the column bound simply opens to the whole raster on such
+    // a scan. That is a superset of whatever cell the lookup reaches, so the
+    // verdict stays conservative; it costs sharpness on the culling and nothing
+    // else, and only on instruments that overshoot the turn.
+    if (std::fabs(im.map.azSpanRad) > 6.28318530717958648) {
+        col0 = 0;
+        col1 = int64_t(im.cols) - 1;
+    }
 
     const rimg::RangeSpan span = im.span(row0, row1, col0, col1);
     if (!span.valid) return BrickVerdict::Fallthrough;

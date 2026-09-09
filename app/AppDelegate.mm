@@ -1115,10 +1115,16 @@ const char *kindLabel(check::Kind k) {
         // nothing; one mounted upside down is worth knowing about. Neither is
         // visible from the totals, and both change how the picture reads.
         NSString *warn = @"";
-        if (result->setupsWithoutMapping)
+        if (result->setupsWithoutMapping) {
             warn = [warn stringByAppendingFormat:
                     @"   ·   ⚠︎ %llu setup(s) contribute NOTHING (mapping refused)",
                     (unsigned long long)result->setupsWithoutMapping];
+            // With the reason. A run that produces no voxels at all and says only
+            // "refused" sends you off to run something else to find out why.
+            if (!result->mappingRefusedWhy.empty())
+                warn = [warn stringByAppendingFormat:@" — %s",
+                        result->mappingRefusedWhy.c_str()];
+        }
         if (result->setupsInverted)
             warn = [warn stringByAppendingFormat:@"   ·   %llu inverted",
                     (unsigned long long)result->setupsInverted];

@@ -111,10 +111,13 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
 
     std::printf("\nsetups    : %llu used, %llu skipped\n",
                 (unsigned long long)res.setupsUsed, (unsigned long long)res.scansSkipped);
-    if (res.setupsWithoutMapping)
+    if (res.setupsWithoutMapping) {
         std::printf("            *** %llu of them contribute NOTHING: their angular mapping\n"
                     "                was refused, so every lookup falls outside the raster\n",
                     (unsigned long long)res.setupsWithoutMapping);
+        if (!res.mappingRefusedWhy.empty())
+            std::printf("                %s\n", res.mappingRefusedWhy.c_str());
+    }
     if (res.setupsWithBlindCone)
         std::printf("            %llu with an identified blind cone, %llu of those inverted\n",
                     (unsigned long long)res.setupsWithBlindCone,

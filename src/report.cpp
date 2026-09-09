@@ -649,13 +649,25 @@ static void registrationCheck(const std::vector<std::string>& paths, const Optio
         const Conflict cb = haveViews ? contradicted(clouds[i].alt, views, i, params) : Conflict{};
 
         const char* verdict = "ok";
-        // Only the comparison decides, and only when the alternative was judged
-        // over a comparable share of the scan. Both rates carry a floor from the
-        // raster itself: ground at grazing incidence puts a cell's near edge
-        // metres in front of its far edge, and a point on the far edge reads as
-        // being in cleared space through no fault of the registration.
+        // Both measurements have to prefer the alternative, and neither is
+        // trusted alone.
+        //
+        // Neither has a meaningful absolute scale. Overlap is high for anything
+        // that lands on ground, because a flat plane is unchanged by turning it.
+        // Conflict carries a floor of twenty to forty per cent from the raster
+        // itself: ground at grazing incidence puts a cell's near edge metres in
+        // front of its far edge, so a point on the far edge reads as sitting in
+        // cleared space through no fault of the registration. Picking a threshold
+        // on either one alone means picking a number to fit the last dataset,
+        // which is how the previous two versions of this went wrong.
+        //
+        // What is trustworthy is the direction both move in together. A wrongly
+        // placed scan overlaps the others worse AND contradicts them more; a
+        // correctly placed one does neither. On the fixtures the two agree in
+        // every case and the margins are fifteen points, not five.
+        const double kMargin = 0.05;
         if (ca.rate >= 0 && cb.rate >= 0 && cb.judged > 0.5 * ca.judged &&
-            ca.rate > 0.20 && cb.rate < ca.rate * 0.6) {
+            ob > oa + kMargin && cb.rate < ca.rate - kMargin) {
             verdict = "*** THE POSE IS BEING APPLIED THE WRONG WAY ***";
             ++suspect;
         }

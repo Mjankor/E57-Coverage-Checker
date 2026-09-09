@@ -195,7 +195,10 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             auto img = std::make_unique<rimg::RangeImage>();
             std::string rerr;
             if (rimg::build(*r, i, ro, *img, rerr)) {
-                if (!img->map.valid) ++out.setupsWithoutMapping;
+                if (!img->map.valid) {
+                    ++out.setupsWithoutMapping;
+                    if (out.mappingRefusedWhy.empty()) out.mappingRefusedWhy = img->diag.note;
+                }
                 images.push_back(std::move(img));
             } else {
                 // A scan with no usable raster cannot contribute evidence, and

@@ -153,6 +153,10 @@ struct Result {
     // nothing looks exactly like a scan that saw nothing, and the difference is
     // the whole answer.
     uint64_t     setupsWithoutMapping = 0;
+    // Why the first of them was refused, verbatim. "Refused" on its own is not
+    // something anyone can act on, and a run that produces no voxels at all should
+    // say what stopped it without needing a second command run afterwards.
+    std::string  mappingRefusedWhy;
     // Setups whose blind cone was found, and how many were mounted inverted.
     uint64_t     setupsWithBlindCone = 0;
     uint64_t     setupsInverted = 0;

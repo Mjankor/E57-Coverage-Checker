@@ -258,7 +258,6 @@ bool indexMapping(Mapping& m) {
     m.colOfAz.clear();
     m.monotonicEl = m.monotonicAz = false;
     m.elSpanRad = m.azSpanRad = 0;
-    m.elLo = m.elBin = m.azLo = m.azBin = 0;
 
     const size_t rows = m.elByRow.size(), cols = m.azByCol.size();
     if (rows < 2 || cols < 2) return false;
@@ -271,86 +270,98 @@ bool indexMapping(Mapping& m) {
     const double azStep = std::fabs(m.azSpanRad) / double(cols - 1);
     if (!(elStep > 0) || !(azStep > 0)) return false;
 
+    // Reported, never a gate. A per-row mean taken from however many points landed
+    // in that row wobbles, and a wobble is not a mirror turning back on itself —
+    // but no threshold on it can tell the two apart reliably, and refusing a scan
+    // on one is how five good scans came back contributing nothing. The round trip
+    // is the only thing that decides.
     m.monotonicEl = monotonicWithin(m.elByRow, kMonotonicSlackCells * elStep);
     m.monotonicAz = monotonicWithin(m.azByCol, kMonotonicSlackCells * azStep);
 
-    // --- elevation ---------------------------------------------------------
-    // Bins over the table's own range plus one cell at each end, so a direction
-    // within rounding distance of the first or last row still finds it and one
-    // genuinely off the raster falls outside the bins and is rejected.
-    {
-        double lo = m.elByRow[0], hi = m.elByRow[0];
-        for (double v : m.elByRow) { lo = std::min(lo, v); hi = std::max(hi, v); }
-        const size_t nbins = std::min<size_t>(kMaxIndexBins,
-                                              (rows + 2) * kReverseBinsPerCell);
-        m.elLo = lo - elStep;
-        m.elBin = ((hi + elStep) - m.elLo) / double(nbins);
-        if (!(m.elBin > 0)) return false;
+    // Bins over the whole of each angle's range, fixed: elevation is an asin, so
+    // it lies in [-pi/2, pi/2] and nowhere else; azimuth lies on the turn. Nothing
+    // here is derived from the data, so nothing here can be got wrong by it — the
+    // window selection this replaces was three paragraphs of reasoning about which
+    // columns to keep, and it was the wrong shape of answer.
+    const size_t nEl = std::min<size_t>(kMaxIndexBins, rows * kReverseBinsPerCell);
+    const size_t nAz = std::min<size_t>(kMaxIndexBins, cols * kReverseBinsPerCell);
+    m.elLo  = -0.5 * kPi;
+    m.elBin = kPi / double(nEl);
+    m.azLo  = 0.0;
+    m.azBin = kTwoPi / double(nAz);
 
+    // The default index: each bin takes the row or column whose measured angle is
+    // nearest. build() overwrites this from the points themselves wherever the
+    // points have anything to say — this is what fills the rest in, and what a
+    // synthetic mapping built by uniformMapping() uses throughout.
+    {
         std::vector<std::pair<double, int32_t>> srt(rows);
         for (size_t r = 0; r < rows; ++r) srt[r] = {m.elByRow[r], int32_t(r)};
         std::sort(srt.begin(), srt.end());
-
-        m.rowOfEl.assign(nbins, -1);
+        m.rowOfEl.assign(nEl, -1);
         stampIndex(srt, m.elLo, m.elBin,
                    std::max(elStep, 0.5 * maxAdjacentStep(m.elByRow)) + m.elBin,
                    m.rowOfEl);
     }
-
-    // --- azimuth -----------------------------------------------------------
-    // Bins over the whole turn, because every bearing lies on it. Which columns
-    // compete for them needs care on these instruments: a sweep of 364.5 degrees
-    // means the first and last ~65 columns looked at the same bearings, and if
-    // both were in the index a lookup could land on either while `colCoord` — the
-    // fractional version `judgeBrick` bounds a brick with — could only ever
-    // report one. The two have to agree or a brick can be culled against a
-    // rectangle that does not contain the cell the lookup then reads.
-    //
-    // So the index keeps one turn's worth, centred on the middle of the sweep, and
-    // the duplicates at the ends are dropped. Both saw the same direction; which
-    // of the two answers a lookup is arbitrary either way, and this way it is
-    // arbitrary consistently. Their cells are still in the image and still counted
-    // as rays — they are simply never the cell a direction resolves to.
-    //
-    // How many to keep is chosen by index rather than by clipping to a window in
-    // angle, and the remainder is split between the two ends. Clipping left a seam
-    // gap of one and a half steps, wide enough that a bearing in it resolved to a
-    // column more than half a cell away while a dropped column sat right on it.
-    // Keeping floor(2pi/step)+1 columns puts the gap under one step, and centring
-    // it leaves every bearing within half a cell of the column it resolves to.
     {
-        const size_t turn = size_t(std::floor(kTwoPi / azStep)) + 1;
-        const size_t keep = std::max<size_t>(2, std::min(turn, cols));
-        const size_t c0 = (cols - keep) / 2, c1 = c0 + keep - 1;
-        const double a0 = std::min(m.azByCol[c0], m.azByCol[c1]);
-        const double a1 = std::max(m.azByCol[c0], m.azByCol[c1]);
-        m.azLo = a0 - 0.5 * std::max(0.0, kTwoPi - (a1 - a0));
-
-        const size_t nbins = std::min<size_t>(kMaxIndexBins, cols * kReverseBinsPerCell);
-        m.azBin = kTwoPi / double(nbins);
-
-        // Absolute azimuths, on the same scale the bins are laid out on — the bin
-        // a lookup lands in is found from an offset, but the angle it is compared
-        // against is not.
         std::vector<std::pair<double, int32_t>> srt;
-        srt.reserve(keep);
-        for (size_t c = c0; c <= c1; ++c) srt.push_back({m.azByCol[c], int32_t(c)});
-        if (srt.size() < 2) return false;
+        srt.reserve(cols + 2);
+        for (size_t c = 0; c < cols; ++c) {
+            // Onto the turn the bins cover, since the measured table is unwrapped
+            // and may run past it.
+            double a = m.azByCol[c];
+            a -= kTwoPi * std::floor(a / kTwoPi);
+            srt.push_back({a, int32_t(c)});
+        }
         std::sort(srt.begin(), srt.end());
-        // The turn closes, so the first and last kept columns are neighbours
-        // across the seam. Without these the two bins at the seam would read as a
-        // gap in the sweep on a raster that has none.
+        // The turn closes, so the first and last entries are neighbours across the
+        // seam; without these the bins there read as a gap the sweep never covered.
         const std::pair<double, int32_t> wrapLo{srt.back().first - kTwoPi, srt.back().second};
         const std::pair<double, int32_t> wrapHi{srt.front().first + kTwoPi, srt.front().second};
         srt.insert(srt.begin(), wrapLo);
         srt.push_back(wrapHi);
-
-        m.colOfAz.assign(nbins, -1);
+        m.colOfAz.assign(nAz, -1);
         stampIndex(srt, m.azLo, m.azBin,
                    std::max(azStep, 0.5 * maxAdjacentStep(m.azByCol)) + m.azBin,
                    m.colOfAz);
     }
     return true;
+}
+
+// Records which cell a direction belongs to, from the points that were measured
+// in it — no model of the raster at all.
+//
+// This is the whole inverse mapping, and it is the third attempt at one. The first
+// fitted a line to the per-row and per-column means and inverted it arithmetically,
+// which cannot describe a sweep that runs past a full turn and put half of every
+// raster 55 to 80 columns out. The second kept the measured means as tables and
+// indexed those, which is right in principle but built the answer out of per-row
+// averages — and then guarded it with a monotonicity test that a real scan's noise
+// fails, so all five of a job's scans were refused and contributed nothing.
+//
+// Neither needed to exist. Every decoded point carries both its direction and the
+// cell it was recorded in; that pairing IS the mapping, and it can simply be
+// written down. A bin takes the cell that most of the points falling in it came
+// from, by Boyer-Moore majority vote — one candidate and one count per bin, no
+// histogram, no sorting, and no assumption that the raster is uniform, separable
+// in any particular way, monotonic, or confined to a single turn.
+//
+// Where a bin got no points at all it keeps whatever the measured tables said,
+// which is what covers the rows a blind cone left empty.
+struct BinVote {
+    int32_t  candidate = -1;
+    uint32_t count = 0;
+    void cast(int32_t v) {
+        if (count == 0) { candidate = v; count = 1; }
+        else if (candidate == v) ++count;
+        else --count;
+    }
+};
+
+void applyVotes(std::vector<int32_t>& index, const std::vector<BinVote>& votes) {
+    if (index.size() != votes.size()) return;
+    for (size_t i = 0; i < index.size(); ++i)
+        if (votes[i].count > 0) index[i] = votes[i].candidate;
 }
 
 bool RangeImage::cellOf(double az, double el, uint32_t& row, uint32_t& col) const {
@@ -981,6 +992,9 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
 
     std::vector<Sample> samples;   // for the angular fallback and the mapping fit
     std::vector<Accum>  rowAcc, colAcc;
+    // The inverse mapping, recorded straight from the points. Sized once the
+    // raster's dimensions are known, just below.
+    std::vector<BinVote> elVote, azVote;
     uint64_t decoded = 0, invalid = 0;
     double   farthest = 0, nearest = 1e300;
 
@@ -990,6 +1004,10 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         out.cells.assign(out.cellCount(), Cell{});
         rowAcc.assign(out.rows, Accum{});
         colAcc.assign(out.cols, Accum{});
+        elVote.assign(std::min<size_t>(kMaxIndexBins, size_t(out.rows) * kReverseBinsPerCell),
+                      BinVote{});
+        azVote.assign(std::min<size_t>(kMaxIndexBins, size_t(out.cols) * kReverseBinsPerCell),
+                      BinVote{});
     }
 
     std::string rerr;
@@ -1048,12 +1066,23 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
             const uint32_t c = uint32_t(cc) / step;
             const size_t   i = size_t(r) * out.cols + c;
 
-            // Every so often, remember where this point came from. Once the
-            // mapping is fitted these get put back through it: a model of the
-            // raster that cannot reproduce the raster's own points is not a
-            // model of anything.
-            if ((decoded % kRoundTripStride) == 0 && samples.size() < kRoundTripSamples)
+            // Every so often, hold a point back. These are what the mapping is
+            // then tested against, so they must take no part in building it: a
+            // check fed the same points it was built from is not a check.
+            const bool heldBack =
+                (decoded % kRoundTripStride) == 0 && samples.size() < kRoundTripSamples;
+            if (heldBack) {
                 samples.push_back({r, c, float(range), az, el});
+            } else {
+                // This point looked in this direction and was recorded in this
+                // cell. That pairing is the inverse mapping; nothing else is
+                // needed to write it down.
+                const double ef = (el + 0.5 * kPi) / (kPi / double(elVote.size()));
+                if (ef >= 0.0 && ef < double(elVote.size())) elVote[size_t(ef)].cast(int32_t(r));
+                double aa = az - kTwoPi * std::floor(az / kTwoPi);
+                const double af = aa / (kTwoPi / double(azVote.size()));
+                if (af >= 0.0 && af < double(azVote.size())) azVote[size_t(af)].cast(int32_t(c));
+            }
 
             const uint32_t cm = uint32_t(std::min(range * 100.0, 65535.0));
             // Minimum range wins: several source cells can land in one binned
@@ -1165,6 +1194,12 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     const bool filled = fillTable(out.map.elByRow, rowN) &&
                         fillTable(out.map.azByCol, colN) &&
                         indexMapping(out.map);
+    // The measured tables laid the index out; the points overrule it wherever they
+    // have anything to say, which is everywhere the scanner actually got a return.
+    if (filled) {
+        applyVotes(out.map.rowOfEl, elVote);
+        applyVotes(out.map.colOfAz, azVote);
+    }
 
     // The check that matters: put the scan's own points back through the mapping
     // and see whether they land where they came from.
@@ -1181,24 +1216,49 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         // is judged.
         const double azStep = std::fabs(out.map.azSpanRad) / double(out.cols - 1);
         const double colsPerTurn = (azStep > 1e-12) ? kTwoPi / azStep : double(out.cols);
-        uint64_t landed = 0;
+        uint64_t landed = 0, lost = 0;
+        std::vector<double> rowErr, colErr;
+        rowErr.reserve(samples.size());
+        colErr.reserve(samples.size());
         for (const Sample& sm : samples) {
             const int32_t ri = out.map.rowFor(sm.el);
             const int32_t ci = out.map.colFor(sm.az);
-            if (ri < 0 || ci < 0) continue;
+            if (ri < 0 || ci < 0) { ++lost; continue; }
             // One cell of slack on each axis: a direction on a cell boundary can
             // legitimately round either way, and binning down puts several source
             // cells into one.
             const long dr = long(ri) - long(sm.row);
             double dc = double(ci) - double(sm.col);
             dc -= colsPerTurn * std::round(dc / colsPerTurn);
+            rowErr.push_back(std::fabs(double(dr)));
+            colErr.push_back(std::fabs(dc));
             if (dr >= -1 && dr <= 1 && std::fabs(dc) <= 1.0) ++landed;
         }
         out.map.roundTripFraction = double(landed) / double(samples.size());
+        out.map.lostFraction = double(lost) / double(samples.size());
+        auto pct95 = [](std::vector<double>& v) {
+            if (v.empty()) return -1.0;
+            const size_t k = (v.size() * 95) / 100;
+            std::nth_element(v.begin(), v.begin() + ptrdiff_t(std::min(k, v.size() - 1)), v.end());
+            return v[std::min(k, v.size() - 1)];
+        };
+        out.map.rowErrorCells = pct95(rowErr);
+        out.map.colErrorCells = pct95(colErr);
     }
 
-    out.map.valid = filled && out.map.monotonicEl && out.map.monotonicAz &&
-                    out.map.roundTripFraction >= opt.minRoundTripFraction;
+    // The round trip is the whole gate, and deliberately the only one.
+    //
+    // It asks the one question that matters: put a direction the scanner actually
+    // looked in back through the mapping, and does it reach the cell the scanner
+    // recorded it in? Nothing else needs to be true. A raster can be non-uniform,
+    // sweep past a full turn, wobble from row to row, or be described by no model
+    // at all — if directions reach their cells, lookups work.
+    //
+    // Every other gate this has had refused good data. A residual threshold refused
+    // rasters that were merely not straight. A monotonicity test refused all five
+    // scans of a job because a per-row mean built from a handful of points does not
+    // rise strictly. Both are still measured and reported; neither decides.
+    out.map.valid = filled && out.map.roundTripFraction >= opt.minRoundTripFraction;
 
     if (!out.map.valid) {
         char buf[460];
@@ -1206,27 +1266,18 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
             std::snprintf(buf, sizeof(buf),
                           "the angular mapping could not be measured: too few rows or "
                           "columns hold returns to say where the raster points");
-        } else if (!out.map.monotonicEl || !out.map.monotonicAz) {
-            // A mirror that sweeps past the pole sends elevation back down and
-            // flips azimuth by pi at the same time. No pair of separable tables
-            // can express that, and indexing it anyway would send half the scan's
-            // lookups to the other half of the raster.
-            std::snprintf(buf, sizeof(buf),
-                          "the raster turns back on itself (%s is not monotonic over "
-                          "%u rows / %u cols, spans %.1f deg row and %.1f deg col) — a "
-                          "mirror sweeping past the pole, which a row/column mapping "
-                          "cannot describe. This scan contributes no evidence",
-                          !out.map.monotonicEl ? "elevation" : "azimuth",
-                          out.rows, out.cols,
-                          out.map.elSpanRad * 57.29577951308232,
-                          out.map.azSpanRad * 57.29577951308232);
         } else {
+            // With the numbers, because "refused" on its own is not something
+            // anyone can act on: how far out, and in which direction.
             std::snprintf(buf, sizeof(buf),
-                          "the measured angular mapping does not describe this raster: only "
-                          "%.1f%% of the scan's own points land back on their own cell when "
-                          "put through it. Lookups would reach the wrong direction — sky "
-                          "read as ground, and building interiors read as clear space",
-                          100.0 * std::max(0.0, out.map.roundTripFraction));
+                          "the mapping does not reach the right cells: %.1f%% of the "
+                          "held-back points land on their own cell, 95%% are within "
+                          "%.0f rows and %.0f cols of it, and %.1f%% resolve to no cell "
+                          "at all. Lookups would reach the wrong direction — sky read as "
+                          "ground, and building interiors read as clear space",
+                          100.0 * std::max(0.0, out.map.roundTripFraction),
+                          out.map.rowErrorCells, out.map.colErrorCells,
+                          100.0 * std::max(0.0, out.map.lostFraction));
         }
         out.diag.note = buf;
     } else if (out.map.elResidualRad > opt.maxMappingResidualRad ||

@@ -245,6 +245,15 @@ struct Mapping {
     // land on the cell they were decoded from. The check that matters: a residual
     // describes a fit, this describes what lookups actually do.
     double roundTripFraction = -1.0;
+    // What went wrong when it is low, because a percentage on its own is not
+    // something anyone can act on. The 95th percentile of how far a held-back
+    // point landed from its own cell, and the share that resolved to no cell at
+    // all — a few cells out is a raster that is not quite described; tens of cells
+    // is the wrong model; a large lost fraction is a sweep the index does not
+    // cover.
+    double rowErrorCells = -1.0;
+    double colErrorCells = -1.0;
+    double lostFraction  = -1.0;
     bool   valid = false;
 
     // Which row an elevation falls in, and which column an azimuth; -1 when the
