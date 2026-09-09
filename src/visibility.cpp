@@ -180,6 +180,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     ro.maxCells = uint32_t(perImage);
     ro.noReturnRadius   = opt.skyRadius;
     ro.noReturnFraction = opt.skyFraction;
+    ro.blindCone        = opt.blindCone;
 
     // --- range images -----------------------------------------------------
     std::vector<std::unique_ptr<rimg::RangeImage>> images;
@@ -196,6 +197,12 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             if (rimg::build(*r, i, ro, *img, rerr)) {
                 isolated    += img->diag.isolatedNoReturns;
                 believedSky += img->diag.noReturns;
+                if (!img->map.valid) ++out.setupsWithoutMapping;
+                if (img->diag.blindConeRows) {
+                    ++out.setupsWithBlindCone;
+                    if (img->diag.hasConeAxis && img->diag.coneAxisWorld[2] > 0.5)
+                        ++out.setupsInverted;
+                }
                 // The accelerator the carve culls with. About 5/16 of a byte
                 // per cell, and it settles most bricks with one lookup instead
                 // of 512 voxel tests.
@@ -569,6 +576,16 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     if (out.keptFraction < 1.0)
         note += fmt("showing %.1f%% of %llu frontier voxels (display cap); ",
                     100.0 * out.keptFraction, (unsigned long long)out.qualified);
+    if (out.setupsWithoutMapping) {
+        note += fmt("%llu of %llu setup(s) had their angular mapping refused and contribute "
+                    "NOTHING — every lookup against them falls outside the raster; ",
+                    (unsigned long long)out.setupsWithoutMapping,
+                    (unsigned long long)out.setupsUsed);
+    }
+    if (out.setupsInverted) {
+        note += fmt("%llu setup(s) were mounted inverted (blind cone pointing up); ",
+                    (unsigned long long)out.setupsInverted);
+    }
     if (isolated) {
         note += fmt("%llu empty cells looked like dropped returns rather than sky and "
                     "cleared nothing (%llu were believed); ",

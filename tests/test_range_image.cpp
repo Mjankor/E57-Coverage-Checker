@@ -553,75 +553,124 @@ static void testOrdinaryRasterRoundTrips() {
           "and essentially every point lands back on its own cell");
 }
 
-// The blind cone under the tripod is the one empty region that does not mean
-// "the ray came back with nothing" — no ray was fired there at all. Believed as
-// a no-return it clears a cone to maxRange straight down through the ground
-// under every setup.
-static void testNadirBandIsUnsampled() {
-    std::printf("range image: the blind cone under the tripod clears nothing\n");
+// The blind cone is the one empty region that does not mean "the ray came back
+// with nothing" — no ray was fired there at all. Believed as a no-return it
+// clears a cone to maxRange straight through whatever the instrument stood on.
+//
+// Which end of the raster it sits at is NOT assumed. A scanner mounted upside
+// down has its cone pointing up, and a producer that rewrites the local frame so
+// world up is +Z puts the cone at the other end of the raster from an upright
+// scan. Assuming an end gets both of those wrong in the worst direction: it
+// believes the cone and disbelieves the sky.
+static void testBlindConeFoundGeometrically() {
+    std::printf("range image: the blind cone is found from geometry, not from up\n");
 
-    rimg::RangeImage im;
-    im.rows = 100; im.cols = 200;
-    im.cells.assign(im.cellCount(), rimg::Cell{});
-    auto at = [&](uint32_t r, uint32_t c) -> rimg::Cell& {
-        return im.cells[size_t(r) * im.cols + c];
+    // Builds a raster with an unsampled band at one end and sky at the other.
+    // `coneAtFirst` puts the instrument's mount at row 0. The rows bordering the
+    // cone hold the ground close to the mount; those bordering the sky hold the
+    // far side of the site.
+    auto build = [](bool coneAtFirst, double groundRange, double skyBorderRange) {
+        rimg::RangeImage im;
+        im.rows = 120; im.cols = 200;
+        im.cells.assign(im.cellCount(), rimg::Cell{});
+        const uint32_t coneBand = 15, skyBand = 25;
+        for (uint32_t r = 0; r < im.rows; ++r) {
+            const bool inCone = coneAtFirst ? (r < coneBand) : (r >= im.rows - coneBand);
+            const bool inSky  = coneAtFirst ? (r >= im.rows - skyBand) : (r < skyBand);
+            for (uint32_t c = 0; c < im.cols; ++c) {
+                rimg::Cell& cell = im.cells[size_t(r) * im.cols + c];
+                if (inCone || inSky) {
+                    cell = rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+                    continue;
+                }
+                // Range ramps from the ground beside the mount to the far side
+                // of the site as the beam flattens out.
+                const double u = coneAtFirst
+                    ? double(r - coneBand) / double(im.rows - coneBand - skyBand)
+                    : double(im.rows - skyBand - 1 - r) / double(im.rows - coneBand - skyBand);
+                const double rng = groundRange + u * (skyBorderRange - groundRange);
+                cell = rimg::Cell{uint16_t(rng * 100.0), uint8_t(rimg::Status::Hit)};
+            }
+        }
+        im.diag.nearestReturn = groundRange;
+        im.diag.furthestReturn = skyBorderRange;
+        im.diag.noReturns = uint64_t(coneBand + skyBand) * im.cols;
+        im.map.az0 = 0.0; im.map.dAzPerCol = kTau / 200.0;
+        im.map.valid = true;
+        return im;
     };
-    for (uint32_t r = 0; r < im.rows; ++r)
-        for (uint32_t c = 0; c < im.cols; ++c)
-            at(r, c) = rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
-    // Returns everywhere except a band at each end: rows 0..11 look down into
-    // the tripod's shadow and were never fired; rows 88..99 are sky.
-    for (uint32_t r = 12; r < 88; ++r)
-        for (uint32_t c = 0; c < im.cols; ++c)
-            at(r, c) = rimg::Cell{1000, uint8_t(rimg::Status::Hit)};
-    // Elevation rises with row, so row 0 is the nadir end.
-    im.map.el0 = -1.3; im.map.dElPerRow = 0.026;
-    im.map.az0 = 0.0;  im.map.dAzPerCol = kTau / 200.0;
-    im.map.valid = true;
-    im.diag.noReturns = 12 * 200 + 12 * 200;
 
     rimg::Options opt;
-    rimg::markNadirBand(im, opt);
 
-    CHECK(im.diag.nadirBandRows == 12, "the twelve unsampled rows are found");
-    CHECK(im.diag.nadirBandCells == 12u * 200u, "and all their cells");
-    CHECK(im.statusAt(0, 0) == rimg::Status::OutsideFov, "the blind cone clears nothing");
-    CHECK(im.statusAt(11, 5) == rimg::Status::OutsideFov, "all the way to its edge");
-    CHECK(im.rangeAt(0, 0) == 0.0, "and carries no range to be mistaken for one");
-    // The sky band at the other end is a no-return like any other and still
-    // clears: it is what carves the volume above a site.
-    CHECK(im.statusAt(99, 0) == rimg::Status::NoReturn, "sky is untouched");
-    CHECK(im.rangeAt(99, 0) > 40.0, "and still clears to the rated range");
+    // An upright scanner: elevation rises with row, so the mount is at row 0 and
+    // the ground beside it is 1.8 m away while the sky border is 30 m.
+    rimg::RangeImage up = build(true, 1.8, 30.0);
+    up.map.el0 = -1.3; up.map.dElPerRow = 0.023;
+    rimg::markBlindCone(up, opt);
+    CHECK(up.diag.blindConeRows == 15, "the cone is found");
+    CHECK(up.diag.blindConeAtFirstRow, "at the end the close returns border");
+    CHECK(up.statusAt(0, 0) == rimg::Status::OutsideFov, "and clears nothing");
+    CHECK(up.statusAt(119, 0) == rimg::Status::NoReturn, "while the sky still clears");
+    CHECK(up.diag.hasConeAxis && up.diag.coneAxisWorld[2] < -0.5,
+          "the cone points down, so this setup was upright");
 
-    // With the mapping the other way up, the band is found at the other end.
-    rimg::RangeImage flip = im;
-    for (uint32_t r = 0; r < flip.rows; ++r)
-        for (uint32_t c = 0; c < flip.cols; ++c)
-            flip.cells[size_t(r) * flip.cols + c] =
-                rimg::Cell{uint16_t(r >= 12 && r < 88 ? 1000 : 4500),
-                           uint8_t(r >= 12 && r < 88 ? rimg::Status::Hit
-                                                     : rimg::Status::NoReturn)};
-    flip.map.dElPerRow = -0.026;      // elevation falls with row: nadir is last
-    flip.diag = rimg::Diagnostics{};
-    rimg::markNadirBand(flip, opt);
-    CHECK(flip.diag.nadirBandRows == 12, "the band is found at the far end too");
-    CHECK(flip.statusAt(99, 0) == rimg::Status::OutsideFov, "which is now the nadir end");
-    CHECK(flip.statusAt(0, 0) == rimg::Status::NoReturn, "and row 0 is now the sky");
+    // The same instrument mounted upside down, its local frame rewritten so the
+    // cone now sits at the OTHER end of the raster. Nothing about the elevation
+    // mapping distinguishes this from the first case — only the geometry does.
+    rimg::RangeImage down = build(false, 1.8, 30.0);
+    down.map.el0 = -1.3; down.map.dElPerRow = 0.023;
+    rimg::markBlindCone(down, opt);
+    CHECK(down.diag.blindConeRows == 15, "the cone is found when it is at the far end");
+    CHECK(!down.diag.blindConeAtFirstRow, "which is where the close returns are");
+    CHECK(down.statusAt(119, 0) == rimg::Status::OutsideFov, "and it clears nothing");
+    CHECK(down.statusAt(0, 0) == rimg::Status::NoReturn, "while the sky at row 0 clears");
+    CHECK(down.diag.hasConeAxis && down.diag.coneAxisWorld[2] > 0.5,
+          "the cone points up, so this setup is reported as inverted");
 
-    // A hole in the middle of the field of view is a measurement, not a blind
-    // cone, and must not be swallowed.
-    rimg::RangeImage holed = im;
-    for (uint32_t r = 0; r < holed.rows; ++r)
-        for (uint32_t c = 0; c < holed.cols; ++c)
-            holed.cells[size_t(r) * holed.cols + c] =
-                rimg::Cell{1000, uint8_t(rimg::Status::Hit)};
+    // Assuming the nadir end from the sign of the elevation mapping would have
+    // put the cone at row 0 in both cases. It is at row 119 in the second.
+    CHECK(up.diag.blindConeAtFirstRow != down.diag.blindConeAtFirstRow,
+          "the two cases land at opposite ends despite identical mappings");
+
+    // Ambiguity is reported, not guessed. Both bands bordered by returns at
+    // similar ranges: nothing distinguishes them, so neither is believed to be
+    // the cone and the note says so.
+    rimg::RangeImage tie = build(true, 12.0, 14.0);
+    tie.map.el0 = -1.3; tie.map.dElPerRow = 0.023;
+    rimg::markBlindCone(tie, opt);
+    CHECK(tie.diag.blindConeRows == 0, "an unclear case is not resolved by a coin toss");
+    CHECK(tie.diag.note.find("too similar") != std::string::npos, "and it is reported");
+    CHECK(tie.diag.borderRangeFirst > 0 && tie.diag.borderRangeLast > 0,
+          "with the evidence it was judged on");
+
+    // Forced, for when the operator knows better than the geometry.
+    rimg::Options forced = opt;
+    forced.blindCone = rimg::BlindCone::LastRows;
+    rimg::RangeImage f = build(true, 1.8, 30.0);
+    f.map.el0 = -1.3; f.map.dElPerRow = 0.023;
+    rimg::markBlindCone(f, forced);
+    CHECK(!f.diag.blindConeAtFirstRow, "an explicit setting overrides the geometry");
+
+    // And switched off entirely, every empty cell is a no-return again.
+    rimg::Options none = opt;
+    none.blindCone = rimg::BlindCone::None;
+    rimg::RangeImage n = build(true, 1.8, 30.0);
+    n.map.el0 = -1.3; n.map.dElPerRow = 0.023;
+    rimg::markBlindCone(n, none);
+    CHECK(n.diag.blindConeRows == 0, "BlindCone::None leaves every empty cell believed");
+    CHECK(n.statusAt(0, 0) == rimg::Status::NoReturn, "including the cone");
+
+    // A hole in the middle of the field of view is a measurement, not a cone.
+    rimg::RangeImage holed;
+    holed.rows = 100; holed.cols = 200;
+    holed.cells.assign(holed.cellCount(), rimg::Cell{1000, uint8_t(rimg::Status::Hit)});
     for (uint32_t r = 40; r < 50; ++r)
         for (uint32_t c = 40; c < 50; ++c)
             holed.cells[size_t(r) * holed.cols + c] =
                 rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
-    holed.diag = rimg::Diagnostics{};
-    rimg::markNadirBand(holed, opt);
-    CHECK(holed.diag.nadirBandRows == 0, "a hole in the middle is not a blind cone");
+    holed.map.el0 = -1.3; holed.map.dElPerRow = 0.026; holed.map.valid = true;
+    rimg::markBlindCone(holed, opt);
+    CHECK(holed.diag.blindConeRows == 0, "a hole in the middle is not a blind cone");
     CHECK(holed.statusAt(45, 45) == rimg::Status::NoReturn, "and still clears");
 }
 
@@ -630,7 +679,7 @@ int main() {
     testGridPath();
     testPyramid();
     testSkyVersusDroppedReturns();
-    testNadirBandIsUnsampled();
+    testBlindConeFoundGeometrically();
     testDoubleCoveredMirrorIsRefused();
     testOrdinaryRasterRoundTrips();
     testMappingAndLookup();

@@ -139,6 +139,23 @@ static bool statsEqual(const carve::Stats& a, const carve::Stats& b) {
 
 // ---------------------------------------------------------------------------
 
+// Settings that exist in two places have to agree in both. This one did not:
+// rimg defaulted the drop filter off and vis defaulted it on, so the library's
+// documented behaviour and every actual run disagreed, silently.
+static void testDefaultsAgreeWithTheLibrary() {
+    std::printf("defaults agree between the job and the library\n");
+
+    const vis::Options v;
+    const rimg::Options r;
+    CHECK(v.skyRadius == r.noReturnRadius,
+          "the drop filter is off in both, or on in both");
+    CHECK(v.skyFraction == r.noReturnFraction, "and at the same threshold");
+    CHECK(v.blindCone == r.blindCone, "the blind cone policy matches too");
+    CHECK(v.maxRange == r.maxRange, "as does the rated range");
+    CHECK(v.skyRadius == 0,
+          "and the drop filter is off: a ray either returned or it did not");
+}
+
 static void testVoxelHash() {
     std::printf("voxel hash\n");
 
@@ -494,6 +511,7 @@ static void testEndToEnd() {
 }
 
 int main() {
+    testDefaultsAgreeWithTheLibrary();
     testVoxelHash();
     testTouchesVisible();
     testRebase();

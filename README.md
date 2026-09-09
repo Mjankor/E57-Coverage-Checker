@@ -162,9 +162,20 @@ For each scan it reports the pose, the prototype with per-field bit widths, and:
   cell they came from is reported. A low figure with healthy residuals means
   lookups reach the wrong direction, which shows up as sky read as ground and
   building interiors read as clear space.
-- **the unsampled band under the tripod** — the one empty region that does not
-  mean "the ray came back with nothing". Believed as no-returns those rows clear
-  a cone to the maximum range straight down through the ground.
+- **the instrument's blind cone**, and which way up it was mounted. This is the
+  one empty region that does not mean "the ray came back with nothing" — no ray
+  was fired at all — and believing it clears a cone to the maximum range straight
+  through whatever the scanner stood on. Which end of the raster it occupies is
+  found from the geometry, never assumed: the returns bordering the cone are the
+  ground beside the mount, metres away, where those bordering sky are distant.
+  That holds for a scanner mounted upside down, and the reported cone axis says
+  when one was.
+- **whether the scan fits the grid it declares** — points falling outside
+  `indexBounds` are counted, and a scan where too many do is refused rather than
+  read as a mostly-empty raster, because empty reads as clear space.
+- **whether the scanner sits inside its own returns** — it should, in its own
+  frame. When it does not, the points are probably not in the frame they are
+  being read as.
 - **which coordinate frame the points are in** — scanner-local with a
   meaningful pose, or already transformed to global. Both conventions appear in
   the wild, sometimes within one corpus.

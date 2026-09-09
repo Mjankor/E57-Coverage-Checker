@@ -859,14 +859,26 @@ const char *kindLabel(check::Kind k) {
         // tiles it actually took.
         NSString *note = result->note.empty() ? @""
                        : [NSString stringWithFormat:@"   ·   %s", result->note.c_str()];
+        // A setup whose mapping was refused is in the list and contributes
+        // nothing; one mounted upside down is worth knowing about. Neither is
+        // visible from the totals, and both change how the picture reads.
+        NSString *warn = @"";
+        if (result->setupsWithoutMapping)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   ⚠︎ %llu setup(s) contribute NOTHING (mapping refused)",
+                    (unsigned long long)result->setupsWithoutMapping];
+        if (result->setupsInverted)
+            warn = [warn stringByAppendingFormat:@"   ·   %llu inverted",
+                    (unsigned long long)result->setupsInverted];
+
         NSString *line = [NSString stringWithFormat:
             @"%llu setups   ·   %.0f m³ unobserved (%.1f%% of what was in range)   ·   "
-            @"%zu voxels drawn   ·   %@%@%@",
+            @"%zu voxels drawn   ·   %@%@%@%@",
             (unsigned long long)result->setupsUsed, vol, pct, result->voxels.size(),
             result->carverTiles ? [NSString stringWithFormat:@"%llu tiles on the GPU",
                                    (unsigned long long)result->carverTiles]
                                 : @"CPU",
-            result->partial ? @"   ·   PARTIAL RUN" : @"", note];
+            result->partial ? @"   ·   PARTIAL RUN" : @"", warn, note];
 
         dispatch_async(dispatch_get_main_queue(), ^{
             AppDelegate *me = weakSelf;

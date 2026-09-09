@@ -44,6 +44,14 @@ enum class Status : uint8_t {
     OutsideFov = 2,   // the scanner never looked here — clears nothing
 };
 
+// Which end of the raster holds the instrument's blind cone, if any.
+enum class BlindCone {
+    Auto,        // decide from the geometry — see Options::blindCone
+    None,        // there is no blind cone; every empty cell is a no-return
+    FirstRows,   // force: the band running off row 0
+    LastRows,    // force: the band running off the last row
+};
+
 struct Options {
     // How far a no-return ray clears. This is the scanner's rated maximum:
     // past it a return is unlikely to be meaningful, so treating the ray as
@@ -90,16 +98,35 @@ struct Options {
     uint32_t noReturnRadius   = 0;
     double   noReturnFraction = 0.75;
 
-    // Treat the unsampled band at the nadir end of the raster as a direction the
-    // scanner never looked, rather than as a no-return.
+    // Treat the unsampled cone about the instrument's rotation axis as a
+    // direction the scanner never looked, rather than as a no-return.
     //
-    // Every terrestrial scanner has a blind cone beneath it where the tripod is.
-    // Those rows are empty in the grid for a completely different reason from
-    // sky: no ray was fired, so nothing was established. Believed as no-returns
-    // they clear a cone to maxRange straight down through the ground under every
-    // setup — DESIGN.md's original trap, and the only place where an empty cell
-    // genuinely does not mean what the others mean.
-    bool     nadirBandUnsampled = true;
+    // Every terrestrial scanner has a blind cone at one end of its sweep, where
+    // its own body and mount are. Those rows are empty in the grid for a
+    // completely different reason from sky: no ray was fired, so nothing was
+    // established. Believed as no-returns they clear a cone to maxRange straight
+    // through the ground under every setup — DESIGN.md's original trap, and the
+    // only place where an empty cell does not mean what the others mean.
+    //
+    // WHICH end is not assumed. A scanner mounted upside down has its cone
+    // pointing up, and one whose producer rewrites the local frame to put world
+    // up along +Z has it at the other end of the raster from an upright one. So
+    // the end is found from the geometry: just outside the blind cone the beam
+    // grazes the mount and lands on the ground a metre or two away, so the
+    // returns bordering it are the closest in the scan. Just outside a sky band
+    // they are distant or absent. The band bordered by the nearer returns is the
+    // cone. That test does not know or care which way up anything is.
+    BlindCone blindCone = BlindCone::Auto;
+    // How many rows either side of a candidate band to take the median range
+    // over. A handful: the ground close to the mount, before the beam flattens
+    // out and starts reaching across the site.
+    uint32_t blindConeProbeRows = 16;
+    // The bordering returns have to be clearly nearer, or the call is refused
+    // rather than guessed. Both errors are bad and they are bad in different
+    // directions — believing a cone clears space through solid ground, and
+    // disbelieving sky loses real coverage — so an unclear case is reported
+    // rather than resolved by a coin toss.
+    double   blindConeRatio = 0.6;
 };
 
 // az(col) = az0 + col * dAzPerCol, el(row) = el0 + row * dElPerRow.
@@ -157,8 +184,31 @@ struct Diagnostics {
     // run: every one of them would otherwise have cleared space to maxRange.
     // No-returns demoted to OutsideFov, and why.
     uint64_t isolatedNoReturns = 0;   // by the optional neighbourhood filter
-    uint64_t nadirBandCells    = 0;   // the blind cone under the tripod
-    uint32_t nadirBandRows     = 0;
+    uint64_t blindConeCells    = 0;   // the instrument's own blind cone
+    uint32_t blindConeRows     = 0;
+    bool     blindConeAtFirstRow = false;
+    // The evidence the decision was made on: the median range of the returns
+    // bordering each candidate band, in metres. -1 where there was no band.
+    double   borderRangeFirst = -1.0;
+    double   borderRangeLast  = -1.0;
+    // The cone's axis in the FILE's frame, once the pose is applied — which is
+    // to say, which way the instrument was actually pointing. Its z component
+    // says whether this setup was upright or inverted, and that is worth seeing
+    // in a corpus: a scan mounted the wrong way up is a real thing that happens
+    // and it is otherwise invisible.
+    bool     hasConeAxis = false;
+    double   coneAxisWorld[3] = {0, 0, 0};
+    // Points whose declared row/column fell outside the declared grid. A few are
+    // ordinary; a large share means indexBounds does not describe this scan, and
+    // the cells those points should have filled stay empty — which reads as
+    // no-returns and clears space to maxRange. Silently dropping them was the
+    // most dangerous of the reader's quiet failures.
+    uint64_t outsideGrid = 0;
+    // The scanner's own position relative to the returns, in the scanner frame.
+    // Returns surround the instrument, so the origin should sit inside their
+    // box. When it does not, the frame decision was probably wrong and every
+    // lookup is being made from the wrong place.
+    bool   originInsideReturns = true;
     bool   hasReturnBounds = false;
     double returnMin[3] = {0, 0, 0};
     double returnMax[3] = {0, 0, 0};
@@ -288,7 +338,7 @@ void buildPyramid(RangeImage& im);
 
 // Exposed for testing.
 void filterIsolatedNoReturns(RangeImage& im, const Options& opt);
-void markNadirBand(RangeImage& im, const Options& opt);
+void markBlindCone(RangeImage& im, const Options& opt);
 
 const char* statusName(Status s);
 

@@ -83,12 +83,18 @@ struct Options {
     // so it is in metres rather than derived from the voxel size.
     double   domainMargin = 2.0;
 
-    // Passed through to rimg::Options — how much company a no-return needs
-    // before it is believed to be sky rather than a dropped return. See
-    // rimg::Options; believing a dropped return clears a pencil of space to
-    // maxRange straight through the building.
-    uint32_t skyRadius   = 2;
+    // Passed through to rimg::Options. OFF (radius 0), matching rimg's own
+    // default: a ray either returned or it did not, and one that did not is not
+    // second-guessed from the shape of the empty region around it. These two
+    // defaults have to agree — they disagreed once, and the effect was that the
+    // library said the filter was off while every run through the CLI and the
+    // app had it on.
+    uint32_t skyRadius   = 0;
     double   skyFraction = 0.75;
+
+    // Which end of each raster holds the instrument's blind cone. Auto finds it
+    // from the geometry and copes with a scanner mounted upside down.
+    rimg::BlindCone blindCone = rimg::BlindCone::Auto;
 
     // Separate voids from the rest of the world — see voids.h.
     //
@@ -141,6 +147,15 @@ struct Result {
     uint64_t     tilesTotal  = 0;
     uint64_t     setupsUsed  = 0;
     uint64_t     scansSkipped = 0;
+    // Setups whose angular mapping was refused. They are in the corpus and in
+    // the setup list, and they contribute nothing at all: every lookup against
+    // them is outside the raster. Counted because a scan that silently says
+    // nothing looks exactly like a scan that saw nothing, and the difference is
+    // the whole answer.
+    uint64_t     setupsWithoutMapping = 0;
+    // Setups whose blind cone was found, and how many were mounted inverted.
+    uint64_t     setupsWithBlindCone = 0;
+    uint64_t     setupsInverted = 0;
     bool         partial   = false;    // maxTiles stopped it short
     bool         cancelled = false;
 

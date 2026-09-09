@@ -255,6 +255,38 @@ int info(const std::string& path, bool verifyCrc, double maxRange) {
                     } else {
                         std::printf("      round trip: not measured\n");
                     }
+                    if (img.diag.blindConeRows) {
+                        const double here = img.diag.blindConeAtFirstRow
+                                          ? img.diag.borderRangeFirst : img.diag.borderRangeLast;
+                        const double there = img.diag.blindConeAtFirstRow
+                                          ? img.diag.borderRangeLast : img.diag.borderRangeFirst;
+                        std::printf("      blind cone: %u unsampled rows at the %s of the raster "
+                                    "(%llu cells)\n"
+                                    "                  bordering returns %.2f m here; ",
+                                    img.diag.blindConeRows,
+                                    img.diag.blindConeAtFirstRow ? "start" : "end",
+                                    (unsigned long long)img.diag.blindConeCells, here);
+                        if (there >= 0) std::printf("%.2f m at the other end\n", there);
+                        else            std::printf("no unsampled band at the other end\n");
+                        if (img.diag.hasConeAxis) {
+                            std::printf("      mounting  : cone axis (%.3f, %.3f, %.3f) — %s\n",
+                                        img.diag.coneAxisWorld[0], img.diag.coneAxisWorld[1],
+                                        img.diag.coneAxisWorld[2],
+                                        img.diag.coneAxisWorld[2] > 0.5 ? "*** INVERTED ***"
+                                      : img.diag.coneAxisWorld[2] < -0.5 ? "upright"
+                                                                         : "on its side");
+                        }
+                    } else {
+                        std::printf("      blind cone: none identified — every empty cell is "
+                                    "treated as a no-return\n");
+                    }
+                    if (img.diag.outsideGrid)
+                        std::printf("      off-grid  : %llu points fell outside the declared "
+                                    "indexBounds\n",
+                                    (unsigned long long)img.diag.outsideGrid);
+                    if (!img.diag.originInsideReturns)
+                        std::printf("      *** the scanner sits outside the box of its own "
+                                    "returns — check the frame\n");
                     if (!img.diag.note.empty())
                         std::printf("      note      : %s\n", img.diag.note.c_str());
                     if (!img.map.valid) ++failures;
@@ -342,6 +374,14 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
 
     std::printf("\nsetups    : %llu used, %llu skipped\n",
                 (unsigned long long)res.setupsUsed, (unsigned long long)res.scansSkipped);
+    if (res.setupsWithoutMapping)
+        std::printf("            *** %llu of them contribute NOTHING: their angular mapping\n"
+                    "                was refused, so every lookup falls outside the raster\n",
+                    (unsigned long long)res.setupsWithoutMapping);
+    if (res.setupsWithBlindCone)
+        std::printf("            %llu with an identified blind cone, %llu of those inverted\n",
+                    (unsigned long long)res.setupsWithBlindCone,
+                    (unsigned long long)res.setupsInverted);
     std::printf("voxel     : %.3f m   ·   tile %u^3   ·   max range %.0f m   ·   %u thread(s)\n",
                 opt.voxelSize, opt.tileVoxels, opt.maxRange,
                 opt.threads ? opt.threads : std::thread::hardware_concurrency());
@@ -563,6 +603,12 @@ void usage() {
         "          outside without crossing observed space. Off by default: it\n"
         "          also excludes a building interior whose walls were only ever\n"
         "          seen from one side, which is usually the space you wanted.\n"
+        "  --blind-cone auto|none|first|last\n"
+        "          (carve) Which end of each raster holds the instrument's own\n"
+        "          blind cone, where no ray was fired. Default auto, which finds\n"
+        "          it from the geometry: the returns bordering the cone are the\n"
+        "          ground beside the mount, metres away, where those bordering\n"
+        "          sky are distant. That works whichever way up the scanner was.\n"
         "  --threads <n>\n"
         "          (carve) Worker threads over the tile list. Default 0, the\n"
         "          machine's count. The answer is identical at any count.\n"
@@ -611,6 +657,15 @@ int main(int argc, char** argv) {
         }
         if (std::strcmp(argv[i], "--solid") == 0) { co.solid = true; continue; }
         if (std::strcmp(argv[i], "--classify") == 0) { co.classifyVoids = true; continue; }
+        if (std::strcmp(argv[i], "--blind-cone") == 0 && i + 1 < argc) {
+            const std::string v = argv[++i];
+            if      (v == "auto")  co.blindCone = rimg::BlindCone::Auto;
+            else if (v == "none")  co.blindCone = rimg::BlindCone::None;
+            else if (v == "first") co.blindCone = rimg::BlindCone::FirstRows;
+            else if (v == "last")  co.blindCone = rimg::BlindCone::LastRows;
+            else { std::printf("--blind-cone must be auto, none, first or last\n"); return 2; }
+            continue;
+        }
         if (std::strcmp(argv[i], "--sky-radius") == 0 && i + 1 < argc) {
             co.skyRadius = uint32_t(std::strtoul(argv[++i], nullptr, 10));
             continue;

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <string>
+#include <vector>
 
 namespace rimg {
 
@@ -185,59 +187,158 @@ void filterIsolatedNoReturns(RangeImage& im, const Options& opt) {
     }
 }
 
-// Marks the unsampled band at the nadir end of the raster as a direction the
-// scanner never looked.
+// Finds and marks the instrument's blind cone.
 //
-// This is the one place where an empty cell does not mean "the ray came back
-// with nothing". Every terrestrial scanner has a blind cone beneath it where the
-// tripod is; those rows were never fired. Believed as no-returns they clear a
-// cone to maxRange straight down through the ground under every setup.
+// The cone is an unsampled band running off one end of the raster, and which end
+// is not something to assume. A scanner mounted upside down has its cone
+// pointing up; a producer that rewrites the local frame so world up is +Z puts
+// the cone at the opposite end of the raster from an upright scan. Assuming
+// "nadir" from the sign of the elevation mapping gets both of those wrong, and
+// gets them wrong in the worst direction: it believes the cone, clearing space
+// to maxRange through whatever the instrument was standing on, and disbelieves
+// the sky, losing the clearing that carves the volume above a site.
 //
-// Only a contiguous band running off the end of the raster counts. A hole in the
-// middle of the field of view is not a blind cone, it is a measurement, and this
-// does not touch it.
-void markNadirBand(RangeImage& im, const Options& opt) {
-    im.diag.nadirBandRows  = 0;
-    im.diag.nadirBandCells = 0;
-    if (!opt.nadirBandUnsampled || im.rows == 0 || im.cols == 0) return;
-    if (std::fabs(im.map.dElPerRow) < 1e-12) return;
+// So the end is found from the geometry. Just outside the blind cone the beam
+// grazes the instrument's own mount and lands on the ground a metre or two away,
+// so the returns bordering the cone are among the closest in the scan. Just
+// outside a sky band they are distant, or absent. The band bordered by the
+// nearer returns is the cone. Nothing in that test refers to up.
+void markBlindCone(RangeImage& im, const Options& opt) {
+    im.diag.blindConeRows  = 0;
+    im.diag.blindConeCells = 0;
+    im.diag.borderRangeFirst = -1.0;
+    im.diag.borderRangeLast  = -1.0;
+    im.diag.hasConeAxis = false;
+    if (opt.blindCone == BlindCone::None) return;
+    if (im.rows == 0 || im.cols == 0) return;
 
-    // Which end of the raster looks down. The mapping's sign says it: row 0 is
-    // the nadir end when elevation increases with row.
-    const bool nadirIsFirstRow = im.map.dElPerRow > 0;
-
-    auto rowIsEmpty = [&](uint32_t r) {
+    auto rowHasReturn = [&](uint32_t r) {
         const Cell* row = &im.cells[size_t(r) * im.cols];
         for (uint32_t c = 0; c < im.cols; ++c)
-            if (Status(row[c].status) == Status::Hit) return false;
-        return true;
+            if (Status(row[c].status) == Status::Hit) return true;
+        return false;
     };
 
+    // The contiguous empty bands running off each end.
+    uint32_t bandFirst = 0;
+    while (bandFirst < im.rows && !rowHasReturn(bandFirst)) ++bandFirst;
+    uint32_t bandLast = 0;
+    while (bandLast + bandFirst < im.rows && !rowHasReturn(im.rows - 1 - bandLast)) ++bandLast;
+    // A raster with no returns at all is a different problem, and swallowing it
+    // whole as a blind cone would hide it.
+    if (bandFirst + bandLast >= im.rows) return;
+
+    // The median range of the returns bordering a band. Median rather than mean
+    // because a single stray long return past the mount would drag a mean.
+    auto borderMedian = [&](uint32_t band, bool fromFirst) -> double {
+        if (band == 0) return -1.0;
+        std::vector<uint16_t> cm;
+        uint32_t taken = 0;
+        for (uint32_t i = 0; i < opt.blindConeProbeRows && taken < opt.blindConeProbeRows; ++i) {
+            const int64_t r = fromFirst ? int64_t(band) + i
+                                        : int64_t(im.rows) - 1 - int64_t(band) - int64_t(i);
+            if (r < 0 || r >= int64_t(im.rows)) break;
+            const Cell* row = &im.cells[size_t(r) * im.cols];
+            bool any = false;
+            for (uint32_t c = 0; c < im.cols; ++c)
+                if (Status(row[c].status) == Status::Hit) { cm.push_back(row[c].rangeCm); any = true; }
+            if (any) ++taken;
+        }
+        if (cm.empty()) return -1.0;
+        std::nth_element(cm.begin(), cm.begin() + ptrdiff_t(cm.size() / 2), cm.end());
+        return double(cm[cm.size() / 2]) * 0.01;
+    };
+
+    const double mFirst = borderMedian(bandFirst, true);
+    const double mLast  = borderMedian(bandLast, false);
+    im.diag.borderRangeFirst = mFirst;
+    im.diag.borderRangeLast  = mLast;
+
+    bool atFirst = false;
     uint32_t band = 0;
-    if (nadirIsFirstRow) {
-        while (band < im.rows && rowIsEmpty(band)) ++band;
+    std::string why;
+
+    if (opt.blindCone == BlindCone::FirstRows) {
+        atFirst = true;  band = bandFirst;  why = "forced to the first rows";
+    } else if (opt.blindCone == BlindCone::LastRows) {
+        atFirst = false; band = bandLast;   why = "forced to the last rows";
+    } else if (bandFirst && bandLast) {
+        // Both ends are empty, which is the ordinary outdoor case: sky at one
+        // end, the mount at the other. Compare like with like within the one
+        // scan — no absolute threshold needed, and no notion of up.
+        if (mFirst < 0 || mLast < 0) return;
+        const double near_ = std::min(mFirst, mLast), far_ = std::max(mFirst, mLast);
+        if (near_ > opt.blindConeRatio * far_) {
+            // Too close to call. Refusing is not neutral — it leaves the cone
+            // clearing through the ground — but guessing risks the same error
+            // silently, and this way it is reported.
+            char buf[420];
+            std::snprintf(buf, sizeof(buf),
+                          "both ends of the raster are unsampled (%u and %u rows) and the "
+                          "returns bordering them are at %.2f m and %.2f m — too similar to "
+                          "tell the instrument's blind cone from sky, so neither is treated "
+                          "as unsampled. Set the blind cone explicitly if you know it",
+                          bandFirst, bandLast, mFirst, mLast);
+            if (!im.diag.note.empty()) im.diag.note += "; ";
+            im.diag.note += buf;
+            return;
+        }
+        atFirst = (mFirst < mLast);
+        band    = atFirst ? bandFirst : bandLast;
+    } else if (bandFirst || bandLast) {
+        // Only one end is empty. It is the cone only if the returns bordering it
+        // are much closer than the scan's returns generally; otherwise it is a
+        // field of view that simply stops, or sky.
+        atFirst = (bandFirst != 0);
+        band    = atFirst ? bandFirst : bandLast;
+        const double m = atFirst ? mFirst : mLast;
+        if (m < 0) return;
+        double overall = im.diag.nearestReturn > 0 ? im.diag.furthestReturn : 0.0;
+        if (overall <= 0) return;
+        // Half the scan's furthest return is a generous bar: a mount's ground
+        // ring is metres where a site is tens of metres.
+        if (m > opt.blindConeRatio * 0.5 * overall) return;
     } else {
-        while (band < im.rows && rowIsEmpty(im.rows - 1 - band)) ++band;
+        return;      // no unsampled band at either end
     }
-    // A raster with no returns at all is a different problem; do not swallow it
-    // whole as a blind cone.
     if (band == 0 || band >= im.rows) return;
 
     for (uint32_t i = 0; i < band; ++i) {
-        const uint32_t r = nadirIsFirstRow ? i : (im.rows - 1 - i);
+        const uint32_t r = atFirst ? i : (im.rows - 1 - i);
         Cell* row = &im.cells[size_t(r) * im.cols];
         for (uint32_t c = 0; c < im.cols; ++c) {
             if (Status(row[c].status) == Status::NoReturn) {
                 row[c].status  = uint8_t(Status::OutsideFov);
                 row[c].rangeCm = 0;
-                ++im.diag.nadirBandCells;
+                ++im.diag.blindConeCells;
             }
         }
     }
-    im.diag.nadirBandRows = band;
-    if (im.diag.nadirBandCells) {
-        im.diag.noReturns  -= std::min<uint64_t>(im.diag.nadirBandCells, im.diag.noReturns);
-        im.diag.outsideFov += im.diag.nadirBandCells;
+    im.diag.blindConeRows       = band;
+    im.diag.blindConeAtFirstRow = atFirst;
+    if (im.diag.blindConeCells) {
+        im.diag.noReturns  -= std::min<uint64_t>(im.diag.blindConeCells, im.diag.noReturns);
+        im.diag.outsideFov += im.diag.blindConeCells;
+    }
+
+    // Which way the instrument was actually pointing. The cone sits at the end
+    // of the elevation sweep that this band occupies, so its axis is the local
+    // pole on that side; the pose then says where that points in the file's
+    // frame. A negative z is an upright scanner and a positive one is inverted,
+    // and that is worth reporting rather than merely handling.
+    if (std::fabs(im.map.dElPerRow) > 1e-12) {
+        const double elAtBand = im.map.el0 +
+                                im.map.dElPerRow * (atFirst ? 0.0 : double(im.rows - 1));
+        double axis[3] = {0, 0, elAtBand < 0 ? -1.0 : 1.0};
+        if (im.hasPose) {
+            const viewer::Rigid R = viewer::rigidFromPose(im.pose);
+            const double a = axis[0], b = axis[1], c = axis[2];
+            axis[0] = R.R[0] * a + R.R[1] * b + R.R[2] * c;
+            axis[1] = R.R[3] * a + R.R[4] * b + R.R[5] * c;
+            axis[2] = R.R[6] * a + R.R[7] * b + R.R[8] * c;
+        }
+        for (int k = 0; k < 3; ++k) im.diag.coneAxisWorld[k] = axis[k];
+        im.diag.hasConeAxis = true;
     }
 }
 
@@ -422,9 +523,27 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     uint32_t gridRows = 0, gridCols = 0;
     int64_t  rowMin = 0, colMin = 0;
     if (gridPath) {
+        // indexBounds is a declaration, not a fact. A negative, absurd or
+        // overflowing span would produce a garbage raster that then reads as
+        // mostly empty — and mostly empty reads as no-returns, which clears
+        // space to maxRange. Checked before it is trusted.
+        const int64_t spanR = s.rowMax - s.rowMin + 1;
+        const int64_t spanC = s.colMax - s.colMin + 1;
+        constexpr int64_t kMaxSpan = 1 << 20;          // a million rows or columns
+        constexpr int64_t kMaxCells = int64_t(1) << 32;
+        if (spanR <= 0 || spanC <= 0 || spanR > kMaxSpan || spanC > kMaxSpan ||
+            spanR * spanC > kMaxCells) {
+            char buf[220];
+            std::snprintf(buf, sizeof(buf),
+                          "indexBounds declares a %lld x %lld grid, which is not a raster this "
+                          "scan could have produced",
+                          (long long)spanR, (long long)spanC);
+            err = buf;
+            return false;
+        }
         rowMin   = s.rowMin;  colMin = s.colMin;
-        gridRows = uint32_t(s.rowMax - s.rowMin + 1);
-        gridCols = uint32_t(s.colMax - s.colMin + 1);
+        gridRows = uint32_t(spanR);
+        gridCols = uint32_t(spanC);
     }
 
     // Cells are capped by binning down; minimum range per bin keeps it
@@ -495,7 +614,10 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
 
             const int64_t rr = int64_t(b.columns[rowIdx][k]) - rowMin;
             const int64_t cc = int64_t(b.columns[colIdx][k]) - colMin;
-            if (rr < 0 || cc < 0 || rr >= int64_t(gridRows) || cc >= int64_t(gridCols)) continue;
+            if (rr < 0 || cc < 0 || rr >= int64_t(gridRows) || cc >= int64_t(gridCols)) {
+                ++out.diag.outsideGrid;
+                continue;
+            }
 
             const uint32_t r = uint32_t(rr) / step;
             const uint32_t c = uint32_t(cc) / step;
@@ -525,6 +647,47 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     }, rerr);
     if (!ok) { err = rerr; return false; }
     if (decoded == 0) { err = "no valid points decoded"; return false; }
+
+    // A scan whose points do not fit the grid it declares is not a scan this
+    // can read. The cells they should have filled stay empty, and empty reads as
+    // a ray that came back with nothing — so a stale or wrong indexBounds does
+    // not produce a sparse image, it produces one that clears the whole site.
+    if (decoded > 0 && out.diag.outsideGrid * 100 > decoded) {
+        char buf[260];
+        std::snprintf(buf, sizeof(buf),
+                      "%llu of %llu points fall outside the grid indexBounds declares "
+                      "(%.1f%%); their cells would stay empty and read as clear space",
+                      (unsigned long long)out.diag.outsideGrid,
+                      (unsigned long long)(decoded + out.diag.outsideGrid),
+                      100.0 * double(out.diag.outsideGrid) /
+                          double(decoded + out.diag.outsideGrid));
+        err = buf;
+        return false;
+    }
+
+    // The instrument stands among its own returns: in the scanner's frame they
+    // surround the origin. When the origin sits outside their box the points are
+    // not in the frame they are being read as, which puts every subsequent
+    // lookup in the wrong place. Reported rather than refused, because a scan
+    // from inside a corner can legitimately be lopsided.
+    if (out.diag.hasReturnBounds) {
+        bool inside = true;
+        for (int k = 0; k < 3; ++k)
+            if (out.diag.returnMin[k] > 0.0 || out.diag.returnMax[k] < 0.0) inside = false;
+        out.diag.originInsideReturns = inside;
+        if (!inside) {
+            char buf[300];
+            std::snprintf(buf, sizeof(buf),
+                          "the scanner's own position is outside the box of its returns "
+                          "(x[%.1f,%.1f] y[%.1f,%.1f] z[%.1f,%.1f]) — these points may not be "
+                          "in the frame they are being read as",
+                          out.diag.returnMin[0], out.diag.returnMax[0],
+                          out.diag.returnMin[1], out.diag.returnMax[1],
+                          out.diag.returnMin[2], out.diag.returnMax[2]);
+            if (!out.diag.note.empty()) out.diag.note += "; ";
+            out.diag.note += buf;
+        }
+    }
 
     out.diag.usedGrid          = gridPath;
     out.diag.nearestReturn     = (nearest < 1e299) ? nearest : 0.0;
@@ -648,17 +811,29 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     // The blind cone under the tripod: never sampled, so it establishes nothing.
     // Everything else empty is a ray that was fired and came back with nothing,
     // and clears along its path — whatever it passed through on the way.
-    markNadirBand(out, opt);
+    markBlindCone(out, opt);
     // Off by default; see rimg::Options.
     filterIsolatedNoReturns(out, opt);
 
     out.diag.fillFraction = double(out.diag.hits) / double(out.cellCount());
-    if (out.diag.nadirBandRows) {
-        char buf[220];
+    if (out.diag.blindConeRows) {
+        const double here  = out.diag.blindConeAtFirstRow ? out.diag.borderRangeFirst
+                                                          : out.diag.borderRangeLast;
+        const double there = out.diag.blindConeAtFirstRow ? out.diag.borderRangeLast
+                                                          : out.diag.borderRangeFirst;
+        char other[64];
+        if (there >= 0) std::snprintf(other, sizeof(other), "%.2f m at the other end", there);
+        else            std::snprintf(other, sizeof(other), "no unsampled band at the other end");
+        char buf[340];
         std::snprintf(buf, sizeof(buf),
-                      "%u unsampled rows at the nadir end (%llu cells) treated as the blind "
-                      "cone under the tripod rather than as clear space",
-                      out.diag.nadirBandRows, (unsigned long long)out.diag.nadirBandCells);
+                      "%u unsampled rows at the %s of the raster (%llu cells) are the "
+                      "instrument's blind cone and clear nothing; the returns bordering it "
+                      "are at %.2f m against %s%s",
+                      out.diag.blindConeRows,
+                      out.diag.blindConeAtFirstRow ? "start" : "end",
+                      (unsigned long long)out.diag.blindConeCells, here, other,
+                      (out.diag.hasConeAxis && out.diag.coneAxisWorld[2] > 0.5)
+                          ? " — it points UP, so this setup was inverted" : "");
         if (!out.diag.note.empty()) out.diag.note += "; ";
         out.diag.note += buf;
     }
