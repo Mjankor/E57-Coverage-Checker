@@ -45,7 +45,12 @@ namespace {
 // The report itself lives in src/report.{h,cpp} so the app can produce it too:
 // Xcode builds the selected scheme, so building the app never builds this tool,
 // and a stale e57cov looks exactly like a current one.
-int info(const std::string& path, bool verifyCrc, double maxRange,
+// Every file at once, not one at a time. The blind cone is decided across the
+// whole corpus — a band unsampled at the same size in every scan is the
+// instrument's, one that varies from scan to scan is the scene it was standing in
+// — and a file-at-a-time report could only describe a decision the carve does not
+// make.
+int info(const std::vector<std::string>& paths, bool verifyCrc, double maxRange,
          const vis::Options& co) {
     report::Options ro;
     ro.verifyCrc        = verifyCrc;
@@ -54,7 +59,7 @@ int info(const std::string& path, bool verifyCrc, double maxRange,
     ro.noReturnRadius   = co.skyRadius;
     ro.noReturnFraction = co.skyFraction;
     std::string text;
-    const int failures = report::scanReport(path, ro, text);
+    const int failures = report::scanReport(paths, ro, text);
     std::fputs(text.c_str(), stdout);
     return failures;
 }
@@ -190,6 +195,7 @@ int probePoint(const std::vector<std::string>& paths, const vis::Options& opt,
 
     rimg::Options ro;
     ro.maxRange         = opt.maxRange;
+    ro.blindCone        = opt.blindCone;
     ro.noReturnRadius   = opt.skyRadius;
     ro.noReturnFraction = opt.skyFraction;
 
@@ -202,11 +208,27 @@ int probePoint(const std::vector<std::string>& paths, const vis::Options& opt,
             std::string rerr;
             if (!rimg::build(*r, i, ro, *img, rerr)) continue;
             images.push_back(std::move(img));
-            setups.push_back(carve::makeSetupView(*images.back()));
         }
         readers.push_back(std::move(r));
     }
-    if (setups.empty()) { std::printf("no usable scans\n"); return 1; }
+    if (images.empty()) { std::printf("no usable scans\n"); return 1; }
+
+    // The same corpus-wide blind cone decision the carve makes. This command
+    // exists to explain why a voxel came out the way it did, so it must not reach
+    // its own conclusion about which empty cells clear space — an explanation that
+    // disagrees with the run it is explaining is worse than none.
+    {
+        std::vector<rimg::RangeImage*> raw;
+        raw.reserve(images.size());
+        for (auto& im : images) raw.push_back(im.get());
+        const rimg::ConeVerdict v = rimg::markBlindConeAcrossCorpus(raw, ro);
+        std::printf("blind cone: %s\n            %s\n\n",
+                    v.decided ? (v.atFirstRow ? "the START of each raster"
+                                             : "the END of each raster")
+                              : "not identified",
+                    v.why.c_str());
+    }
+    for (auto& im : images) setups.push_back(carve::makeSetupView(*im));
 
     carve::Params p;
     p.voxelSize     = opt.voxelSize;
@@ -455,9 +477,5 @@ int main(int argc, char** argv) {
     }
     if (cmd == "carve") return carveCorpus(paths, co);
 
-    int failures = 0;
-    for (const auto& p : paths) failures += info(p, crc, co.maxRange, co);
-    if (failures)
-        std::printf("%d file(s) reported problems.\n", failures);
-    return failures == 0 ? 0 : 1;
+    return info(paths, crc, co.maxRange, co) == 0 ? 0 : 1;
 }

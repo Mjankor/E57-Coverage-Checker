@@ -37,6 +37,47 @@ struct Out {
     }
 };
 
+// The rows at each end of a scan's declared grid that hold no returns at all.
+//
+// Decoded from rowIndex alone — a packed field of a dozen bits — so this costs a
+// fraction of building the raster, and it is the whole of the evidence the
+// corpus-wide blind cone decision uses. Cheap enough to run over every scan of
+// every file before the report proper starts, which is what lets the report
+// describe the same images a carve would use rather than a differently-decided set.
+bool gridRowBands(e57::Reader& r, size_t scanIndex, uint32_t& lead, uint32_t& trail) {
+    lead = trail = 0;
+    if (scanIndex >= r.scanCount()) return false;
+    const e57::Scan& s = r.scan(scanIndex);
+    if (!s.hasIndexBounds || !s.field("rowIndex") || s.rowMax <= s.rowMin) return false;
+    const int64_t span = s.rowMax - s.rowMin + 1;
+    if (span <= 0 || span > (1 << 20)) return false;
+
+    std::vector<std::string> want{"rowIndex"};
+    size_t invIdx = SIZE_MAX;
+    if      (s.field("cartesianInvalidState")) { invIdx = 1; want.push_back("cartesianInvalidState"); }
+    else if (s.field("sphericalInvalidState")) { invIdx = 1; want.push_back("sphericalInvalidState"); }
+
+    std::vector<uint8_t> has(size_t(span), 0);
+    std::string err;
+    const bool ok = r.readPoints(scanIndex, want, [&](const e57::PointBlock& b) {
+        for (size_t k = 0; k < b.count; ++k) {
+            if (invIdx != SIZE_MAX && b.columns[invIdx][k] != 0.0) continue;
+            const int64_t rr = int64_t(b.columns[0][k]) - s.rowMin;
+            if (rr >= 0 && rr < span) has[size_t(rr)] = 1;
+        }
+        return true;
+    }, err);
+    if (!ok) return false;
+
+    uint32_t lo = 0;
+    while (lo < uint32_t(span) && !has[lo]) ++lo;
+    if (lo == uint32_t(span)) return false;         // no returns at all
+    uint32_t hi = 0;
+    while (hi + lo < uint32_t(span) && !has[size_t(span) - 1 - hi]) ++hi;
+    lead = lo; trail = hi;
+    return true;
+}
+
 const char* typeName(e57::FieldType t) {
     switch (t) {
     case e57::FieldType::Integer:       return "Integer";
@@ -340,15 +381,20 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                         o.add("      note      : %s\n", img.diag.note.c_str());
                     if (!img.map.valid) ++failures;
                     if (img.diag.emptyLeadingRows || img.diag.emptyTrailingRows) {
-                        // Either an all-sky band or a part of the grid the
-                        // scanner never sampled. Treated as no-returns; only
-                        // the corpus can say whether that is right.
-                        o.add("      note      : %u leading and %u trailing grid rows hold no\n"
-                                    "                  returns. Treated as no-returns (all-sky). If\n"
-                                    "                  either band is really outside the field of\n"
-                                    "                  view — a nadir blind cone, say — it would\n"
-                                    "                  wrongly clear space. Check against the scan.\n",
-                                    img.diag.emptyLeadingRows, img.diag.emptyTrailingRows);
+                        // The bands at each end, and which of them this run is
+                        // believing. One of them establishes nothing and the other
+                        // clears space to the rated range; the corpus decides
+                        // which, and this line is what shows the decision landing
+                        // on this scan.
+                        const uint32_t lead = img.diag.emptyLeadingRows;
+                        const uint32_t trail = img.diag.emptyTrailingRows;
+                        const char* believed =
+                            img.diag.blindConeRows == 0 ? "both are believed as no-returns"
+                          : img.diag.blindConeAtFirstRow
+                                ? "the leading band is unsampled; the trailing band clears"
+                                : "the trailing band is unsampled; the leading band clears";
+                        o.add("      bands     : %u leading and %u trailing grid rows hold no "
+                                    "returns\n                  %s\n", lead, trail, believed);
                     }
                 } else {
                     o.add("      grid      : range image failed — %s\n", rerr.c_str());
@@ -379,10 +425,45 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
 int scanReport(const std::vector<std::string>& paths, const Options& opt, std::string& out) {
     Out o{out};
     o.add("e57cov scan report — build %s\n", ver::describe());
-    o.add("%zu file(s), max range %.1f m\n\n", paths.size(), opt.maxRange);
+    o.add("%zu file(s), max range %.1f m\n", paths.size(), opt.maxRange);
+
+    // Which end of the raster holds the instrument's blind cone, decided once over
+    // every scan of every file. It has to come first: a scan's empty cells either
+    // clear space to the rated range or establish nothing at all, and that is the
+    // difference between a coverage report and a picture of a cone carved through
+    // the ground under each setup. No single scan can tell which — see
+    // rimg::decideBlindConeEnd — so the report would otherwise be describing a
+    // decision the carve does not make.
+    std::vector<std::pair<uint32_t, uint32_t>> bands;
+    for (const std::string& p : paths) {
+        e57::Reader r;
+        std::string e;
+        if (!r.open(p, e)) continue;
+        for (size_t i = 0; i < r.scanCount(); ++i) {
+            uint32_t lead = 0, trail = 0;
+            if (gridRowBands(r, i, lead, trail)) bands.push_back({lead, trail});
+        }
+    }
+    rimg::Options ro;
+    ro.blindCone        = opt.blindCone;
+    ro.coneCorpusSpread = rimg::Options{}.coneCorpusSpread;
+    const rimg::ConeVerdict cone = rimg::decideBlindConeEnd(bands, ro);
+    o.add("blind cone: %s\n            %s\n",
+          cone.decided ? (cone.atFirstRow ? "the START of each raster"
+                                          : "the END of each raster")
+                       : "*** not identified — see below ***",
+          cone.why.c_str());
+    o.add("\n");
+
+    // Every file then reports against that decision rather than its own.
+    Options scoped = opt;
+    if (cone.decided)
+        scoped.blindCone = cone.atFirstRow ? rimg::BlindCone::FirstRows
+                                           : rimg::BlindCone::LastRows;
+
     int failures = 0;
     for (const std::string& p : paths) {
-        failures += scanReport(p, opt, out);
+        failures += scanReport(p, scoped, out);
         Out{out}.add("\n");
     }
     if (failures) Out{out}.add("%d file(s) reported problems.\n", failures);

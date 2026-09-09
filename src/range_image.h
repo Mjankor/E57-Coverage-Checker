@@ -53,6 +53,20 @@ enum class BlindCone {
     LastRows,    // force: the band running off the last row
 };
 
+// How a corpus-wide decision came out, for reporting.
+struct ConeVerdict {
+    bool     decided = false;      // a corpus-wide end was identified
+    bool     atFirstRow = false;
+    uint32_t rowsMin = 0, rowsMax = 0;    // the band's size across the corpus
+    uint32_t otherMin = 0, otherMax = 0;  // and the other end's, which is scene
+    size_t   scans = 0;
+    // Scans whose own bordering-range verdict disagreed with the corpus and were
+    // re-marked. The count of scans a single-scan test got wrong, which is the
+    // number worth seeing: it was two of five on the job this was built against.
+    size_t   corrected = 0;
+    std::string why;
+};
+
 struct Options {
     // How far a no-return ray clears. This is the scanner's rated maximum:
     // past it a return is unlikely to be meaningful, so treating the ray as
@@ -130,6 +144,23 @@ struct Options {
     // disbelieving sky loses real coverage — so an unclear case is reported
     // rather than resolved by a coin toss.
     double   blindConeRatio = 0.6;
+    // How much the unsampled band at one end of the raster may vary across a
+    // corpus and still be read as the instrument's own geometry.
+    //
+    // The bordering-range test above is the best a single scan can do, and on real
+    // outdoor data it is not good enough: on five scans from one job it refused two
+    // and called two of the others inverted, because a beam grazing an eave
+    // overhead looks exactly like a beam grazing the mount. A corpus settles it
+    // outright. The instrument's cone is fixed geometry, so it is the same band in
+    // every scan — 590, 591, 591, 590, 591 rows on those five — while the band at
+    // the other end is scene and varied 87, 116, 125, 304, 576. One of those is a
+    // property of the instrument and the other is a property of where it stood,
+    // and telling them apart needs no notion of up, no ground plane and no
+    // threshold in metres.
+    //
+    // A tenth: one row in 591 is 0.2%, and the loosest thing that could still be
+    // called fixed geometry is far inside 10%.
+    double   coneCorpusSpread = 0.10;
 };
 
 constexpr double kTwoPi = 6.28318530717958648;
@@ -434,6 +465,40 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
 // accelerator, not part of the image: a caller that only samples directions has
 // no use for it and should not pay the memory.
 void buildPyramid(RangeImage& im);
+
+// Finds the instrument's blind cone across a whole corpus, then marks it in every
+// image. This is the entry point a caller with more than one scan should use;
+// markBlindCone below is what it falls back to for a single scan.
+//
+// The decision is which END of the raster the cone is at, never how many rows:
+// each image's own contiguous empty band is what gets marked, so a row that holds
+// returns in one scan is never marked unsampled there because it was empty in
+// another.
+//
+// Safe to call on images build() has already marked per scan, and that is the
+// intended order. build() keeps deciding for itself, so a single image is never
+// left believing a cone it should not; where this disagrees it puts that band back
+// as no-returns and marks the other end instead.
+ConeVerdict markBlindConeAcrossCorpus(const std::vector<RangeImage*>& images,
+                                      const Options& opt);
+
+// The same decision, from nothing but the unsampled bands — {leading, trailing}
+// row counts, one pair per scan. Separate from the images because that is all the
+// evidence it uses, and a caller that has not got every image in memory at once
+// can still reach the same verdict: the bands come from the rowIndex field alone,
+// which is a few bits per point against a whole decoded raster.
+//
+// The band sizes need not be on the same scale as the images' — a binned-down
+// raster has proportionally smaller bands — because the test is on their
+// consistency across scans, which is scale-free, and what it produces is an END,
+// not a row count.
+ConeVerdict decideBlindConeEnd(
+    const std::vector<std::pair<uint32_t, uint32_t>>& bands, const Options& opt);
+
+// Marks a decided verdict in every image, putting back any band build() claimed at
+// the other end. A verdict that decided nothing leaves every image as it is.
+void applyBlindConeVerdict(const std::vector<RangeImage*>& images,
+                           const ConeVerdict& v, const Options& opt);
 
 // Exposed for testing.
 void filterIsolatedNoReturns(RangeImage& im, const Options& opt);

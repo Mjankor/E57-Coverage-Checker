@@ -883,8 +883,136 @@ static void testBlindConeFoundGeometrically() {
     CHECK(holed.statusAt(45, 45) == rimg::Status::NoReturn, "and still clears");
 }
 
+// The corpus decides the blind cone, because no single scan reliably can.
+//
+// This is modelled on the job it was built against: five setups, a band of
+// 590-591 rows unsampled at the start of the raster in every one of them, and a
+// band at the other end running from 87 to 576 rows depending on where the
+// instrument happened to be standing. One of those is fixed geometry and the other
+// is scene. The bordering-range test that a single scan has to rely on got two of
+// the five wrong in each direction — refusing two outright and calling two of the
+// others inverted — because a beam grazing an eave overhead is indistinguishable
+// from one grazing the mount.
+static void testBlindConeFromTheCorpus() {
+    std::printf("range image: the blind cone is decided across the corpus\n");
+
+    // Builds one scan: a fixed cone band at the start, a scene band of the given
+    // size at the end, and returns in between at the given ranges. `coneBorder`
+    // and `skyBorder` are what the rows bordering each band measured, which is the
+    // single-scan evidence — and here it is deliberately misleading.
+    auto makeScan = [](uint32_t coneBand, uint32_t sceneBand,
+                       double coneBorder, double sceneBorder) {
+        rimg::RangeImage im;
+        // The real raster's row count, because the bands being told apart are
+        // hundreds of rows: a smaller one cannot hold them.
+        im.rows = 2500; im.cols = 200;
+        im.cells.assign(im.cellCount(), rimg::Cell{});
+        im.map = rimg::uniformMapping(im.rows, im.cols, -1.51, 0.00123, 0.0, kTau / 200.0);
+        im.map.valid = true;
+        for (uint32_t r = 0; r < im.rows; ++r) {
+            const bool empty = r < coneBand || r >= im.rows - sceneBand;
+            for (uint32_t c = 0; c < im.cols; ++c) {
+                rimg::Cell& cell = im.cells[size_t(r) * im.cols + c];
+                if (empty) { cell = rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)}; continue; }
+                const double u = double(r - coneBand) /
+                                 double(im.rows - coneBand - sceneBand - 1);
+                const double rng = coneBorder + u * (sceneBorder - coneBorder);
+                cell = rimg::Cell{uint16_t(rng * 100.0), uint8_t(rimg::Status::Hit)};
+            }
+        }
+        im.diag.emptyLeadingRows  = coneBand;
+        im.diag.emptyTrailingRows = sceneBand;
+        im.diag.noReturns      = uint64_t(coneBand + sceneBand) * im.cols;
+        im.diag.nearestReturn  = std::min(coneBorder, sceneBorder);
+        im.diag.furthestReturn = std::max(coneBorder, sceneBorder);
+        return im;
+    };
+
+    rimg::Options opt;
+
+    // The five scans, with the bordering ranges the real ones had: the cone end
+    // around 2.1-3.2 m and the scene end anywhere from 0.59 m to 3.3 m. Three of
+    // the five have a scene border NEARER than the cone border, which is what sent
+    // the single-scan test the wrong way.
+    const uint32_t cone[5]  = {590, 591, 591, 590, 591};
+    const uint32_t scene[5] = {125, 576, 304,  87, 116};
+    const double   cb[5]    = {2.21, 2.20, 2.17, 2.08, 3.20};
+    const double   sb[5]    = {3.30, 1.20, 3.14, 0.59, 1.23};
+
+    std::vector<rimg::RangeImage> corpus;
+    corpus.reserve(5);
+    for (int k = 0; k < 5; ++k) corpus.push_back(makeScan(cone[k], scene[k], cb[k], sb[k]));
+
+    // What each scan concludes on its own, which is what rimg::build leaves behind.
+    int aloneRight = 0;
+    for (auto& im : corpus) {
+        rimg::markBlindCone(im, opt);
+        if (im.diag.blindConeRows && im.diag.blindConeAtFirstRow) ++aloneRight;
+    }
+    CHECK(aloneRight < 5,
+          "scan by scan, the bordering-range test does not get all five right");
+
+    std::vector<rimg::RangeImage*> raw;
+    for (auto& im : corpus) raw.push_back(&im);
+    const rimg::ConeVerdict v = rimg::markBlindConeAcrossCorpus(raw, opt);
+
+    CHECK(v.decided, "the corpus settles it");
+    CHECK(v.atFirstRow, "on the end whose band is the same in every scan");
+    CHECK(v.rowsMin == 590 && v.rowsMax == 591, "and reports the band it found");
+    CHECK(v.otherMin == 87 && v.otherMax == 576, "against the other end, which is scene");
+    CHECK(v.scans == 5, "over all five");
+    CHECK(v.corrected == size_t(5 - aloneRight),
+          "and it re-marked exactly the scans that had got it wrong alone");
+    CHECK(v.why.find("fixed geometry") != std::string::npos, "with the reason recorded");
+
+    // Every scan now has its cone at the start, clearing nothing, and its scene
+    // band at the other end still believed — which is the point: that band is the
+    // sky that clears the volume above the site.
+    int allRight = 0, skyKept = 0;
+    for (const auto& im : corpus) {
+        if (im.diag.blindConeRows && im.diag.blindConeAtFirstRow) ++allRight;
+        if (im.statusAt(0, 0) == rimg::Status::OutsideFov &&
+            im.statusAt(im.rows - 1, 0) == rimg::Status::NoReturn &&
+            std::fabs(im.rangeAt(im.rows - 1, 0) - 45.0) < 0.02) ++skyKept;
+    }
+    CHECK(allRight == 5, "all five end up with the cone at the start");
+    CHECK(skyKept == 5, "and all five keep the band at the other end clearing");
+
+    // Un-marking and re-marking has to be exact, or a corrected scan quietly ends
+    // up with a band that clears nothing at BOTH ends.
+    uint64_t worstExtra = 0;
+    for (const auto& im : corpus) {
+        uint64_t outside = 0;
+        for (const rimg::Cell& c : im.cells)
+            if (rimg::Status(c.status) == rimg::Status::OutsideFov) ++outside;
+        worstExtra = std::max(worstExtra,
+                              outside - uint64_t(im.diag.blindConeRows) * im.cols);
+    }
+    CHECK(worstExtra == 0,
+          "no cell outside the cone was left unsampled by a re-marking");
+
+    // A corpus where both ends are consistent — five scans from inside one room,
+    // the same ceiling band in each — is not something a corpus can settle, and it
+    // says so rather than picking one.
+    std::vector<rimg::RangeImage> room;
+    for (int k = 0; k < 4; ++k) room.push_back(makeScan(600, 610, 2.0, 2.1));
+    std::vector<rimg::RangeImage*> rawRoom;
+    for (auto& im : room) rawRoom.push_back(&im);
+    const rimg::ConeVerdict rv = rimg::markBlindConeAcrossCorpus(rawRoom, opt);
+    CHECK(!rv.decided, "two equally consistent ends are not resolved by a coin toss");
+    CHECK(rv.why.find("both ends") != std::string::npos, "and the reason says which case");
+
+    // One scan has no corpus, so it falls back to its own geometry and says so.
+    rimg::RangeImage single = makeScan(590, 125, 2.21, 3.30);
+    std::vector<rimg::RangeImage*> one{&single};
+    const rimg::ConeVerdict sv = rimg::markBlindConeAcrossCorpus(one, opt);
+    CHECK(!sv.decided && sv.scans == 1, "one scan cannot be settled by a corpus");
+    CHECK(sv.why.find("one scan") != std::string::npos, "and the report says so");
+}
+
 int main() {
     std::printf("E57 Coverage Checker — range image tests\n\n");
+    testBlindConeFromTheCorpus();
     testGridPath();
     testPyramid();
     testSkyVersusDroppedReturns();

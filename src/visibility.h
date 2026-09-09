@@ -156,6 +156,9 @@ struct Result {
     // Setups whose blind cone was found, and how many were mounted inverted.
     uint64_t     setupsWithBlindCone = 0;
     uint64_t     setupsInverted = 0;
+    // How the cone was decided across the whole corpus, which is a far stronger
+    // signal than any single scan affords — see rimg::markBlindConeAcrossCorpus.
+    rimg::ConeVerdict coneVerdict;
     bool         partial   = false;    // maxTiles stopped it short
     bool         cancelled = false;
 

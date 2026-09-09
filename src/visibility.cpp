@@ -195,20 +195,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             auto img = std::make_unique<rimg::RangeImage>();
             std::string rerr;
             if (rimg::build(*r, i, ro, *img, rerr)) {
-                isolated    += img->diag.isolatedNoReturns;
-                believedSky += img->diag.noReturns;
                 if (!img->map.valid) ++out.setupsWithoutMapping;
-                if (img->diag.blindConeRows) {
-                    ++out.setupsWithBlindCone;
-                    if (img->diag.hasConeAxis && img->diag.coneAxisWorld[2] > 0.5)
-                        ++out.setupsInverted;
-                }
-                // The accelerator the carve culls with. About 5/16 of a byte
-                // per cell, and it settles most bricks with one lookup instead
-                // of 512 voxel tests.
-                rimg::buildPyramid(*img);
                 images.push_back(std::move(img));
-                setups.push_back(carve::makeSetupView(*images.back()));
             } else {
                 // A scan with no usable raster cannot contribute evidence, and
                 // inventing one would invent visibility. Skipped and counted.
@@ -221,6 +209,40 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             }
         }
     }
+
+    // The blind cone, decided once across every scan rather than scan by scan.
+    // It has to happen here, after all the images exist and before anything reads
+    // a cell, because the evidence is the corpus: a band unsampled at the same
+    // size in every scan is the instrument, and one that varies from 87 rows to
+    // 576 is the scene it was standing in. No single scan can tell those apart —
+    // on the job this was built against the per-scan test refused two and called
+    // two more inverted, and every one of those mistakes either clears a cone to
+    // the rated range straight through the ground or throws away the sky that
+    // clears the volume above the site.
+    {
+        std::vector<rimg::RangeImage*> raw;
+        raw.reserve(images.size());
+        for (auto& im : images) raw.push_back(im.get());
+        out.coneVerdict = rimg::markBlindConeAcrossCorpus(raw, ro);
+    }
+
+    for (auto& img : images) {
+        isolated    += img->diag.isolatedNoReturns;
+        believedSky += img->diag.noReturns;
+        if (img->diag.blindConeRows) {
+            ++out.setupsWithBlindCone;
+            if (img->diag.hasConeAxis && img->diag.coneAxisWorld[2] > 0.5)
+                ++out.setupsInverted;
+        }
+        // The accelerator the carve culls with. About 5/16 of a byte per cell, and
+        // it settles most bricks with one lookup instead of 512 voxel tests. Built
+        // after the cone is marked: it summarises cell statuses, so a pyramid
+        // built before the marking would answer for an image that no longer
+        // exists.
+        rimg::buildPyramid(*img);
+        setups.push_back(carve::makeSetupView(*img));
+    }
+
     if (setups.empty()) {
         err = "no scan produced a usable range image — none of them declare a "
               "sampling grid (indexBounds with rowIndex/columnIndex)";

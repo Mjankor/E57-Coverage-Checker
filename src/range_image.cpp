@@ -600,6 +600,139 @@ void markBlindCone(RangeImage& im, const Options& opt) {
     }
 }
 
+// Puts a band that markBlindCone claimed back as it was: no-returns clearing to
+// the rated range. Exactly reversible because the marking only ever converted
+// NoReturn to OutsideFov across a whole band.
+//
+// (If the optional drop filter is on it runs after the cone marking, so a cell it
+// demoted inside the band would come back as a no-return here. The filter is off
+// by default, and a caller that wants both should run the corpus pass before it.)
+static void unmarkBlindCone(RangeImage& im, const Options& opt) {
+    if (im.diag.blindConeRows == 0 || im.rows == 0 || im.cols == 0) return;
+    const uint16_t clearTo = uint16_t(std::min(opt.maxRange * 100.0, 65535.0));
+    uint64_t restored = 0;
+    for (uint32_t i = 0; i < im.diag.blindConeRows; ++i) {
+        const uint32_t r = im.diag.blindConeAtFirstRow ? i : (im.rows - 1 - i);
+        Cell* row = &im.cells[size_t(r) * im.cols];
+        for (uint32_t c = 0; c < im.cols; ++c) {
+            if (Status(row[c].status) != Status::OutsideFov) continue;
+            row[c].status  = uint8_t(Status::NoReturn);
+            row[c].rangeCm = clearTo;
+            ++restored;
+        }
+    }
+    im.diag.noReturns  += restored;
+    im.diag.outsideFov -= std::min<uint64_t>(restored, im.diag.outsideFov);
+    im.diag.blindConeRows  = 0;
+    im.diag.blindConeCells = 0;
+    im.diag.hasConeAxis    = false;
+}
+
+ConeVerdict decideBlindConeEnd(
+    const std::vector<std::pair<uint32_t, uint32_t>>& bands, const Options& opt) {
+    ConeVerdict v;
+    v.scans = bands.size();
+    if (opt.blindCone == BlindCone::None) {
+        v.why = "blind cone detection is switched off: every empty cell is believed";
+        return v;
+    }
+    if (opt.blindCone != BlindCone::Auto) {
+        v.decided    = true;
+        v.atFirstRow = (opt.blindCone == BlindCone::FirstRows);
+        v.why        = "the blind cone was set explicitly";
+        return v;
+    }
+    if (v.scans < 2) {
+        v.why = "one scan, so the cone was judged from its own geometry — the "
+                "bordering-range test, which is the best a single scan can do";
+        return v;
+    }
+
+    uint32_t leadMin = UINT32_MAX, leadMax = 0, trailMin = UINT32_MAX, trailMax = 0;
+    for (const auto& b : bands) {
+        leadMin  = std::min(leadMin,  b.first);
+        leadMax  = std::max(leadMax,  b.first);
+        trailMin = std::min(trailMin, b.second);
+        trailMax = std::max(trailMax, b.second);
+    }
+
+    // Fixed geometry is the same band every time; scene is not. A band present in
+    // only some scans is not the instrument either, so an end with a zero minimum
+    // is not a candidate however tight the rest of it looks.
+    auto spread = [](uint32_t lo, uint32_t hi) {
+        return hi ? double(hi - lo) / double(hi) : 1.0;
+    };
+    const bool leadFixed  = leadMin  > 0 && spread(leadMin,  leadMax)  <= opt.coneCorpusSpread;
+    const bool trailFixed = trailMin > 0 && spread(trailMin, trailMax) <= opt.coneCorpusSpread;
+
+    char buf[560];
+    if (leadFixed == trailFixed) {
+        // Neither end is consistent, or both are — five scans from inside one room
+        // would have the same ceiling band in every one. Neither case is something
+        // a corpus can settle, so the per-scan decisions build() already made
+        // stand, and the reason is recorded rather than resolved by a coin toss.
+        std::snprintf(buf, sizeof(buf),
+                      "%s across %zu scans (%u-%u rows leading, %u-%u trailing), so the "
+                      "corpus cannot say which end is the instrument; each scan's own "
+                      "bordering-range verdict stands",
+                      leadFixed ? "both ends of the raster are equally consistent"
+                                : "neither end of the raster is consistent",
+                      v.scans, leadMin, leadMax, trailMin, trailMax);
+        v.why = buf;
+        return v;
+    }
+
+    v.decided    = true;
+    v.atFirstRow = leadFixed;
+    v.rowsMin    = leadFixed ? leadMin  : trailMin;
+    v.rowsMax    = leadFixed ? leadMax  : trailMax;
+    v.otherMin   = leadFixed ? trailMin : leadMin;
+    v.otherMax   = leadFixed ? trailMax : leadMax;
+    std::snprintf(buf, sizeof(buf),
+                  "across %zu scans the band at the %s of the raster is %u-%u rows — "
+                  "fixed geometry, so the instrument's blind cone — while the other end "
+                  "runs %u-%u rows, which is scene. Decided from that rather than from "
+                  "the range of the returns bordering each end, which on real outdoor "
+                  "data cannot tell a beam grazing the mount from one grazing an eave",
+                  v.scans, v.atFirstRow ? "start" : "end",
+                  v.rowsMin, v.rowsMax, v.otherMin, v.otherMax);
+    v.why = buf;
+    return v;
+}
+
+void applyBlindConeVerdict(const std::vector<RangeImage*>& images,
+                           const ConeVerdict& v, const Options& opt) {
+    if (!v.decided) return;
+    Options forced = opt;
+    forced.blindCone = v.atFirstRow ? BlindCone::FirstRows : BlindCone::LastRows;
+    for (RangeImage* im : images) {
+        if (!im || im->rows == 0) continue;
+        if (im->diag.blindConeRows != 0 && im->diag.blindConeAtFirstRow == v.atFirstRow)
+            continue;                      // build() already reached the same answer
+        unmarkBlindCone(*im, opt);
+        markBlindCone(*im, forced);
+    }
+}
+
+ConeVerdict markBlindConeAcrossCorpus(const std::vector<RangeImage*>& images,
+                                      const Options& opt) {
+    std::vector<std::pair<uint32_t, uint32_t>> bands;
+    std::vector<RangeImage*> usable;
+    bands.reserve(images.size());
+    for (RangeImage* im : images) {
+        if (!im || im->rows == 0) continue;
+        bands.push_back({im->diag.emptyLeadingRows, im->diag.emptyTrailingRows});
+        usable.push_back(im);
+    }
+    ConeVerdict v = decideBlindConeEnd(bands, opt);
+    if (!v.decided) return v;
+    for (const RangeImage* im : usable)
+        if (im->diag.blindConeRows == 0 || im->diag.blindConeAtFirstRow != v.atFirstRow)
+            ++v.corrected;
+    applyBlindConeVerdict(usable, v, opt);
+    return v;
+}
+
 double RangeImage::rowCoord(double el) const {
     return tableCoord(map.elByRow, map.rowFor(el), el);
 }
