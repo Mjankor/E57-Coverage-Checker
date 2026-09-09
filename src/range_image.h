@@ -21,17 +21,18 @@
 //   OUTSIDE_FOV instead of NO_RETURN — the volume above the site then never
 //   clears. Used only when a file gives nothing better, and flagged.
 //
-// The (row, col) -> (azimuth, elevation) mapping is not declared anywhere, so
-// it is measured: the mean elevation of each row and the circular mean azimuth
-// of each column, then a line fitted through each. The maximum deviation of the
-// measured table from that line is reported, so a scanner that is not a uniform
-// raster shows up as a large residual rather than as quietly wrong lookups.
+// The (row, col) -> (azimuth, elevation) mapping is not declared anywhere, so it
+// is measured: the mean elevation of each row and the circular mean azimuth of
+// each column. Those tables are then used as they are, rather than having a line
+// fitted to them — see Mapping, where the reason is a field report, not a
+// preference.
 
 #pragma once
 
 #include "e57.h"
 #include "frame.h"
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -65,8 +66,10 @@ struct Options {
     // Minimum is the conservative direction: it clears less, never more, so a
     // downsampled image cannot carve through a surface it should have kept.
     uint32_t maxCells = 32u << 20;
-    // A residual above this means the row/column grid is not a uniform raster
-    // and the linear angular model would misplace lookups.
+    // A residual above this is reported as "this is not a uniform raster". It no
+    // longer refuses anything: the mapping is a measured table, so a non-uniform
+    // raster is handled rather than rejected. Kept because the figure is worth
+    // seeing — it is how far wrong a linear model would have been.
     double   maxMappingResidualRad = 0.02;   // ~1.15 degrees
     // The share of a scan's own points that must land back on their own cell
     // when put through the mapping. Below this the mapping is not describing the
@@ -129,30 +132,126 @@ struct Options {
     double   blindConeRatio = 0.6;
 };
 
-// az(col) = az0 + col * dAzPerCol, el(row) = el0 + row * dElPerRow.
+constexpr double kTwoPi = 6.28318530717958648;
+
+// Bins per raster cell in the reverse index below. Eight puts the worst
+// quantisation error at a sixteenth of a cell, well under the half-cell rounding
+// a lookup has anyway, for two int32 tables totalling about 250 kB beside a
+// 38 MB image.
+constexpr uint32_t kReverseBinsPerCell = 8;
+
+// The (row, column) -> (azimuth, elevation) mapping.
+//
+// Measured, and used as measured.
+//
+// There was a straight line here — az0 plus a slope per column, el0 plus a slope
+// per row — and lookups inverted it arithmetically. On real scanner output under
+// one per cent of each scan's own points could find their own cell again. The sky
+// came back unobserved and building interiors came back clear. Two independent
+// faults, and the fitted slopes were not either of them:
+//
+//   The sweep runs past a full turn. 363.8 to 365.6 degrees over 5280 columns on
+//   the five scans measured, so the last ~65 columns repeat the bearings of the
+//   first ~65. Inverting with a modulo-2pi fold and then a modulo-cols wrap
+//   assumes the raster covers exactly one turn, and every column past the fold
+//   came out shifted by precisely the excess, 5280 - 2pi/|dAzPerCol|: 65.1, 55.3,
+//   67.4, 80.4 and 61.4 columns respectively. Exactly half of every raster.
+//
+//   Neither axis is uniform anyway. The measured elevation table deviates from
+//   its own best-fit line by 3 to 33 rows depending on the scan, against the one
+//   cell of slack a lookup can absorb.
+//
+// Forcing a line on it was never necessary. The per-row elevations and per-column
+// azimuths ARE the mapping, measured from the points themselves, so they are kept
+// and used directly: gaps interpolated from their neighbours, lookups through a
+// reverse index built from the tables. Constant time, and right for any raster the
+// instrument actually produced — a sweep past a full turn, a non-uniform step, a
+// band the mirror moves through faster — rather than only for the uniform
+// single-turn raster a line assumes.
+//
+// The line is still fitted and still reported, because its residual says how far
+// from uniform the raster is. It no longer decides anything.
 struct Mapping {
+    // The mapping itself: one elevation per row, one azimuth per column, with no
+    // gaps — a row holding no returns still has to map somewhere. The azimuths
+    // are unwrapped, so they run monotonically through the sweep rather than
+    // jumping at the seam, and their total span may exceed 2pi.
+    std::vector<double> elByRow;
+    std::vector<double> azByCol;
+
+    // Reverse index: which row an elevation falls in, which column an azimuth.
+    //
+    // Elevation bins cover the table's own range plus a cell at each end, so an
+    // elevation outside them is a direction off the top or bottom of the raster.
+    // Azimuth bins cover the whole turn, because every bearing is somewhere on
+    // it; the ones a partial sweep never reached hold -1.
+    double  elLo = 0, elBin = 0;
+    double  azLo = 0, azBin = 0;
+    std::vector<int32_t> rowOfEl;
+    std::vector<int32_t> colOfAz;
+
+    // The best-fit line through each table. Reported, not used: a large residual
+    // means the raster is not uniform, which is worth knowing and is no longer a
+    // reason to refuse it.
     double az0 = 0, dAzPerCol = 0;
     double el0 = 0, dElPerRow = 0;
-    double azResidualRad = -1;   // max deviation of the measured table from the line
+    double azResidualRad = -1;
     double elResidualRad = -1;
-    // The fraction of the scan's own points that, put back through cellOf,
-    // land on the cell they were decoded from.
-    //
-    // This is the check that matters, and the residual above is not a substitute
-    // for it. A small residual says a line fits the per-row means; it says
-    // nothing about whether a lookup in a given direction reaches the right
-    // cell. The two come apart whenever the raster is not what the linear model
-    // assumes — a scanner that sweeps the mirror through more than 180 degrees
-    // covers each column twice, and the fitted line through half of a triangle
-    // wave can look perfectly good while sending every lookup in the upper half
-    // of the scan to a cell in the lower half.
-    //
-    // A voxel looking at the sky then samples a cell containing ground and comes
-    // out unknown; a voxel inside a building samples a cell containing sky and
-    // gets cleared. Both were observed in the field before this was measured.
+    // What the tables themselves span, end to end. The azimuth figure is how the
+    // sweep-past-a-turn shows up: over 2pi means some bearings were looked at
+    // twice.
+    double azSpanRad = 0;
+    double elSpanRad = 0;
+
+    // Whether each table runs one way without turning back. A mirror that sweeps
+    // past the pole sends the elevation up and then down again, and flips the
+    // azimuth by pi while it does — a mapping no pair of separable tables can
+    // express, so it is refused here rather than indexed ambiguously.
+    bool monotonicEl = false;
+    bool monotonicAz = false;
+
+    // The fraction of the scan's own points that, put back through this mapping,
+    // land on the cell they were decoded from. The check that matters: a residual
+    // describes a fit, this describes what lookups actually do.
     double roundTripFraction = -1.0;
     bool   valid = false;
+
+    // Which row an elevation falls in, and which column an azimuth; -1 when the
+    // raster never looked there.
+    //
+    // Deliberately ungated by `valid`: the round-trip check is what decides
+    // `valid`, and it has to be able to ask these first. Callers that care go
+    // through RangeImage::cellOf, which does gate.
+    int32_t rowFor(double el) const {
+        if (rowOfEl.empty() || !(elBin > 0)) return -1;
+        const double f = (el - elLo) / elBin;
+        if (!(f >= 0.0)) return -1;                 // also rejects NaN
+        const size_t b = size_t(f);
+        if (b >= rowOfEl.size()) return -1;
+        return rowOfEl[b];
+    }
+    int32_t colFor(double az) const {
+        if (colOfAz.empty() || !(azBin > 0)) return -1;
+        double d = az - azLo;
+        if (!std::isfinite(d)) return -1;
+        d -= kTwoPi * std::floor(d / kTwoPi);        // onto the turn the bins cover
+        size_t b = size_t(d / azBin);
+        if (b >= colOfAz.size()) b = colOfAz.size() - 1;   // only the top edge
+        return colOfAz[b];
+    }
 };
+
+// A uniform single-turn raster, expressed as tables: el(row) = el0 + row*dEl,
+// az(col) = az0 + col*dAz. What the old linear model described, and still the
+// right thing for a synthetic fixture — the tables are the general case, not a
+// different case.
+Mapping uniformMapping(uint32_t rows, uint32_t cols,
+                       double el0, double dElPerRow, double az0, double dAzPerCol);
+
+// Builds rowOfEl/colOfAz from elByRow/azByCol, and fills in the spans and the
+// monotonicity flags. False when the tables are too small or too degenerate to
+// index. Does not set `valid` — that is the round trip's call.
+bool indexMapping(Mapping& m);
 
 struct Diagnostics {
     bool     usedGrid = false;          // grid path rather than angular fallback

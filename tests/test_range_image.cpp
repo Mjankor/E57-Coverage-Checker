@@ -312,8 +312,8 @@ static void testPyramid() {
                                                     : rimg::Status::Hit);
         }
     }
+    im.map = rimg::uniformMapping(im.rows, im.cols, -0.4, 0.01, 0.0, 0.01);
     im.map.valid = true;
-    im.map.dElPerRow = 0.01; im.map.dAzPerCol = 0.01;
     rimg::buildPyramid(im);
     CHECK(!im.pyramid.empty(), "a pyramid was built");
     CHECK(im.pyramid.levels.front().block == rimg::kPyramidBase, "level 0 aggregates the base");
@@ -553,6 +553,171 @@ static void testOrdinaryRasterRoundTrips() {
           "and essentially every point lands back on its own cell");
 }
 
+// The raster real instruments actually produce, and the one the linear model got
+// wrong in the field: a sweep that runs past a full turn, on an elevation axis
+// that is not a uniform step.
+//
+// Both faults are in here at once because both were in the data. The azimuth
+// covers 364.5 degrees over 600 columns, so the last ~7 columns repeat the
+// bearings of the first ~7 — the same 1.25% excess the five scans measured had,
+// which sent every column past the modulo-2pi fold 55 to 80 columns away from
+// where it belonged. The elevation carries a full-period sinusoid on top of its
+// step, putting it ten cells from its own best-fit line. And the first 40 rows
+// hold no returns at all, as a blind cone leaves 590 of 2500 in a real scan, so
+// the gap filling has to produce elevations for rows nothing ever measured.
+//
+// What has to hold is not "the fit is good" — a fit is not the deliverable. It is
+// that a direction resolves to the cell that looked that way, that the fractional
+// coordinates the brick culling bounds with agree with the cell the lookup
+// returns, and that the rows nothing measured still map somewhere.
+static void testSweepPastATurnAndNonUniformRows() {
+    std::printf("range image: a sweep past a full turn, on a non-uniform elevation axis\n");
+
+    const int rows = 300, cols = 600, emptyRows = 40;
+    // 364.5 degrees, decreasing with column — the sign the real scans have.
+    const double azSweep = 364.5 * kPi / 180.0;
+    const double dAz     = -azSweep / double(cols);
+    const double azStart = -0.82;
+    // Ten cells of deviation from a straight line, and still monotonic: the step
+    // is 0.00917 rad and the sinusoid's steepest contribution is 0.00192.
+    const double elLo = -1.4, elStep = 2.75 / double(rows), elAmp = 10.0 * elStep;
+    auto azAt = [&](int c) { return azStart + dAz * double(c); };
+    auto elAt = [&](int r) {
+        return elLo + elStep * double(r) + elAmp * std::sin(kTau * double(r) / double(rows));
+    };
+
+    const std::string path = tmpPath("pastaturn");
+    fixture::Scan sc;
+    sc.name = "past a turn";
+    sc.hasPose = true;
+    sc.q[0] = 1.0;
+    sc.hasIndexBounds = true;
+    sc.rowMin = 0; sc.rowMax = rows - 1;
+    sc.colMin = 0; sc.colMax = cols - 1;
+    sc.fields = {
+        {"cartesianX",  e57::FieldType::FloatDouble},
+        {"cartesianY",  e57::FieldType::FloatDouble},
+        {"cartesianZ",  e57::FieldType::FloatDouble},
+        {"rowIndex",    e57::FieldType::Integer, 0, rows - 1},
+        {"columnIndex", e57::FieldType::Integer, 0, cols - 1},
+    };
+    sc.data.assign(5, {});
+    for (int r = emptyRows; r < rows; ++r) {
+        for (int c = 0; c < cols; ++c) {
+            const double az = azAt(c), el = elAt(r);
+            const double rr = 9.0 + 2.0 * std::sin(3.0 * az) + std::cos(2.0 * el);
+            const double ce = std::cos(el);
+            sc.data[0].push_back(rr * ce * std::cos(az));
+            sc.data[1].push_back(rr * ce * std::sin(az));
+            sc.data[2].push_back(rr * std::sin(el));
+            sc.data[3].push_back(double(r));
+            sc.data[4].push_back(double(c));
+        }
+    }
+    CHECK(fixture::write(path, {sc}, 512), "fixture written");
+
+    e57::Reader rd;
+    std::string err;
+    CHECK(rd.open(path, err), err.empty() ? "opened" : err.c_str());
+    rimg::Options opt;
+    rimg::RangeImage img;
+    const bool built = rimg::build(rd, 0, opt, img, err);
+    CHECK(built, err.empty() ? "built" : err.c_str());
+    if (!built) return;
+
+    // The two faults are present and reported, not smoothed over.
+    CHECK(std::fabs(img.map.azSpanRad) > kTau,
+          "the sweep is measured as running past a full turn");
+    CHECK(img.map.elResidualRad > opt.maxMappingResidualRad,
+          "and the elevation axis is measured as not uniform");
+    CHECK(img.diag.note.find("not a uniform raster") != std::string::npos,
+          "which is said out loud rather than left in a field nobody reads");
+
+    // And it is accepted anyway, because the tables describe it.
+    CHECK(img.map.valid, "the measured mapping is accepted");
+    CHECK(img.map.monotonicEl && img.map.monotonicAz, "both axes run one way");
+    CHECK(img.map.roundTripFraction > 0.99,
+          "and the scan's own points land back on their own cell");
+
+    // What the linear model would have done with the same data. Kept in the test
+    // rather than described in a comment: this is the arithmetic that shipped, and
+    // the number it produces is the reason the tables exist.
+    int misplaced = 0;
+    for (int c = 0; c < cols; ++c) {
+        double az = azAt(c);
+        az -= kTau * std::floor(az / kTau);                 // as toSpherical reports it
+        double d = az - img.map.az0;
+        while (d >  kPi) d -= kTau;
+        while (d <= -kPi) d += kTau;
+        long ci = std::lround(d / img.map.dAzPerCol) % cols;
+        if (ci < 0) ci += cols;
+        long dc = ci - c;
+        if (dc >  cols / 2) dc -= cols;
+        if (dc < -cols / 2) dc += cols;
+        if (std::labs(dc) > 1) ++misplaced;
+    }
+    CHECK(misplaced > cols / 4,
+          "inverting the fitted line arithmetically misplaces a large share of the raster");
+
+    // The property that matters: a direction resolves to a column that looked that
+    // way. Not necessarily the column the point was recorded in — the last few
+    // columns repeat the first few, and only one of each pair is in the index — so
+    // the check is on the bearing, which is the thing being asked about.
+    const double azStep = std::fabs(img.map.azSpanRad) / double(cols - 1);
+    int badCol = 0, badRow = 0, unresolved = 0, disagree = 0;
+    for (int r = emptyRows; r < rows; r += 3) {
+        for (int c = 0; c < cols; c += 7) {
+            uint32_t gr, gc;
+            if (!img.cellOf(azAt(c), elAt(r), gr, gc)) { ++unresolved; continue; }
+            if (int(gr) != r) ++badRow;
+            double da = img.map.azByCol[gc] - azAt(c);
+            da -= kTau * std::round(da / kTau);
+            if (std::fabs(da) > 0.51 * azStep) ++badCol;
+            // The fractional coordinates `judgeBrick` bounds a brick with have to
+            // agree with the cell a lookup then reads, or a brick can be culled
+            // against a rectangle of the image that does not contain it.
+            if (std::fabs(img.rowCoord(elAt(r)) - double(gr)) > 0.51 ||
+                std::fabs(img.colCoord(azAt(c)) - double(gc)) > 0.51) ++disagree;
+        }
+    }
+    CHECK(unresolved == 0, "every direction the scanner looked resolves to a cell");
+    CHECK(badRow == 0, "to the row it was recorded in");
+    CHECK(badCol == 0, "and to a column that looked that way");
+    CHECK(disagree == 0, "the fractional coordinates agree with the resolved cell");
+
+    // The 40 rows that hold no returns still map somewhere, extrapolated from
+    // their neighbours. Without that a direction inside a blind cone would come
+    // back "off the raster" rather than "a direction the instrument never got a
+    // return in", and those are different findings.
+    //
+    // What is NOT claimed is that the extrapolated angles are the scanner's. They
+    // cannot be: nothing measured them. Inside such a band every row carries the
+    // same verdict anyway — unsampled if the cone was identified, an empty ray if
+    // it was not — so which of them a direction resolves to changes no answer. The
+    // edge of the band is the part that has to be right, and that row was measured.
+    CHECK(img.diag.emptyLeadingRows == uint32_t(emptyRows),
+          "the empty band is counted");
+    CHECK(img.map.elByRow.size() == size_t(rows), "and the table covers it");
+    CHECK(img.map.rowFor(elAt(emptyRows)) == emptyRows,
+          "the first row that measured anything resolves exactly");
+    bool bandOrdered = true, bandCovered = true;
+    for (int r = 1; r < emptyRows; ++r) {
+        if (img.map.elByRow[r] <= img.map.elByRow[r - 1]) bandOrdered = false;
+        const int32_t got = img.map.rowFor(img.map.elByRow[r]);
+        if (got != r) bandCovered = false;
+    }
+    CHECK(bandOrdered, "the extrapolated rows stay in order");
+    CHECK(bandCovered, "and each is what its own elevation resolves to");
+
+    // Off either end of the sweep is still off the raster. The tables must not
+    // have turned the whole sphere into something this scan can answer for.
+    uint32_t gr, gc;
+    CHECK(!img.cellOf(azAt(10), img.map.elByRow.back() + 0.3, gr, gc),
+          "above the top of the sweep is outside the field of view");
+    CHECK(!img.cellOf(azAt(10), img.map.elByRow.front() - 0.3, gr, gc),
+          "and below the bottom of it");
+}
+
 // The blind cone is the one empty region that does not mean "the ray came back
 // with nothing" — no ray was fired there at all. Believed as a no-return it
 // clears a cone to maxRange straight through whatever the instrument stood on.
@@ -595,7 +760,9 @@ static void testBlindConeFoundGeometrically() {
         im.diag.nearestReturn = groundRange;
         im.diag.furthestReturn = skyBorderRange;
         im.diag.noReturns = uint64_t(coneBand + skyBand) * im.cols;
-        im.map.az0 = 0.0; im.map.dAzPerCol = kTau / 200.0;
+        // Elevation rising with row, so row 0 is the nadir end of the sweep and
+        // the cone's axis can be read off the end of the measured table.
+        im.map = rimg::uniformMapping(im.rows, im.cols, -1.3, 0.023, 0.0, kTau / 200.0);
         im.map.valid = true;
         return im;
     };
@@ -605,7 +772,6 @@ static void testBlindConeFoundGeometrically() {
     // An upright scanner: elevation rises with row, so the mount is at row 0 and
     // the ground beside it is 1.8 m away while the sky border is 30 m.
     rimg::RangeImage up = build(true, 1.8, 30.0);
-    up.map.el0 = -1.3; up.map.dElPerRow = 0.023;
     rimg::markBlindCone(up, opt);
     CHECK(up.diag.blindConeRows == 15, "the cone is found");
     CHECK(up.diag.blindConeAtFirstRow, "at the end the close returns border");
@@ -618,7 +784,6 @@ static void testBlindConeFoundGeometrically() {
     // cone now sits at the OTHER end of the raster. Nothing about the elevation
     // mapping distinguishes this from the first case — only the geometry does.
     rimg::RangeImage down = build(false, 1.8, 30.0);
-    down.map.el0 = -1.3; down.map.dElPerRow = 0.023;
     rimg::markBlindCone(down, opt);
     CHECK(down.diag.blindConeRows == 15, "the cone is found when it is at the far end");
     CHECK(!down.diag.blindConeAtFirstRow, "which is where the close returns are");
@@ -636,7 +801,6 @@ static void testBlindConeFoundGeometrically() {
     // similar ranges: nothing distinguishes them, so neither is believed to be
     // the cone and the note says so.
     rimg::RangeImage tie = build(true, 12.0, 14.0);
-    tie.map.el0 = -1.3; tie.map.dElPerRow = 0.023;
     rimg::markBlindCone(tie, opt);
     CHECK(tie.diag.blindConeRows == 0, "an unclear case is not resolved by a coin toss");
     CHECK(tie.diag.note.find("too similar") != std::string::npos, "and it is reported");
@@ -647,7 +811,6 @@ static void testBlindConeFoundGeometrically() {
     rimg::Options forced = opt;
     forced.blindCone = rimg::BlindCone::LastRows;
     rimg::RangeImage f = build(true, 1.8, 30.0);
-    f.map.el0 = -1.3; f.map.dElPerRow = 0.023;
     rimg::markBlindCone(f, forced);
     CHECK(!f.diag.blindConeAtFirstRow, "an explicit setting overrides the geometry");
 
@@ -655,7 +818,6 @@ static void testBlindConeFoundGeometrically() {
     rimg::Options none = opt;
     none.blindCone = rimg::BlindCone::None;
     rimg::RangeImage n = build(true, 1.8, 30.0);
-    n.map.el0 = -1.3; n.map.dElPerRow = 0.023;
     rimg::markBlindCone(n, none);
     CHECK(n.diag.blindConeRows == 0, "BlindCone::None leaves every empty cell believed");
     CHECK(n.statusAt(0, 0) == rimg::Status::NoReturn, "including the cone");
@@ -668,7 +830,8 @@ static void testBlindConeFoundGeometrically() {
         for (uint32_t c = 40; c < 50; ++c)
             holed.cells[size_t(r) * holed.cols + c] =
                 rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
-    holed.map.el0 = -1.3; holed.map.dElPerRow = 0.026; holed.map.valid = true;
+    holed.map = rimg::uniformMapping(holed.rows, holed.cols, -1.3, 0.026, 0.0, kTau / 200.0);
+    holed.map.valid = true;
     rimg::markBlindCone(holed, opt);
     CHECK(holed.diag.blindConeRows == 0, "a hole in the middle is not a blind cone");
     CHECK(holed.statusAt(45, 45) == rimg::Status::NoReturn, "and still clears");
@@ -682,6 +845,7 @@ int main() {
     testBlindConeFoundGeometrically();
     testDoubleCoveredMirrorIsRefused();
     testOrdinaryRasterRoundTrips();
+    testSweepPastATurnAndNonUniformRows();
     testMappingAndLookup();
     testDownsampleIsConservative();
     testRefusesWhatItCannotIdentify();

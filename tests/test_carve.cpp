@@ -64,12 +64,8 @@ static rimg::RangeImage shellImage(double range, double maxRange,
     im.cols = cols;
     im.cells.assign(im.cellCount(),
                     rimg::Cell{uint16_t(range * 100.0 + 0.5), uint8_t(rimg::Status::Hit)});
-    im.map.az0 = 0.0;
-    im.map.dAzPerCol = kTau / double(cols);
-    im.map.el0 = -0.8;
-    im.map.dElPerRow = 1.6 / double(rows);
-    im.map.azResidualRad = 0.0;
-    im.map.elResidualRad = 0.0;
+    im.map = rimg::uniformMapping(rows, cols, -0.8, 1.6 / double(rows),
+                                  0.0, kTau / double(cols));
     im.map.valid = true;
     im.hasPose = false;
     im.diag.usedGrid = true;

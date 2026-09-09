@@ -286,6 +286,11 @@ BrickVerdict judgeBrick(const SetupView& s, const Params& p,
                         const double blo[3], const double bhi[3], bool allInRange) {
     const rimg::RangeImage& im = *s.image;
     if (im.pyramid.empty()) return BrickVerdict::Fallthrough;
+    // A setup whose angular mapping was refused cannot answer a question about a
+    // direction, so every voxel-by-voxel lookup into it returns nothing. The brick
+    // tests have to reach the same conclusion: AllVisible here would mark voxels
+    // visible on the strength of an image the carve will not read a single cell of.
+    if (!im.map.valid) return BrickVerdict::NoEvidence;
 
     const AngularBox b = boundBrick(s, blo, bhi);
     if (!b.valid) return BrickVerdict::Fallthrough;
