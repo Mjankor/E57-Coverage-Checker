@@ -145,6 +145,34 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
         else
             o.add("      structure : no indexBounds — grid must be recovered from data\n");
 
+        // How many returns one ray produced, and which field the producer says
+        // indexes a scan line. Both are parts of the standard that were read past
+        // until now; neither changes what the carve does, and both change what can
+        // be said about whether it is doing the right thing.
+        if (s.hasReturnIndexBounds) {
+            if (s.multiReturn())
+                o.add("      returns   : returnIndex %lld..%lld — MULTI-RETURN: one ray can "
+                      "report several\n                  surfaces, and a cell keeps the "
+                      "nearest, since sight stops there\n",
+                      (long long)s.returnIndexMin, (long long)s.returnIndexMax);
+            else
+                o.add("      returns   : returnIndex %lld..%lld — one return per ray\n",
+                      (long long)s.returnIndexMin, (long long)s.returnIndexMax);
+        }
+        if (!s.groupingIdElement.empty()) {
+            o.add("      lines     : the file groups points by %s", s.groupingIdElement.c_str());
+            if (s.groupCount) o.add(", %llu lines", (unsigned long long)s.groupCount);
+            // Which axis carries elevation is measured from the points, never
+            // taken from here, so this is a cross-check. Only a declaration naming
+            // neither index is worth remarking on.
+            if (s.groupingIdElement != "rowIndex" && s.groupingIdElement != "columnIndex")
+                o.add("  (neither rowIndex nor columnIndex — unexpected)");
+            o.add("\n");
+        } else if (s.hasPointGrouping) {
+            o.add("      lines     : pointGroupingSchemes present but no "
+                  "groupingByLine/idElementName\n");
+        }
+
         o.add("      prototype :");
         for (const auto& f : s.proto) {
             o.add(" %s:%s", f.name.c_str(), typeName(f.type));
@@ -253,6 +281,22 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                 "(these are what clear space)\n",
                                 (unsigned long long)img.diag.hits,
                                 (unsigned long long)img.diag.noReturns);
+                    // Cells that took more than one return, measured rather than
+                    // inferred from the declaration above. The nearest is kept;
+                    // how many of the rest sat behind it says which cause it is.
+                    if (img.diag.cellsWithSeveralReturns) {
+                        const uint64_t n = img.diag.cellsWithSeveralReturns;
+                        const uint64_t behind = img.diag.returnsKeptBehindANearerOne;
+                        o.add("      several   : %llu cells took more than one return, %llu of "
+                              "those behind one already\n                  held — the nearest "
+                              "is kept, since line of sight stops there%s\n",
+                              (unsigned long long)n, (unsigned long long)behind,
+                              s.multiReturn()
+                                  ? " (multi-return)"
+                                  : (s.hasIndexBounds &&
+                                     uint64_t(s.rowMax - s.rowMin + 1) > img.rows
+                                         ? " (the raster was binned down)" : ""));
+                    }
                     if (img.diag.isolatedNoReturns) {
                         const double pct = 100.0 * double(img.diag.isolatedNoReturns) /
                                            double(img.diag.isolatedNoReturns + img.diag.noReturns);
@@ -395,6 +439,44 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                     if (!img.diag.originInsideReturns)
                         o.add("      *** the scanner sits outside the box of its own "
                                     "returns — check the frame\n");
+                    // Where the returns say the instrument stood, against where the
+                    // pose says. The only check on the setup position that does not
+                    // come from the pose — see originAudit, and the red markers in
+                    // the viewer, which are drawn from the pose and nothing else.
+                    {
+                        const rimg::Diagnostics& d = img.diag;
+                        if (!d.haveMeasuredOrigin) {
+                            o.add("      setup pos : the returns hold no opposite pairs, so the "
+                                  "frame cannot be checked against them\n");
+                        } else {
+                            const double off =
+                                std::sqrt(d.measuredOrigin[0] * d.measuredOrigin[0] +
+                                          d.measuredOrigin[1] * d.measuredOrigin[1] +
+                                          d.measuredOrigin[2] * d.measuredOrigin[2]);
+                            const double bar = std::max(0.25, 3.0 * d.originRms);
+                            if (off <= bar) {
+                                o.add("      setup pos : the returns put the instrument %.3f m "
+                                      "from the origin of the frame\n"
+                                      "                  they are read in, which is where it "
+                                      "belongs (%u ray pairs, rms %.3f m)\n",
+                                      off, d.originPairs, d.originRms);
+                            } else {
+                                o.add("      setup pos : *** the returns put the instrument "
+                                      "%.2f m from the origin of the\n"
+                                      "                  frame they are read in, at (%.3f, %.3f, "
+                                      "%.3f) ***\n"
+                                      "                  %u ray pairs meeting to %.3f m, so this "
+                                      "is not scatter. These points\n"
+                                      "                  are not in the frame they are being "
+                                      "read as, which displaces this\n"
+                                      "                  setup — and its red marker — by that "
+                                      "much\n",
+                                      off, d.measuredOrigin[0], d.measuredOrigin[1],
+                                      d.measuredOrigin[2], d.originPairs, d.originRms);
+                                ++failures;
+                            }
+                        }
+                    }
                     if (!img.diag.note.empty())
                         o.add("      note      : %s\n", img.diag.note.c_str());
                     if (!img.map.valid) ++failures;
@@ -556,6 +638,62 @@ constexpr uint64_t kCloudSamples = 120000;
 // So the error is broken down by range and by where in the raster it happened, in
 // cells, which tells those three apart in one run. Read straight from the file
 // rather than from anything build() kept, so a fault inside build() cannot hide.
+// Is the instrument where the frame being used puts it?
+//
+// rimg::measureOrigin finds the instrument from the returns alone: opposite rays
+// are collinear with it, so it is where those lines cross. The answer is in the
+// frame the cells were built about, where it should be the origin.
+//
+// What that can and cannot settle is worth being exact about, because the
+// obvious reading of it is wrong. For a conformant scan the points are stored
+// about the instrument, so this measures zero and says nothing whatever about
+// where the setup stood in the file's coordinates — that is carried entirely by
+// `pose`, and one scan's own points cannot check it. Only the registration
+// between scans can.
+//
+// What it does catch is the frame being wrong: a pre-transformed file whose pose
+// was applied anyway, a pose subtracted that should not have been, points not
+// stored about the instrument at all. Those displace the setup by the whole
+// magnitude of the site coordinates — tens of metres, sometimes straight down —
+// and they are the reason a setup marker lands nowhere near its scan. That is
+// the class of fault this puts a number on. diag.originInsideReturns already
+// asked the same question as a yes or no; this answers it in metres, which is
+// the difference between knowing something is wrong and knowing what.
+//
+// Reported, never used to overrule the file. Returns true when the frame puts
+// the instrument further from the returns' own answer than the fit's scatter
+// explains.
+static bool originAudit(const rimg::RangeImage& im, const viewer::Rigid& fwd, Out& o) {
+    const rimg::Diagnostics& d = im.diag;
+    (void)fwd;
+    if (!d.haveMeasuredOrigin) {
+        o.add("      setup position: the returns hold no opposite pairs, so the frame "
+              "cannot be checked against them\n");
+        return false;
+    }
+    const double off = std::sqrt(d.measuredOrigin[0] * d.measuredOrigin[0] +
+                                 d.measuredOrigin[1] * d.measuredOrigin[1] +
+                                 d.measuredOrigin[2] * d.measuredOrigin[2]);
+    // The bar is the scatter of the fit itself, floored so a very clean scan does
+    // not start reporting centimetres as a disagreement.
+    const double bar = std::max(0.25, 3.0 * d.originRms);
+    if (off <= bar) {
+        o.add("      setup position: the returns put the instrument %.3f m from the origin "
+              "of the frame they\n        are read in, which is where it belongs "
+              "(%u ray pairs, meeting to %.3f m)\n",
+              off, d.originPairs, d.originRms);
+        return false;
+    }
+    o.add("      setup position: *** the returns put the instrument at (%.3f, %.3f, %.3f) "
+          "in the frame\n        they are read in, %.2f m from the origin where it belongs — "
+          "%u ray pairs\n        meeting to %.3f m, so this is not scatter. The points are not "
+          "in the frame\n        they are being read as, which displaces this setup by that "
+          "much ***\n",
+          d.measuredOrigin[0], d.measuredOrigin[1], d.measuredOrigin[2],
+          off, d.originPairs, d.originRms);
+    return true;
+}
+
 static void rasterAudit(e57::Reader& r, size_t scanIndex, const rimg::RangeImage& im,
                         Out& o) {
     const e57::Scan& s = r.scan(scanIndex);
@@ -1108,6 +1246,7 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
         // The reason, which this left out and should never have: "refused" on its
         // own sends you off to run something else to find out why.
         if (!im.diag.note.empty()) o.add("      why: %s\n", im.diag.note.c_str());
+        if (originAudit(im, fwd, o)) ++failures;
         rasterAudit(*readers[readerOf[k]], scanOf[k], im, o);
         spreadAudit(*readers[readerOf[k]], scanOf[k], im, o);
 
@@ -1133,13 +1272,53 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
             return carve::evidenceAt(s, p, w[0], w[1], w[2]);
         };
 
+        // Which cell a probe actually landed in. A probe is built from cell
+        // (r, c)'s own table entry, so it should come back to (r, c) — but the
+        // reverse index is binned, and on a raster with uneven rows a direction
+        // near a bin edge can resolve to the neighbour.
+        //
+        // That distinction is the whole reason this test used to cry wolf. A
+        // probe that resolved to a neighbouring cell was never a test of the
+        // carve at all: it asked about a different cell, got that cell's answer,
+        // and was scored as a failure of this one. On the five real setups the
+        // mapping round trip runs 91.75 to 99.43 per cent, so between half a per
+        // cent and eight per cent of probes were mis-scored — and against a flat
+        // 99 per cent bar that printed SELF-TEST FAILED on data that was fine.
+        //
+        // So they are separated. Probes that reached their own cell are the test,
+        // and they have to be perfect: the arithmetic is exact and there is
+        // nothing left to be approximately right about. Probes that did not are
+        // reported as what they are — the mapping's resolution, already measured
+        // and already gated by the round trip in range_image — and never counted
+        // as a fault here.
+        auto landedHere = [&](uint32_t r, uint32_t c, double rho) {
+            double w[3];
+            pointAt(r, c, rho, w);
+            s.worldToScanner.apply(w[0], w[1], w[2]);
+            im.toInstrument(w[0], w[1], w[2]);
+            double az, el, rr;
+            rimg::toSpherical(w[0], w[1], w[2], az, el, rr);
+            uint32_t gr = 0, gc = 0;
+            return im.cellOf(az, el, gr, gc) && gr == r && gc == c;
+        };
+
         const uint64_t cells = uint64_t(im.rows) * im.cols;
         const uint32_t stride = uint32_t(std::max<uint64_t>(1, cells / kSamplesWanted));
 
-        uint64_t nHit = 0, nHitTested = 0, hitNearOk = 0, hitOnOk = 0, hitBeyondOk = 0;
-        uint64_t nEmpty = 0, emptyHalfOk = 0, emptyPastOk = 0, emptyClean = 0;
-        uint64_t nUnsampled = 0, unsampledOk = 0;
-        uint64_t skipped = 0;
+        // Per line: probes that reached their own cell and were right, probes
+        // that reached it at all, and probes the mapping sent to a neighbour.
+        struct Tally { uint64_t ok = 0, n = 0, lost = 0; };
+        Tally near_, on, beyond, half, clean_, past, unsampled;
+
+        // One probe. Fired only if it reaches the cell it was built from, and
+        // then required to be exactly right.
+        auto probe = [&](uint32_t r, uint32_t c, double rho, uint8_t want, Tally& t) {
+            if (!landedHere(r, c, rho)) { ++t.lost; return; }
+            ++t.n;
+            if (ask(r, c, rho) == want) ++t.ok;
+        };
+
+        uint64_t nHit = 0, nHitTested = 0, nEmpty = 0, nUnsampled = 0, skipped = 0;
 
         uint64_t i = 0;
         for (uint32_t r = 0; r < im.rows; ++r) {
@@ -1150,20 +1329,31 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
 
                 if (st == rimg::Status::OutsideFov) {
                     ++nUnsampled;
-                    if (ask(r, c, 5.0) == 0 && ask(r, c, 0.4 * opt.maxRange) == 0) ++unsampledOk;
+                    // Two ranges, both of which have to say nothing, so this one
+                    // is scored as a pair rather than through `probe`.
+                    const bool a = landedHere(r, c, 5.0);
+                    const bool b = landedHere(r, c, 0.4 * opt.maxRange);
+                    if (!a || !b) { ++unsampled.lost; continue; }
+                    ++unsampled.n;
+                    if (ask(r, c, 5.0) == 0 && ask(r, c, 0.4 * opt.maxRange) == 0)
+                        ++unsampled.ok;
                     continue;
                 }
                 if (st == rimg::Status::NoReturn) {
                     ++nEmpty;
                     const double clear = std::min(d, opt.maxRange);
                     if (clear < 2.0) { ++skipped; continue; }
-                    if (ask(r, c, 0.5 * clear) == carve::kVisible) ++emptyHalfOk;
-                    if (ask(r, c, clear + 2.0) == 0) ++emptyPastOk;
-                    // Cleanly, not just at one point: every metre of the ray.
-                    bool clean = true;
-                    for (double rho = 1.0; rho <= clear - 0.5; rho += 1.0)
-                        if (ask(r, c, rho) != carve::kVisible) { clean = false; break; }
-                    if (clean) ++emptyClean;
+                    probe(r, c, 0.5 * clear, carve::kVisible, half);
+                    probe(r, c, clear + 2.0, 0, past);
+                    // Cleanly, not just at one point: every metre of the ray. A
+                    // ray is only scored if every metre of it reached this cell.
+                    bool reached = true, ok = true;
+                    for (double rho = 1.0; rho <= clear - 0.5; rho += 1.0) {
+                        if (!landedHere(r, c, rho)) { reached = false; break; }
+                        if (ask(r, c, rho) != carve::kVisible) { ok = false; break; }
+                    }
+                    if (!reached) ++clean_.lost;
+                    else { ++clean_.n; if (ok) ++clean_.ok; }
                     continue;
                 }
                 // A return. Too near and the three probes are not separable; past
@@ -1171,19 +1361,33 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
                 ++nHit;
                 if (d < 2.0 || d > opt.maxRange - 2.0) { ++skipped; continue; }
                 ++nHitTested;
-                if (ask(r, c, 0.5 * d) == carve::kVisible)  ++hitNearOk;
-                if (ask(r, c, d)       == carve::kOccupied) ++hitOnOk;
-                if (ask(r, c, d + 1.0) == 0)                ++hitBeyondOk;
+                probe(r, c, 0.5 * d, carve::kVisible,  near_);
+                probe(r, c, d,       carve::kOccupied, on);
+                probe(r, c, d + 1.0, 0,                beyond);
             }
         }
 
         auto pct = [](uint64_t a, uint64_t b) { return b ? 100.0 * double(a) / double(b) : -1.0; };
-        auto line = [&](const char* what, uint64_t ok, uint64_t n, const char* should) {
-            if (!n) { o.add("      %-22s none in this scan\n", what); return; }
-            const double f = pct(ok, n);
-            o.add("      %-22s %7.2f%% of %llu  %s%s\n", what, f,
-                  (unsigned long long)n, should, f >= 99.0 ? "" : "   *** BROKEN ***");
-            if (f < 99.0) ++failures;
+        // A line fails when a probe that reached its own cell got the wrong
+        // answer. Nothing else: the arithmetic on that path is exact, so one
+        // wrong answer is a fault and a thousand near misses are not.
+        auto line = [&](const char* what, const Tally& t, const char* should) {
+            if (!t.n && !t.lost) { o.add("      %-22s none in this scan\n", what); return; }
+            if (!t.n) {
+                o.add("      %-22s *** NOTHING TESTED — all %llu probes were sent to a "
+                      "neighbouring cell ***\n", what, (unsigned long long)t.lost);
+                ++failures;
+                return;
+            }
+            const double f = pct(t.ok, t.n);
+            o.add("      %-22s %7.2f%% of %llu  %s%s", what, f,
+                  (unsigned long long)t.n, should, t.ok == t.n ? "" : "   *** BROKEN ***");
+            if (t.lost)
+                o.add("   (+%llu, %.1f%%, landed in a neighbouring cell — the mapping's "
+                      "resolution, not this)", (unsigned long long)t.lost,
+                      100.0 * double(t.lost) / double(t.n + t.lost));
+            o.add("\n");
+            if (t.ok != t.n) ++failures;
         };
         o.add("      cells: %llu returns, %llu empty, %llu unsampled  (%llu sampled, "
               "%llu skipped as too near or too far)\n",
@@ -1191,13 +1395,13 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
               (unsigned long long)nUnsampled,
               (unsigned long long)(nHit + nEmpty + nUnsampled),
               (unsigned long long)skipped);
-        line("in front of a return", hitNearOk,   nHitTested, "read VISIBLE");
-        line("on a return",          hitOnOk,     nHitTested, "read OCCUPIED");
-        line("behind a return",      hitBeyondOk, nHitTested, "read nothing");
-        line("halfway along empty",  emptyHalfOk, nEmpty, "read VISIBLE");
-        line("all along empty",      emptyClean,  nEmpty, "clear with no gaps");
-        line("past an empty ray",    emptyPastOk, nEmpty, "read nothing");
-        line("along unsampled",      unsampledOk, nUnsampled, "read nothing");
+        line("in front of a return", near_,     "read VISIBLE");
+        line("on a return",          on,        "read OCCUPIED");
+        line("behind a return",      beyond,    "read nothing");
+        line("halfway along empty",  half,      "read VISIBLE");
+        line("all along empty",      clean_,    "clear with no gaps");
+        line("past an empty ray",    past,      "read nothing");
+        line("along unsampled",      unsampled, "read nothing");
 
         // What this raster says the setup ought to clear, from the file alone.
         // Each cell is a pencil of solid angle dAz*dEl*cos(el) reaching however

@@ -363,6 +363,33 @@ void estimateTilt(const std::vector<PointRec>& pts, size_t rows, double R[9],
                        ? std::max(first, 1.0 - ex) : first;
 }
 
+// Where the instrument stood, from its own returns and nothing else. The method
+// is viewer::instrumentCentre — it lives in frame.cpp because deciding which
+// frame a scan's points are in is the first thing it is needed for, and there
+// must be exactly one implementation of it. This is the adapter that hands it
+// the decoded returns.
+//
+// CPU. A bounded sample and a 3x3 solve: a couple of milliseconds, and it does
+// not grow with the scan.
+constexpr size_t kOriginSamples = 200000;
+
+bool measureOrigin(const std::vector<PointRec>& pts, double out[3], double& rms,
+                   uint32_t& pairs) {
+    out[0] = out[1] = out[2] = 0.0;
+    rms = -1.0;
+    pairs = 0;
+    if (pts.size() < 2000) return false;
+    const size_t stride = std::max<size_t>(1, pts.size() / kOriginSamples);
+    std::vector<double> xyz;
+    xyz.reserve(3 * (pts.size() / stride + 1));
+    for (size_t i = 0; i < pts.size(); i += stride) {
+        xyz.push_back(double(pts[i].x));
+        xyz.push_back(double(pts[i].y));
+        xyz.push_back(double(pts[i].z));
+    }
+    return viewer::instrumentCentre(xyz, out, rms, pairs);
+}
+
 // How many points to hold back for the round-trip check, and how widely to
 // space them. Spread across the whole scan rather than taken from its start,
 // because a mapping can be right for one band of rows and wrong for another —
@@ -1298,6 +1325,14 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     out.tiltDeg *= 57.29577951308232;
     out.tiltTowardDeg *= 57.29577951308232;
 
+    // Where the returns say the instrument stood. Measured in the frame the
+    // cells are about, so a conformant file reads the origin; the report compares
+    // it against the pose, which is the only check on the setup position that the
+    // pose itself is not the source of. See measureOrigin.
+    out.diag.haveMeasuredOrigin =
+        measureOrigin(pts, out.diag.measuredOrigin, out.diag.originRms,
+                      out.diag.originPairs);
+
     // Now the raster, from the points, in that frame.
     for (const PointRec& p : pts) {
         double x = double(p.x), y = double(p.y), z = double(p.z);
@@ -1325,10 +1360,19 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         }
 
         const uint32_t cm = uint32_t(std::min(range * 100.0, 65535.0));
-        // Minimum range wins: several source cells can land in one binned cell,
-        // and clearing to the nearest of them never over-clears.
-        if (out.cells[i].status != uint8_t(Status::Hit) || cm < out.cells[i].rangeCm)
+        // Minimum range wins. Two things put several returns in one cell and the
+        // nearest is the right answer to both: binning down, where several source
+        // cells share one, and a multi-return instrument, where one ray met
+        // several surfaces and line of sight stops at the first of them. Clearing
+        // to a further return would carve through a nearer one. See
+        // e57::Scan::hasReturnIndexBounds.
+        if (out.cells[i].status == uint8_t(Status::Hit)) {
+            ++out.diag.cellsWithSeveralReturns;
+            if (cm < out.cells[i].rangeCm) out.cells[i].rangeCm = uint16_t(cm);
+            else                           ++out.diag.returnsKeptBehindANearerOne;
+        } else {
             out.cells[i].rangeCm = uint16_t(cm);
+        }
         out.cells[i].status = uint8_t(Status::Hit);
 
         Accum& ra = rowAcc[p.row];

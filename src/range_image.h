@@ -347,10 +347,36 @@ struct Diagnostics {
     // Returns surround the instrument, so the origin should sit inside their
     // box. When it does not, the frame decision was probably wrong and every
     // lookup is being made from the wrong place.
+    // Cells that received more than one return, and how many of those extra
+    // returns were further away than one already held. Together they say which
+    // of the two causes is at work: binning several source cells into one gives
+    // a mix in both directions, while a multi-return instrument firing one ray
+    // at several surfaces gives mostly further-than. Either way the nearest is
+    // kept — see the fill in build() — and these are how the report can say so
+    // rather than leaving it to be assumed.
+    uint64_t cellsWithSeveralReturns = 0;
+    uint64_t returnsKeptBehindANearerOne = 0;
+
     bool   originInsideReturns = true;
     bool   hasReturnBounds = false;
     double returnMin[3] = {0, 0, 0};
     double returnMax[3] = {0, 0, 0};
+
+    // Where the instrument stood, measured from its own returns and from nothing
+    // else: no pose, no metadata, no assumption about which frame the points are
+    // in. See measureOrigin for how.
+    //
+    // Expressed in the frame the cells were built about, so a file that means
+    // what the standard says reads (0, 0, 0) to within the noise. Anything else
+    // is how far out the setup position is — and since this is the only
+    // statement about that position which does not come from the pose, it is the
+    // only one that can contradict it. `originRms` says how well the lines
+    // actually met, which is what decides whether to believe the number.
+    bool     haveMeasuredOrigin = false;
+    double   measuredOrigin[3] = {0, 0, 0};
+    double   originRms   = -1.0;
+    uint32_t originPairs = 0;
+
     std::string note;
 };
 

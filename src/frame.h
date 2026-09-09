@@ -13,18 +13,30 @@
 //
 // Some writers get this wrong and emit global points *with* a non-identity
 // pose; applying it then displaces the scan by the setup position twice over.
-// That case is detected rather than assumed, by asking where the scanner
-// actually sits relative to the stored points: for scanner-local data the
-// points cluster about the local origin, and for pre-transformed data they
-// cluster about the pose translation. Comparing the two median distances is
-// scale-free and decisive — the two cases differ by the whole magnitude of the
-// site coordinates, not by a tunable margin.
+// That case is detected rather than assumed, by asking where the instrument
+// actually is: its returns come in opposite pairs, each pair collinear with it,
+// so it is the point where those lines cross. Whichever of the local origin and
+// the pose translation that point lands on is the frame the points are in. See
+// instrumentCentre.
+//
+// The earlier test compared how far the points sat from each of the two candidate
+// centres — a median radius, not a position — and called it on a factor of two.
+// That is decisive at UTM magnitudes, where the two differ by a factor of
+// thousands, and it is not decisive at all on a job referenced to a local origin
+// on the site: a setup twenty metres out with a scan reaching thirty reads 28.5 m
+// from one centre and 15.0 m from the other, a ratio of 1.9, and the answer comes
+// out backwards. The cost of getting it backwards is the whole pose translation —
+// tens of metres, sometimes straight down — on that setup's position, its marker,
+// and everything the carve asks from it. The medians are kept only for the case
+// the pairs cannot reach.
 
 #pragma once
 
 #include "e57.h"
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace viewer {
 
@@ -60,6 +72,19 @@ struct FrameDecision {
     double poseRotationDeg  = 0.0;
     double poseTranslationM = 0.0;
     bool   uninformative = false;
+
+    // The instrument, located from the returns themselves — the test that
+    // actually decides, with the medians kept above only for when it cannot
+    // reach. In the frame the points are stored in, so it comes out near the
+    // local origin for a conformant scan and near the pose translation for a
+    // pre-transformed one. `centreRms` is how well the opposite rays met, and
+    // `centrePairs` how many of them there were; both zero when the scan holds
+    // too few pairs to locate anything, which is when `haveCentre` is false.
+    bool     haveCentre = false;
+    double   centre[3]  = {0, 0, 0};
+    double   centreRms  = -1.0;
+    uint32_t centrePairs = 0;
+
     std::string reason;
 
     bool applyPose() const {
@@ -85,6 +110,24 @@ struct Rigid {
 
 Rigid rigidFromPose(const e57::Pose& p);
 bool  isIdentityPose(const e57::Pose& p);
+
+// Where the instrument stood, from a sample of its returns and nothing else — no
+// pose, no metadata, no assumption about which frame the points are in. `xyz` is
+// interleaved x, y, z, in whatever frame the caller has them. See frame.cpp for
+// the method.
+//
+// This is what decides which frame a scan's points are in: a terrestrial scan's
+// returns come in opposite pairs, each pair collinear with the instrument, so the
+// instrument is where those lines cross. Comparing that point against the local
+// origin and the pose translation is decisive; comparing how far the points sit
+// from each is only decisive when the site coordinates are huge.
+//
+// False when the returns hold too few opposite pairs to locate anything — a scan
+// that did not sweep a full turn, or one too sparse to pair up. `rms` is how well
+// the lines met, which is what says whether to believe the answer, and `pairs`
+// how many there were.
+bool instrumentCentre(const std::vector<double>& xyz, double out[3], double& rms,
+                      uint32_t& pairs);
 
 // Samples the scan to decide the convention. Cheap: a wide stride, positions
 // only. Returns Unknown (and applyPose() == true, the conformant default) when
