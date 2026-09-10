@@ -1075,7 +1075,14 @@ const char *kindLabel(check::Kind k) {
     }
 
     // --- parameters -------------------------------------------------------
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 236)];
+    // Laid out from the top down, in one place, because it is a fixed stack and
+    // adding a control by eyeballing a y is how the region popup ended up drawn
+    // over the fourth parameter row.
+    //
+    //   192 164 136 108   four label/value rows, 28 apart
+    //    77              the region popup, 24 tall, clearing 108 by seven
+    //    52  30   8      three tick boxes, 22 apart
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 220)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -1085,7 +1092,7 @@ const char *kindLabel(check::Kind k) {
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (int i = 0; i < 4; ++i) {
-        const CGFloat y = 184 - i * 28;
+        const CGFloat y = 192 - i * 28;
         [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 220, 20)]];
         NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(230, y - 3, 90, 22)];
         [acc addSubview:f];
@@ -1094,9 +1101,9 @@ const char *kindLabel(check::Kind k) {
 
     // What region the question covers — the setting that changes the answer more
     // than any other, so it is a choice rather than a tick box.
-    [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 100, 60, 20)]];
+    [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 80, 60, 20)]];
     NSPopUpButton *region =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 97, 396, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 77, 396, 24) pullsDown:NO];
     [region addItemsWithTitles:@[@"Shrinkwrap of the returns (tightest)",
                                  @"Box around the surveyed extent",
                                  @"Everything in range of a setup"]];
@@ -1107,16 +1114,15 @@ const char *kindLabel(check::Kind k) {
         if (regionOrder[i] == _visOptions.domain) [region selectItemAtIndex:i];
     [acc addSubview:region];
 
-    NSButton *interior = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
-    interior.title = @"Scanned entirely indoors — leave the space outside the walls out "
-                     @"of the question";
+    NSButton *interior = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 460, 20)];
+    interior.title = @"Scanned entirely indoors (leave the space outside the walls out)";
     [interior setButtonType:NSButtonTypeSwitch];
     interior.font = [NSFont systemFontOfSize:11];
     interior.state = _visOptions.wrapInteriorOnly ? NSControlStateValueOn
                                                   : NSControlStateValueOff;
     [acc addSubview:interior];
 
-    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 400, 20)];
+    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 460, 20)];
     firstHit.title = @"Stop at the first evidence (faster; visible and occupied become "
                      @"lower bounds)";
     [firstHit setButtonType:NSButtonTypeSwitch];
@@ -1125,7 +1131,7 @@ const char *kindLabel(check::Kind k) {
                    ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:firstHit];
 
-    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 400, 20)];
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 460, 20)];
     solid.title = @"Show every unobserved voxel, not just the frontier";
     [solid setButtonType:NSButtonTypeSwitch];
     solid.font = [NSFont systemFontOfSize:11];

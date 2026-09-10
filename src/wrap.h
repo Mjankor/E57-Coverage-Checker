@@ -42,11 +42,32 @@
 // WHAT THIS CANNOT REPORT, and it matters when reading the number. Unobserved
 // space is only asked about within `buffer` of something that was seen. A room
 // nobody entered, behind a door nobody opened, is reported as a `buffer`-thick
-// slab against the corridor wall and not as a room. The volume that comes out is
-// therefore closer to `buffer x (area of surface not seen from both sides)` than
-// to a volume of space: it says where coverage stops, which is the question, and
-// doubling the buffer roughly doubles it, which is why the buffer is chosen for
-// what you want to see rather than for accuracy.
+// slab against the corridor wall and not as a room.
+//
+// So the VOLUME is closer to `buffer x (area of surface not seen from both
+// sides)` than to a volume of space, and it scales with the buffer accordingly:
+// on one real setup, 3,694 m^3 at a 1 m buffer, 8,029 at 2 m, 17,617 at 4 m —
+// slightly over double each time. Read on its own it says more about the buffer
+// than about the survey.
+//
+// The FRACTION is the number that means something, and it is worth saying why
+// rather than leaving it to be discovered. Across the same buffers it moves only
+// 27.9, 30.5, 34.3 per cent — it drifts up, because a wider buffer reaches
+// further behind surfaces where there is nothing to see while the lit side
+// saturates, but slowly. Across coverage it moves the way a coverage measure
+// should: on a synthetic hall, 32.1 per cent at one setup, 14.4 at four, 8.1 at
+// nine, 5.0 at sixteen. Seven times the swing from coverage against one and a
+// fifth from the buffer, which is what makes it a statement about the survey.
+//
+// One thing it is NOT is an artefact of the voxel size: the same scan gives
+// 7,635 m^3 at 0.5 m voxels, 8,029 at 0.25 and 8,217 at 0.125. It converges,
+// so it is measuring a shape rather than a sampling.
+//
+// Nor is the volume behind the ground a special case worth clipping out. Every
+// surface seen from one side only gets a buffer's depth of unobserved space
+// behind it; the ground merely has the most area. Telling ground from a floor,
+// a deck or a soffit in order to treat it differently would be a classifier
+// standing in for the thing the buffer already says plainly.
 
 #pragma once
 
