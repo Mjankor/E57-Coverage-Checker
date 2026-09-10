@@ -1,6 +1,7 @@
 #include "visibility.h"
 
 #include "e57.h"
+#include "wrap.h"
 
 #include <algorithm>
 #include <atomic>
@@ -247,6 +248,60 @@ struct Collector {
     std::vector<uint64_t> keys;
     std::vector<uint8_t>  faceOf;
 };
+
+} // namespace
+
+namespace {
+
+// Marks the wrap cells one setup's returns fall in.
+//
+// The bridge between a raster cell and a world position: the measured tables
+// give the direction the cell looked in, in the instrument's own frame, and the
+// tilt and the pose put it in the world. Exactly the arithmetic the self-test's
+// probes use, and for the same reason — this is the one place outside the carve
+// that has to agree with where the carve thinks a return is.
+void markSetup(const rimg::RangeImage& im, wrap::Grid& grid) {
+    if (grid.empty() || !im.map.valid || im.rows == 0 || im.cols == 0) return;
+    if (im.map.elByRow.size() != im.rows || im.map.azByCol.size() != im.cols) return;
+
+    struct Ctx {
+        const rimg::RangeImage* im;
+        viewer::Rigid fwd;
+    } ctx{&im, im.hasPose ? viewer::rigidFromPose(im.pose) : viewer::Rigid{}};
+
+    wrap::MarkSource src;
+    src.rows = im.rows;
+    src.cols = im.cols;
+    src.user = &ctx;
+    // The widest step in either axis, so the stride is safe for both.
+    const double elStep = (im.rows > 1)
+        ? std::fabs(im.map.elSpanRad) / double(im.rows - 1) : 0.0;
+    const double azStep = (im.cols > 1)
+        ? std::fabs(im.map.azSpanRad) / double(im.cols - 1) : 0.0;
+    src.angularStep = std::max(elStep, azStep);
+    src.furthest    = std::max(1.0, im.diag.furthestReturn);
+    src.pointAt = [](const void* user, uint32_t r, uint32_t c, double out[3]) {
+        const Ctx& k = *static_cast<const Ctx*>(user);
+        const rimg::RangeImage& img = *k.im;
+        // Only measured surface marks the wrap. A no-return ray says where the
+        // survey saw THROUGH, which is the opposite of where it found something,
+        // and marking it would wrap the sky.
+        if (img.statusAt(r, c) != rimg::Status::Hit) return false;
+        const double rho = img.rangeAt(r, c);
+        if (!(rho > 0.0)) return false;
+        const double el = img.map.elByRow[r], az = img.map.azByCol[c];
+        const double ce = std::cos(el);
+        double q[3] = {rho * ce * std::cos(az), rho * ce * std::sin(az), rho * std::sin(el)};
+        // The tables are angles in the instrument's frame, so the direction comes
+        // back out of that frame before the pose puts it in the world.
+        img.fromInstrument(q[0], q[1], q[2]);
+        for (int i = 0; i < 3; ++i)
+            out[i] = k.fwd.R[3 * i + 0] * q[0] + k.fwd.R[3 * i + 1] * q[1] +
+                     k.fwd.R[3 * i + 2] * q[2] + k.fwd.t[i];
+        return true;
+    };
+    wrap::markScan(src, grid);
+}
 
 } // namespace
 
@@ -513,7 +568,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         out.sphereVolume = (shi[0] - slo[0]) * (shi[1] - slo[1]) * (shi[2] - slo[2]);
     }
 
-    if (opt.domain == DomainMode::MeasuredExtent) {
+    if (opt.domain == DomainMode::MeasuredExtent || opt.domain == DomainMode::Shrinkwrap) {
         // The union of what every scan actually returned. Bounds are measured in
         // each scanner's own frame, so the eight corners of each box go through
         // that setup's pose — transforming a box by a rotation and re-bounding
@@ -556,8 +611,61 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                                (p.domain.hi[1] - p.domain.lo[1]) *
                                (p.domain.hi[2] - p.domain.lo[2]);
         }
+
+        // The wrap, over the box the returns just gave us. The box is still
+        // computed and still bounds the grid — it is the cheapest statement of
+        // where the site is, and the wrap needs somewhere to put its cells before
+        // it can decide which of them the survey reached.
+        if (have && opt.domain == DomainMode::Shrinkwrap) {
+            wrap::Options wo;
+            wo.buffer       = opt.domainMargin;
+            wo.cell         = opt.wrapCell;
+            wo.maxCells     = opt.wrapMaxCells;
+            wo.interiorOnly = opt.wrapInteriorOnly;
+            std::string werr;
+            if (!wrap::size(lo, hi, wo, out.wrapGrid, werr)) {
+                // A wrap that cannot be sized is not a reason to refuse the run:
+                // the box is a worse question, not a wrong one, so it stands and
+                // the note says why.
+                out.wrapNote = werr;
+            } else {
+                uint64_t marked = 0;
+                for (const carve::SetupView& s : setups) {
+                    markSetup(*s.image, out.wrapGrid);
+                    if (!tick("wrapping the site", ++marked, setups.size())) {
+                        out.cancelled = true;
+                        err = "cancelled";
+                        return false;
+                    }
+                }
+                // The instrument positions, so the wrap can check that an
+                // interior-only flood stayed outside the building it was
+                // standing in — see wrap::Grid::sealLeaked.
+                std::vector<double> setupsXYZ;
+                setupsXYZ.reserve(setups.size() * 3);
+                for (const carve::SetupView& s2 : setups)
+                    for (int k = 0; k < 3; ++k) setupsXYZ.push_back(s2.origin[k]);
+                wrap::build(wo, out.wrapGrid, setupsXYZ);
+                if (out.wrapGrid.sealLeaked)
+                    out.wrapNote = "the interior-only rule found a hole in the survey: the "
+                                   "outside reached a cell an instrument was standing in, so "
+                                   "nothing was dropped and the wrap covers both sides";
+                if (out.wrapGrid.domainCells == 0) {
+                    out.wrapNote = "no cell of the wrap holds a return; the measured "
+                                   "extent stands instead";
+                    out.wrapGrid = wrap::Grid{};
+                } else {
+                    p.domain.kind     = carve::Domain::Kind::Wrap;
+                    p.domain.wrapGrid = &out.wrapGrid;
+                    out.domainVolume  = out.wrapGrid.volume();
+                }
+            }
+        }
     }
     out.domain = p.domain;
+    // The result owns the grid, and the domain points into it — so re-point it
+    // at the copy the caller will be holding rather than at this function's.
+    if (out.domain.kind == carve::Domain::Kind::Wrap) out.domain.wrapGrid = &out.wrapGrid;
 
     const std::vector<carve::TileKey> keys = carve::tilesForSetups(setups, p);
     out.tilesTotal = keys.size();

@@ -24,6 +24,7 @@ add_library(e57cov_core STATIC
   src/carve.cpp
   src/report.cpp
   src/voids.cpp
+    src/wrap.cpp
   src/visibility.cpp)
 target_include_directories(e57cov_core PUBLIC src)
 
@@ -82,6 +83,11 @@ add_executable(test_visibility tests/test_visibility.cpp)
 target_link_libraries(test_visibility PRIVATE e57cov_core)
 target_compile_options(test_visibility PRIVATE -Wall -Wextra)
 add_test(NAME visibility COMMAND test_visibility)
+
+add_executable(test_wrap tests/test_wrap.cpp)
+target_link_libraries(test_wrap PRIVATE e57cov_core)
+target_compile_options(test_wrap PRIVATE -Wall -Wextra)
+add_test(NAME wrap COMMAND test_wrap)
 
 add_executable(test_voids tests/test_voids.cpp)
 target_link_libraries(test_voids PRIVATE e57cov_core)

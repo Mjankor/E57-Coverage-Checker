@@ -31,6 +31,7 @@
 
 #include "frame.h"
 #include "range_image.h"
+#include "wrap.h"
 
 #include <cstdint>
 #include <string>
@@ -85,13 +86,28 @@ struct Domain {
     enum class Kind : uint8_t {
         Unbounded,   // whatever the range spheres reach
         Box,         // an axis-aligned envelope
+        Wrap,        // a shrinkwrap of the returns — see wrap.h
     };
     Kind   kind  = Kind::Unbounded;
     double lo[3] = {0, 0, 0};
     double hi[3] = {0, 0, 0};
+    // The wrap, when there is one. A pointer rather than a value because the
+    // grid is megabytes and Params is copied per worker; the caller owns it and
+    // must outlive the carve. Null with Kind::Wrap answers Full, which is the
+    // Unbounded behaviour and the safe direction — a domain that has gone missing
+    // asks about more space, never less.
+    const wrap::Grid* wrapGrid = nullptr;
 
     Overlap testBox(const double blo[3], const double bhi[3]) const {
         if (kind == Kind::Unbounded) return Overlap::Full;
+        if (kind == Kind::Wrap) {
+            if (!wrapGrid) return Overlap::Full;
+            switch (wrapGrid->testBox(blo, bhi)) {
+            case 0:  return Overlap::None;
+            case 2:  return Overlap::Full;
+            default: return Overlap::Partial;
+            }
+        }
         for (int i = 0; i < 3; ++i)
             if (bhi[i] < lo[i] || blo[i] > hi[i]) return Overlap::None;
         for (int i = 0; i < 3; ++i)
@@ -100,6 +116,7 @@ struct Domain {
     }
     bool contains(double x, double y, double z) const {
         if (kind == Kind::Unbounded) return true;
+        if (kind == Kind::Wrap) return wrapGrid ? wrapGrid->contains(x, y, z) : true;
         return x >= lo[0] && x <= hi[0] && y >= lo[1] && y <= hi[1] &&
                z >= lo[2] && z <= hi[2];
     }

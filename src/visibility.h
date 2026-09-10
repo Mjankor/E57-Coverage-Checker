@@ -36,6 +36,7 @@
 #include "lod.h"
 #include "range_image.h"
 #include "voids.h"
+#include "wrap.h"
 
 #include <cstdint>
 #include <functional>
@@ -58,6 +59,12 @@ enum class DomainMode {
     // which would also drop the corners of this box that no scan ever reached.
     // carve::Domain is the seam that will be cut along.
     MeasuredExtent,
+    // A shrinkwrap of the returns: the space within `domainMargin` of something
+    // a scanner actually measured. See wrap.h — the box's corners that no scan
+    // reached come out of the question, which is both the largest speed factor
+    // available and what makes the unobserved volume mean "coverage stops here"
+    // rather than "mostly sky".
+    Shrinkwrap,
 };
 
 struct Options {
@@ -76,6 +83,24 @@ struct Options {
     carve::EarlyOut earlyOut = carve::EarlyOut::Saturated;
 
     DomainMode domain = DomainMode::MeasuredExtent;
+
+    // Shrinkwrap settings; ignored unless `domain` is Shrinkwrap. The buffer is
+    // `domainMargin` — the same parameter, meaning the same thing, applied to a
+    // wrap instead of a box.
+    //
+    // `wrapInteriorOnly` is the one switch that distinguishes the two kinds of
+    // survey. False for one that looks outward, where the shadow behind a wall is
+    // part of the answer and the buffer is what stops it running to the horizon.
+    // True for one conducted entirely inside a building, where the space outside
+    // the walls is not the question — and where a shell of unobserved voxels
+    // wrapped round the outside hides everything within it.
+    //
+    // It is a switch rather than something inferred, because getting it wrong
+    // silently would either hide a building's interior or hide nothing at all,
+    // and neither announces itself in the picture.
+    bool     wrapInteriorOnly = false;
+    double   wrapCell     = 0.0;             // 0 derives it from the buffer
+    uint64_t wrapMaxCells = 64ull << 20;
     // How far past the last measured return the question still applies. Two
     // metres covers wall thickness, eaves, and registration slop — enough that a
     // void just behind a surface is still asked about, without reaching into the
@@ -251,6 +276,12 @@ struct Result {
     // Parallel to `voxels` and the same length: everything that filters or
     // reorders one does the same to the other.
     std::vector<uint8_t> voxelFaces;
+    // The wrap, when one was built. Owned here because `domain` points into it:
+    // a Result that outlives the run has to carry the grid its own domain refers
+    // to, or the predicate is left pointing at a dead stack frame.
+    wrap::Grid  wrapGrid;
+    // Why there is no wrap, when one was asked for and could not be had.
+    std::string wrapNote;
     double   origin[3] = {0, 0, 0};
     double   voxelSize = 0;
     lod::Aabb bounds;

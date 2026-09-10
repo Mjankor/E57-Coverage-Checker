@@ -135,7 +135,23 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
     std::printf("voxel     : %.3f m   ·   tile %u^3   ·   max range %.0f m   ·   %u thread(s)\n",
                 opt.voxelSize, opt.tileVoxels, opt.maxRange,
                 opt.threads ? opt.threads : std::thread::hardware_concurrency());
-    if (res.domain.kind == carve::Domain::Kind::Box) {
+    if (res.domain.kind == carve::Domain::Kind::Wrap) {
+        const wrap::Grid& g = res.wrapGrid;
+        std::printf("region    : shrinkwrap, %.2f m cells, %.1f m buffer%s\n"
+                    "            %llu cells hold returns, %llu are in the question"
+                    "%s\n"
+                    "            %.0f m^3, against %.0f m^3 of range spheres (%.0fx smaller)\n",
+                    g.cell, g.buffer,
+                    g.interiorOnly ? ", interior only" : ", both sides of every surface",
+                    (unsigned long long)g.occupiedCells,
+                    (unsigned long long)g.domainCells,
+                    g.coarsened ? "  (cells were coarsened to fit the budget)" : "",
+                    res.domainVolume, res.sphereVolume,
+                    res.domainVolume > 0 ? res.sphereVolume / res.domainVolume : 0.0);
+        if (g.interiorOnly && !g.sealLeaked)
+            std::printf("            %llu cells dropped as outside the surveyed shell\n",
+                        (unsigned long long)g.droppedOutside);
+    } else if (res.domain.kind == carve::Domain::Kind::Box) {
         std::printf("region    : surveyed extent  x[%.1f, %.1f] y[%.1f, %.1f] z[%.1f, %.1f]\n"
                     "            %.0f m^3, against %.0f m^3 of range spheres (%.0fx smaller)\n",
                     res.domain.lo[0], res.domain.hi[0], res.domain.lo[1], res.domain.hi[1],
@@ -145,6 +161,8 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
         std::printf("region    : full range spheres, %.0f m^3 — mostly open air\n",
                     res.sphereVolume);
     }
+    if (!res.wrapNote.empty())
+        std::printf("            *** no shrinkwrap: %s ***\n", res.wrapNote.c_str());
     std::printf("domain    : %llu tiles, %llu carved%s\n",
                 (unsigned long long)res.tilesTotal, (unsigned long long)res.tilesCarved,
                 res.partial ? "  (stopped early — the numbers below are a sample)" : "");
@@ -386,6 +404,28 @@ void usage() {
         "  --threads <n>\n"
         "          (carve) Worker threads over the tile list. Default 0, the\n"
         "          machine's count. The answer is identical at any count.\n"
+        "  --domain wrap\n"
+        "          (carve) Ask only about space within the margin of something a\n"
+        "          scanner actually measured: a shrinkwrap of the returns rather than\n"
+        "          a box round them. The corners of the box that no scan reached leave\n"
+        "          the question, which is the largest single speed factor available,\n"
+        "          and it makes the unobserved volume read as coverage stopping here\n"
+        "          rather than as mostly sky. Read the number knowing what it is:\n"
+        "          roughly the margin times the area of surface not seen from both\n"
+        "          sides, so doubling the margin roughly doubles it.\n"
+        "  --interior\n"
+        "          (carve, with --domain wrap) The survey was conducted entirely\n"
+        "          inside a building, so the space outside the walls is not the\n"
+        "          question. Without it the margin applies on both sides of every\n"
+        "          surface, which is what an outward-looking survey wants: the shadow\n"
+        "          behind a wall is part of the answer. With it, a shell of unobserved\n"
+        "          voxels is not wrapped round the outside of the building, hiding\n"
+        "          everything within it.\n"
+        "  --wrap-cell <m>\n"
+        "          (carve, with --domain wrap) Cell size of the occupancy grid.\n"
+        "          Default 0, a quarter of the margin: fine enough that the dilation\n"
+        "          comes out round rather than octagonal, coarse enough not to resolve\n"
+        "          detail the margin is about to swallow.\n"
         "  --image-budget <GB>\n"
         "          (carve) Memory the range images may occupy, all scans at once.\n"
         "          Default 48, for a 64 GB machine: a 2500 x 5280 raster is 44 MB\n"
@@ -475,7 +515,22 @@ int main(int argc, char** argv) {
             const std::string v = argv[++i];
             if      (v == "extent")  co.domain = vis::DomainMode::MeasuredExtent;
             else if (v == "spheres") co.domain = vis::DomainMode::RangeSpheres;
-            else { std::printf("--domain must be 'extent' or 'spheres'\n"); return 2; }
+            else if (v == "wrap")    co.domain = vis::DomainMode::Shrinkwrap;
+            else {
+                std::printf("--domain must be 'wrap', 'extent' or 'spheres'\n");
+                return 2;
+            }
+            continue;
+        }
+        // The one switch that separates the two kinds of survey. See
+        // vis::Options::wrapInteriorOnly.
+        if (std::strcmp(argv[i], "--interior") == 0) {
+            co.wrapInteriorOnly = true;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--wrap-cell") == 0 && i + 1 < argc) {
+            co.wrapCell = std::strtod(argv[++i], nullptr);
+            if (co.wrapCell < 0.0) { std::printf("--wrap-cell must not be negative\n"); return 2; }
             continue;
         }
         if (std::strcmp(argv[i], "--domain-margin") == 0 && i + 1 < argc) {

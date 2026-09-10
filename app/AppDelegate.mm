@@ -1075,7 +1075,7 @@ const char *kindLabel(check::Kind k) {
     }
 
     // --- parameters -------------------------------------------------------
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 212)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 236)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -1092,13 +1092,29 @@ const char *kindLabel(check::Kind k) {
         [fields addObject:f];
     }
 
-    NSButton *extent = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
-    extent.title = @"Limit to the surveyed extent (recommended for interiors)";
-    [extent setButtonType:NSButtonTypeSwitch];
-    extent.font = [NSFont systemFontOfSize:11];
-    extent.state = (_visOptions.domain == vis::DomainMode::MeasuredExtent)
-                 ? NSControlStateValueOn : NSControlStateValueOff;
-    [acc addSubview:extent];
+    // What region the question covers — the setting that changes the answer more
+    // than any other, so it is a choice rather than a tick box.
+    [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 100, 60, 20)]];
+    NSPopUpButton *region =
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 97, 396, 24) pullsDown:NO];
+    [region addItemsWithTitles:@[@"Shrinkwrap of the returns (tightest)",
+                                 @"Box around the surveyed extent",
+                                 @"Everything in range of a setup"]];
+    const vis::DomainMode regionOrder[3] = {vis::DomainMode::Shrinkwrap,
+                                            vis::DomainMode::MeasuredExtent,
+                                            vis::DomainMode::RangeSpheres};
+    for (int i = 0; i < 3; ++i)
+        if (regionOrder[i] == _visOptions.domain) [region selectItemAtIndex:i];
+    [acc addSubview:region];
+
+    NSButton *interior = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
+    interior.title = @"Scanned entirely indoors — leave the space outside the walls out "
+                     @"of the question";
+    [interior setButtonType:NSButtonTypeSwitch];
+    interior.font = [NSFont systemFontOfSize:11];
+    interior.state = _visOptions.wrapInteriorOnly ? NSControlStateValueOn
+                                                  : NSControlStateValueOff;
+    [acc addSubview:interior];
 
     NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 400, 20)];
     firstHit.title = @"Stop at the first evidence (faster; visible and occupied become "
@@ -1151,8 +1167,14 @@ const char *kindLabel(check::Kind k) {
     opt.maxRange     = range;
     opt.tileVoxels   = uint32_t(tile);
     opt.domainMargin = margin;
-    opt.domain       = (extent.state == NSControlStateValueOn)
-                     ? vis::DomainMode::MeasuredExtent : vis::DomainMode::RangeSpheres;
+    {
+        const vis::DomainMode order[3] = {vis::DomainMode::Shrinkwrap,
+                                          vis::DomainMode::MeasuredExtent,
+                                          vis::DomainMode::RangeSpheres};
+        const NSInteger i = region.indexOfSelectedItem;
+        opt.domain = (i >= 0 && i < 3) ? order[i] : vis::DomainMode::Shrinkwrap;
+    }
+    opt.wrapInteriorOnly = (interior.state == NSControlStateValueOn);
     opt.solid        = (solid.state == NSControlStateValueOn);
     opt.earlyOut     = (firstHit.state == NSControlStateValueOn)
                      ? carve::EarlyOut::AnyEvidence : carve::EarlyOut::Saturated;
@@ -1257,6 +1279,13 @@ const char *kindLabel(check::Kind k) {
         // coarse cells clear less space — so the unobserved volume on this line is
         // overstated by however much. That is a different answer, not a blurrier
         // one, and it has to be on the line the number is on.
+        if (result->domain.kind == carve::Domain::Kind::Wrap && result->wrapGrid.interiorOnly &&
+            !result->wrapGrid.sealLeaked)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   interior only: %llu wrap cells outside the shell dropped",
+                    (unsigned long long)result->wrapGrid.droppedOutside];
+        if (!result->wrapNote.empty())
+            warn = [warn stringByAppendingFormat:@"   ·   ⚠︎ %s", result->wrapNote.c_str()];
         if (result->setupsBinned)
             warn = [warn stringByAppendingFormat:
                     @"   ·   ⚠︎ %llu raster(s) COARSENED up to %ux to fit memory — "
