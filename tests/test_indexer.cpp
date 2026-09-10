@@ -353,6 +353,54 @@ static void testChunksBuildInParallelAndTheStoreIsIdentical() {
     }
 }
 
+// The build says it has run out of disk before it runs out of disk.
+//
+// A store is 20 bytes per point and every point is also spilled to a chunk file on
+// the way in, so a thousand five-million-point scans want about 150 GB of scratch
+// and store. Discovering that as "short write on node payload" an hour into an
+// import is the worst way to find out, and it was how this presented.
+//
+// Checked by asking for a store far larger than any disk: the estimate is derived
+// from the corpus's own declared point count, so an absurd count makes the
+// preflight fire without needing an absurd corpus.
+static void testTheBuildRefusesWhenTheDiskIsTooSmall() {
+    std::printf("indexer: not enough disk is said up front\n");
+
+    const std::vector<std::string> paths = writeCorpus("disk", 2, 2000, 20.0, 0.0, 0.0);
+    CHECK(paths.size() == 2, "corpus written");
+    indexer::SurveyOptions so;
+    so.classify = true;
+    indexer::Survey s = indexer::survey(paths, so, nullptr);
+    CHECK(s.usableCount() == 2, "usable");
+
+    // A real build of this corpus fits, and must not be refused.
+    {
+        const std::string sp = tmpDir() + "/e57cov_disk_ok.lod";
+        std::remove(sp.c_str());
+        indexer::BuildStats st;
+        std::string err;
+        CHECK(indexer::build(s, sp, indexer::BuildOptions{}, st, nullptr, err),
+              err.empty() ? "a corpus that fits builds" : err.c_str());
+        std::remove(sp.c_str());
+    }
+
+    // Now claim each scan holds an impossible number of points. Nothing is
+    // written: the refusal happens before the spiller opens a single file.
+    for (indexer::ScanRef& ref : s.scans) ref.recordCount = 400000000000ull;
+    {
+        const std::string sp = tmpDir() + "/e57cov_disk_full.lod";
+        std::remove(sp.c_str());
+        indexer::BuildStats st;
+        std::string err;
+        CHECK(!indexer::build(s, sp, indexer::BuildOptions{}, st, nullptr, err),
+              "a corpus that cannot fit is refused");
+        CHECK(err.find("disk") != std::string::npos, "and the reason names the disk");
+        CHECK(err.find("GB") != std::string::npos, "with the figures, in units anyone reads");
+        std::printf("      (%s)\n", err.c_str());
+        std::remove(sp.c_str());
+    }
+}
+
 // The extent pass reads every point, so no point is silently dropped.
 //
 // build() has to choose an octree root before it can insert anything, and when no
@@ -987,6 +1035,7 @@ int main() {
     testCellIndex();
     testSurveyIsHeaderOnly();
     testSurveyDoesNotDependOnThreadCount();
+    testTheBuildRefusesWhenTheDiskIsTooSmall();
     testTheExtentPassMissesNothing();
     testChunksBuildInParallelAndTheStoreIsIdentical();
     testTheHeuristicLabelsAndNothingMore();

@@ -1,5 +1,8 @@
 #include "point_store.h"
 
+#include <cerrno>
+#include <cstring>
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
@@ -75,7 +78,17 @@ bool Writer::appendTree(const lod::Tree& tree,
         if (!payloads[i].empty()) {
             const size_t bytes = payloads[i].size() * sizeof(lod::StorePoint);
             if (std::fwrite(payloads[i].data(), 1, bytes, fp_) != bytes) {
-                err = "short write on node payload"; return false;
+                // Say WHY. A short write here is almost always the disk filling
+                // up, and "short write on node payload" sends the reader looking
+                // for a bug in the writer. A store is one StorePoint per point at
+                // 20 bytes, so a large corpus is tens of gigabytes and the number
+                // written so far is the useful part of the message.
+                const int e = errno;
+                err = "short write on node payload after " +
+                      std::to_string(cursor_ / (1024 * 1024)) + " MB: " +
+                      (e ? std::strerror(e) : "no space, or the file is on a full or "
+                                              "read-only volume");
+                return false;
             }
             cursor_ += bytes;
         }

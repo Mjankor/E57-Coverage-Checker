@@ -4,6 +4,7 @@
 #include <sstream>
 #include <limits>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -834,6 +835,35 @@ bool build(const Survey& s, const std::string& storePath, const BuildOptions& op
     if (stats.chunkLevel < 1) stats.chunkLevel = 1;
 
     const std::string chunkDir = opt.chunkDir.empty() ? directoryOf(storePath) : opt.chunkDir;
+
+    // What this is about to need, checked before an hour of work discovers it.
+    //
+    // A store is one StorePoint per point, 20 bytes, and every point is spilled to
+    // a chunk file on the way in. Chunk files are deleted as they are consumed, so
+    // the two do not both peak in full — but they overlap, and the honest estimate
+    // is the store plus the largest slice of spill still unconsumed. Assume half.
+    // A thousand scans of five million points is 100 GB of store, which is not a
+    // number anyone guesses.
+    {
+        const uint64_t storeBytes = s.totalPoints() * sizeof(lod::StorePoint);
+        const uint64_t needBytes  = storeBytes + storeBytes / 2;
+        struct statvfs vfs {};
+        if (::statvfs(chunkDir.c_str(), &vfs) == 0) {
+            const uint64_t freeBytes = uint64_t(vfs.f_bavail) * uint64_t(vfs.f_frsize);
+            if (freeBytes < needBytes) {
+                char buf[320];
+                std::snprintf(buf, sizeof(buf),
+                    "not enough disk for the index: about %.1f GB needed in %s, %.1f GB free. "
+                    "The store is %zu bytes per point and every point is also spilled to a "
+                    "chunk file on the way in.",
+                    double(needBytes) / 1073741824.0, chunkDir.c_str(),
+                    double(freeBytes) / 1073741824.0, sizeof(lod::StorePoint));
+                err = buf;
+                return false;
+            }
+        }
+    }
+
     Spiller spiller(chunkDir, 32768);
 
     store::Writer writer;
@@ -995,6 +1025,15 @@ bool build(const Survey& s, const std::string& storePath, const BuildOptions& op
             // the rest of it is appended.
             b.payload.clear();
             b.payload.shrink_to_fit();
+            // And its spill file goes now rather than at the end of the build.
+            //
+            // The spill files hold every point once and the store holds them
+            // again, so keeping all of both alive means peak disk is TWICE the
+            // corpus — on a thousand scans that is a couple of hundred gigabytes
+            // of scratch, and running out of it surfaces as a short write halfway
+            // through writing the store. A consumed chunk is dead weight: its
+            // points are in the store and nothing reads it again.
+            std::remove(spiller.path(cells[base + k]).c_str());
             if (progress && !progress("building chunks", base + k + 1, cells.size())) {
                 err = "cancelled"; return false;
             }
