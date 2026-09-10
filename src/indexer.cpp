@@ -743,8 +743,27 @@ bool build(const Survey& s, const std::string& storePath, const BuildOptions& op
 
     // Declared extents are often absent — the survey says so rather than
     // guessing — and setup positions alone bound nothing: every point of every
-    // scan lies outside them. So sample the actual points before choosing a
-    // root. Strided, so it costs a fraction of the indexing pass.
+    // scan lies outside them. So read the actual points before choosing a root.
+    //
+    // EVERY point, no stride. That is a correction, and the stride it replaces
+    // was free to remove because it never saved any work: readPoints decodes a
+    // whole bytestream regardless, so a stride only skipped the min/max
+    // comparisons, not the decode. It bought six floating-point comparisons a
+    // point and cost correctness.
+    //
+    // What it cost: a stride aliases against any periodic structure in point
+    // order. On a fixture of three concentric shells written interleaved per
+    // direction, the stride came out a multiple of three and sampled the
+    // INNERMOST SHELL ONLY — the root was sized to a third of the cloud and 31
+    // per cent of the points fell outside it. A point outside the root is simply
+    // absent from the store, which then reads as missing coverage: the failure is
+    // silent and points the wrong way. Real scans are stored row-major, so a
+    // stride sharing a factor with the column count samples a few columns of a
+    // raster and misses whatever is only visible elsewhere in it.
+    //
+    // An exact extent also means the root is the right size, so nothing is
+    // dropped and the generous padding below is belt and braces rather than the
+    // thing standing between the corpus and a quiet 31 per cent loss.
     double lo[3] = {s.lo[0], s.lo[1], s.lo[2]};
     double hi[3] = {s.hi[0], s.hi[1], s.hi[2]};
     if (!s.extentComplete) {
@@ -757,8 +776,7 @@ bool build(const Survey& s, const std::string& storePath, const BuildOptions& op
             if (!r.open(usable[i]->path, ferr)) continue;
             const double zero[3] = {0, 0, 0};
             uint64_t got = 0;
-            const uint64_t cap = 20000;
-            streamScan(r, usable[i]->scanIndex, 0, zero, cap, i,
+            streamScan(r, usable[i]->scanIndex, 0, zero, 0, i,
                        [&](const lod::StorePoint& p) {
                            lo[0] = std::min(lo[0], double(p.x)); hi[0] = std::max(hi[0], double(p.x));
                            lo[1] = std::min(lo[1], double(p.y)); hi[1] = std::max(hi[1], double(p.y));

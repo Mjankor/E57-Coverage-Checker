@@ -259,6 +259,89 @@ static void testSurveyDoesNotDependOnThreadCount() {
     CHECK(s.scans.size() == 12, "an absurd thread count still reads the corpus");
 }
 
+// The extent pass reads every point, so no point is silently dropped.
+//
+// build() has to choose an octree root before it can insert anything, and when no
+// file declares cartesianBounds it reads the points to find one. That read used a
+// fixed stride, which aliases: this fixture writes three concentric shells
+// interleaved per direction, so a stride that is a multiple of three samples one
+// shell and the root comes out sized to a third of the cloud. Points outside the
+// root are absent from the store and read downstream as missing coverage — a
+// silent loss pointing the wrong way. Measured before the fix: 82,869 of 120,000
+// stored, 37,131 outside the root.
+//
+// The stride was free to remove. readPoints decodes a whole bytestream whatever
+// the consumer does with it, so the stride skipped six comparisons a point and
+// saved no decoding at all.
+static void testTheExtentPassMissesNothing() {
+    std::printf("indexer: the extent pass reads every point\n");
+
+    const std::string path = tmpDir() + "/e57cov_aliasing_shells.e57";
+    {
+        fixture::Scan sc;
+        sc.name = "Interleaved shells";
+        sc.fields = {
+            {"cartesianX", e57::FieldType::FloatDouble},
+            {"cartesianY", e57::FieldType::FloatDouble},
+            {"cartesianZ", e57::FieldType::FloatDouble},
+        };
+        sc.data.assign(3, {});
+        // Deliberately the pathological order: shell 0, 1, 2 for each direction in
+        // turn, so consecutive points differ in depth with period three.
+        Lcg rng;
+        for (int i = 0; i < 40000; ++i) {
+            const double u = 2.0 * rng.next() - 1.0;
+            const double th = 2.0 * 3.14159265358979 * rng.next();
+            const double sr = std::sqrt(std::max(0.0, 1.0 - u * u));
+            const double dx = sr * std::cos(th), dy = sr * std::sin(th), dz = u;
+            for (int k = 0; k < 3; ++k) {
+                const double r = 5.0 + 1.5 * dx * dy + 8.0 * double(k);
+                sc.data[0].push_back(r * dx);
+                sc.data[1].push_back(r * dy);
+                sc.data[2].push_back(r * dz);
+            }
+        }
+        CHECK(fixture::write(path, {sc}, 2048), "fixture written");
+    }
+
+    indexer::SurveyOptions so;
+    so.classify = true;
+    const indexer::Survey s = indexer::survey({path}, so, nullptr);
+    CHECK(s.scans.size() == 1 && s.usableCount() == 1, "surveyed and usable");
+    CHECK(!s.extentComplete, "no declared bounds, so the extent must be read");
+    if (s.scans.empty()) return;
+
+    const std::string storePath = tmpDir() + "/e57cov_aliasing_shells.lod";
+    std::remove(storePath.c_str());
+    indexer::BuildOptions bo;
+    indexer::BuildStats st;
+    std::string err;
+    CHECK(indexer::build(s, storePath, bo, st, nullptr, err),
+          err.empty() ? "the store builds" : err.c_str());
+
+    CHECK(st.pointsRead == 120000, "every point was read");
+    CHECK(st.outsideRoot == 0, "and none fell outside the root");
+    CHECK(st.pointsStored == st.pointsRead, "so every point is in the store");
+
+    store::Reader rd;
+    CHECK(rd.open(storePath, err), err.empty() ? "store opens" : err.c_str());
+    CHECK(rd.header().totalPoints == 120000, "the store holds the whole cloud");
+
+    // The root has to contain the OUTER shell, which is what a strided sample
+    // missed. Radius runs to about 21 m, so a root sized to the inner shell would
+    // be a third of this.
+    const lod::Tree t = rd.tree();
+    CHECK(!t.nodes.empty(), "the tree has a root");
+    if (!t.nodes.empty()) {
+        const lod::Aabb& root = t.nodes[0].bounds;
+        const float half = 0.5f * std::max(root.hi[0] - root.lo[0], root.hi[2] - root.lo[2]);
+        CHECK(half > 20.0f, "the root spans the outer shell, not just the inner one");
+    }
+
+    std::remove(storePath.c_str());
+    std::remove(path.c_str());
+}
+
 // A cloud the range-spread heuristic dislikes is still indexed and still drawn.
 //
 // This is the regression guard for a defect that emptied the store. `usable` used
@@ -745,6 +828,7 @@ int main() {
     testCellIndex();
     testSurveyIsHeaderOnly();
     testSurveyDoesNotDependOnThreadCount();
+    testTheExtentPassMissesNothing();
     testTheHeuristicLabelsAndNothingMore();
     testTheCheckCacheIsIndistinguishableFromChecking();
     testBuildRoundTrip();
