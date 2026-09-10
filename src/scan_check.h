@@ -24,6 +24,7 @@
 #pragma once
 
 #include "e57.h"
+#include "frame.h"
 
 #include <string>
 #include <vector>
@@ -79,8 +80,28 @@ Result classifyMetadata(const e57::Scan& s);
 
 // Full check: metadata plus the geometric range-image test, which decodes a
 // sample of the scan's points. `reader` must be open on the file `s` came from.
+//
+// Makes its own decode pass, and is the reference. A caller that already holds a
+// sample — because it is also deciding the frame from one — should use
+// classifyFromSample instead and save the pass.
 Result classify(e57::Reader& reader, size_t scanIndex,
                 const Thresholds& t = Thresholds{});
+
+// The same verdict from a sample already in hand: see e57::Reader::sampleXYZ,
+// which is what must have produced it.
+//
+// `frame` is needed because the test bins directions from where the instrument
+// actually is, and which of the two frames the points are in decides where that
+// is. Passing it in rather than deciding it here is the point of the split — the
+// frame decision wants the same sample, so whoever holds the sample decides the
+// frame first and hands both on.
+//
+// A sample from somewhere other than sampleXYZ will still produce a verdict, and
+// it will be a verdict about whatever that sample was: a prefix of a merged
+// cloud reads as single-origin. The sample has to span the scan.
+Result classifyFromSample(const e57::Scan& s, const std::vector<double>& xyz,
+                          const viewer::FrameDecision& frame,
+                          const Thresholds& t = Thresholds{});
 
 const char* kindName(Kind k);
 

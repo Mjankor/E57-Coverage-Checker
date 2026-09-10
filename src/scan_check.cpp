@@ -82,11 +82,31 @@ Result classifyMetadata(const e57::Scan& s) {
 
 Result classify(e57::Reader& reader, size_t scanIndex, const Thresholds& t) {
     const e57::Scan& s = reader.scan(scanIndex);
-    Result r = classifyMetadata(s);
 
     // The geometric test needs cartesian points. Spherical scans are already
     // proven single-origin by their own storage format, so there is nothing
     // left to test.
+    const bool cartesian = hasField(s, "cartesianX") && hasField(s, "cartesianY") &&
+                           hasField(s, "cartesianZ");
+    if (!cartesian || s.recordCount == 0) return classifyMetadata(s);
+
+    // One pass, serving both the frame decision and the test below it. This used
+    // to be three: decideFrame made one, and the binning made another, and the
+    // caller in indexer::survey had already made a third.
+    std::vector<double> xyz;
+    std::string err;
+    if (!reader.sampleXYZ(scanIndex, t.sampleTarget, xyz, err)) {
+        Result r = classifyMetadata(s);
+        r.evidence.push_back("geometric test skipped: " + err);
+        return r;
+    }
+    return classifyFromSample(s, xyz, viewer::decideFrameFromSample(s, xyz), t);
+}
+
+Result classifyFromSample(const e57::Scan& s, const std::vector<double>& xyz,
+                          const viewer::FrameDecision& frame, const Thresholds& t) {
+    Result r = classifyMetadata(s);
+
     const bool cartesian = hasField(s, "cartesianX") && hasField(s, "cartesianY") &&
                            hasField(s, "cartesianZ");
     if (!cartesian || s.recordCount == 0) return r;
@@ -97,13 +117,6 @@ Result classify(e57::Reader& reader, size_t scanIndex, const Thresholds& t) {
     // tested about the pose translation instead, scattering the direction bins
     // and reporting a perfectly good single setup as merged. The frame
     // decision answers the same question properly.
-    std::vector<std::string> want = {"cartesianX", "cartesianY", "cartesianZ"};
-    const char* invName = hasField(s, "cartesianInvalidState") ? "cartesianInvalidState"
-                                                              : nullptr;
-    if (invName) want.push_back(invName);
-    const size_t invIdx = 3;
-
-    const viewer::FrameDecision frame = viewer::decideFrame(reader, scanIndex);
     double ox = 0, oy = 0, oz = 0;
     if (!frame.applyPose() && s.hasPose) {
         // Points are already in the file frame, so the scanner is at the pose
@@ -112,20 +125,7 @@ Result classify(e57::Reader& reader, size_t scanIndex, const Thresholds& t) {
     }
     r.evidence.push_back(frame.reason);
 
-    const uint64_t stride = std::max<uint64_t>(
-        1, s.recordCount / std::max<size_t>(1, t.sampleTarget));
-    uint64_t seen = 0;
-    std::string err;
-    auto sample = [&](const e57::PointBlock& b, auto&& fn) {
-        for (size_t k = 0; k < b.count; ++k, ++seen) {
-            if (seen % stride) continue;
-            if (invName && b.columns[invIdx][k] != 0.0) continue;
-            fn(b.columns[0][k], b.columns[1][k], b.columns[2][k]);
-        }
-        return true;
-    };
-
-    // Pass 2: bin by direction, track min and max range per bin.
+    // Bin by direction, track min and max range per bin.
     struct Bin { float lo = 1e30f, hi = -1e30f; int n = 0; };
     std::unordered_map<uint32_t, Bin> bins;
     bins.reserve(t.sampleTarget / 8);
@@ -133,29 +133,24 @@ Result classify(e57::Reader& reader, size_t scanIndex, const Thresholds& t) {
     const double binRad  = t.binDegrees * 3.14159265358979 / 180.0;
     const int    nAz     = std::max(1, int(std::round(2.0 * 3.14159265358979 / binRad)));
     const int    nEl     = std::max(1, int(std::round(3.14159265358979 / binRad)));
-    seen = 0;
     uint64_t used = 0;
 
-    if (!reader.readPoints(scanIndex, want, [&](const e57::PointBlock& b) {
-            return sample(b, [&](double x, double y, double z) {
-                const double dx = x - ox, dy = y - oy, dz = z - oz;
-                const double rr = std::sqrt(dx * dx + dy * dy + dz * dz);
-                if (rr < 1e-6) return;
-                const double az = std::atan2(dy, dx) + 3.14159265358979;   // 0..2pi
-                const double el = std::acos(std::clamp(dz / rr, -1.0, 1.0)); // 0..pi
-                int ia = std::min(nAz - 1, int(az / binRad));
-                int ie = std::min(nEl - 1, int(el / binRad));
-                if (ia < 0) ia = 0;
-                if (ie < 0) ie = 0;
-                Bin& bin = bins[uint32_t(ie) * uint32_t(nAz) + uint32_t(ia)];
-                bin.lo = std::min(bin.lo, float(rr));
-                bin.hi = std::max(bin.hi, float(rr));
-                ++bin.n;
-                ++used;
-            });
-        }, err)) {
-        r.evidence.push_back("geometric test skipped: decode failed on second pass");
-        return r;
+    const size_t n = xyz.size() / 3;
+    for (size_t i = 0; i < n; ++i) {
+        const double dx = xyz[3 * i] - ox, dy = xyz[3 * i + 1] - oy, dz = xyz[3 * i + 2] - oz;
+        const double rr = std::sqrt(dx * dx + dy * dy + dz * dz);
+        if (rr < 1e-6) continue;
+        const double az = std::atan2(dy, dx) + 3.14159265358979;     // 0..2pi
+        const double el = std::acos(std::clamp(dz / rr, -1.0, 1.0)); // 0..pi
+        int ia = std::min(nAz - 1, int(az / binRad));
+        int ie = std::min(nEl - 1, int(el / binRad));
+        if (ia < 0) ia = 0;
+        if (ie < 0) ie = 0;
+        Bin& bin = bins[uint32_t(ie) * uint32_t(nAz) + uint32_t(ia)];
+        bin.lo = std::min(bin.lo, float(rr));
+        bin.hi = std::max(bin.hi, float(rr));
+        ++bin.n;
+        ++used;
     }
 
     size_t tested = 0, multi = 0;

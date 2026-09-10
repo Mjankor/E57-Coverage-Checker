@@ -248,6 +248,33 @@ public:
                     const std::function<bool(const PointBlock&)>& sink,
                     std::string& err);
 
+    // About `target` valid cartesian points, evenly strided through the scan,
+    // interleaved xyz. Invalid returns and non-finite coordinates are dropped,
+    // so the result comes back shorter than `target` by however many there were.
+    //
+    // This exists because a decode pass is expensive and two separate decisions
+    // want the same sample. Locating the instrument (viewer::decideFrame) and
+    // the merged-cloud test (check::classify) each used to make their own pass,
+    // and classify called decideFrame internally, so a scan was decoded THREE
+    // times to answer two questions about one sample.
+    //
+    // Note what the stride cannot be: a prefix. Stopping after the first
+    // `target` points would read a fraction of the file, and it is tempting —
+    // the first tenth of a 5.65 M point scan decodes in 0.004 s against 0.046 s
+    // for all of it. It is also exactly the wrong sample for the question being
+    // asked. A merged cloud is two or more setups concatenated, and the first
+    // tenth of one is all from the first setup: single-origin, clean, and
+    // passed. The test whose whole purpose is catching merged clouds would stop
+    // catching them. So the sample spans the file, and the price of spanning it
+    // is a full decode.
+    //
+    // False only when the scan has no cartesian fields or the decode failed;
+    // `err` says which. A scan with nothing valid in it succeeds with an empty
+    // sample, because that is a fact about the scan rather than a failure to
+    // read it.
+    bool sampleXYZ(size_t scanIndex, size_t target, std::vector<double>& xyz,
+                   std::string& err);
+
 private:
     PagedFile         file_;
     XmlNode           root_;

@@ -257,6 +257,137 @@ static void testClassifyGeometry() {
     }
 }
 
+// One decode pass gives the same answers as three did.
+//
+// "Checking scans" asks two questions of one sample — which frame the points are
+// in, and whether the cloud is one setup or several — and used to decode the scan
+// three times to do it: once for the frame, once inside classify for the frame
+// again, and once for the binning. The sample is taken once now and handed to
+// both, which is only worth doing if the answers are identical.
+//
+// The property the arrangement rests on is that the sample SPANS the scan, so
+// that is what is checked, not just that it has the right number of points. A
+// prefix would be far cheaper to read and would quietly destroy the merged-cloud
+// test: a prefix of a merged cloud is one of its setups, which reads as clean.
+static void testOneSampleServesBothDecisions() {
+    std::printf("one decode pass, same verdicts\n");
+
+    {
+        const std::string p = tmpPath("onepass_single");
+        CHECK(fixture::write(p, {makeShellScan("single", 1, 60000)}, 1024), "fixture written");
+        e57::Reader r;
+        std::string err;
+        CHECK(r.open(p, err), err.empty() ? "opened" : err.c_str());
+
+        std::vector<double> xyz;
+        CHECK(r.sampleXYZ(0, 6000, xyz, err), err.empty() ? "sampled" : err.c_str());
+        const size_t got = xyz.size() / 3;
+        CHECK(got > 3000 && got <= 6100, "about as many points as were asked for");
+
+        // Spanning rather than a prefix, measured as the sample's own extent
+        // against the whole scan's, read separately for the comparison.
+        double slo[3] = {1e30, 1e30, 1e30}, shi[3] = {-1e30, -1e30, -1e30};
+        for (size_t i = 0; i < got; ++i)
+            for (int k = 0; k < 3; ++k) {
+                slo[k] = std::min(slo[k], xyz[3 * i + k]);
+                shi[k] = std::max(shi[k], xyz[3 * i + k]);
+            }
+        double flo[3] = {1e30, 1e30, 1e30}, fhi[3] = {-1e30, -1e30, -1e30};
+        std::vector<std::string> want = {"cartesianX", "cartesianY", "cartesianZ"};
+        CHECK(r.readPoints(0, want, [&](const e57::PointBlock& b) {
+                  for (size_t k = 0; k < b.count; ++k)
+                      for (int c = 0; c < 3; ++c) {
+                          flo[c] = std::min(flo[c], b.columns[c][k]);
+                          fhi[c] = std::max(fhi[c], b.columns[c][k]);
+                      }
+                  return true;
+              }, err), "whole scan read for comparison");
+        bool spans = true;
+        for (int k = 0; k < 3; ++k) {
+            const double full = fhi[k] - flo[k];
+            if (full < 1e-9) continue;
+            if ((shi[k] - slo[k]) < 0.9 * full) spans = false;
+        }
+        CHECK(spans, "the sample covers the scan's extent, so it is not a prefix");
+
+        // And the two decisions off one sample match the reference — at the
+        // sample size the test is specified for, which is not the small one
+        // above. A 6,000 point sample populates a few dozen direction bins
+        // against the 200 the verdict needs, so it answers "inconclusive" and
+        // says nothing about whether sharing the pass works. That is not a flaw
+        // in the sharing; it is why the shared sample is the LARGER of the two
+        // targets the two deciders used to ask for separately.
+        std::vector<double> full;
+        CHECK(r.sampleXYZ(0, check::Thresholds{}.sampleTarget, full, err), "full sample");
+        const viewer::FrameDecision fd = viewer::decideFrameFromSample(r.scan(0), full);
+        const check::Result shared = check::classifyFromSample(r.scan(0), full, fd);
+        const check::Result whole  = check::classify(r, 0);
+        CHECK(shared.kind == whole.kind, "same verdict from a sample as from the reference");
+        CHECK(shared.kind == check::Kind::Structured, "and it is the right one");
+
+        // And the small sample's verdict is "inconclusive" rather than wrong,
+        // which is the behaviour that makes the size requirement visible instead
+        // of silently degrading.
+        const check::Result thin =
+            check::classifyFromSample(r.scan(0), xyz,
+                                      viewer::decideFrameFromSample(r.scan(0), xyz));
+        CHECK(thin.binsTested < 200, "a thin sample cannot populate enough bins");
+        CHECK(thin.multiSurfaceFraction < 0.0, "so it reports no fraction at all");
+    }
+
+    // The merged cloud is still caught — the check that guards against reading
+    // less of the file.
+    {
+        const std::string p = tmpPath("onepass_merged");
+        CHECK(fixture::write(p, {makeShellScan("merged", 3, 60000)}, 1024), "fixture written");
+        e57::Reader r;
+        std::string err;
+        CHECK(r.open(p, err), err.empty() ? "opened" : err.c_str());
+
+        std::vector<double> xyz;
+        CHECK(r.sampleXYZ(0, check::Thresholds{}.sampleTarget, xyz, err), "sampled");
+        const viewer::FrameDecision fd = viewer::decideFrameFromSample(r.scan(0), xyz);
+        const check::Result shared = check::classifyFromSample(r.scan(0), xyz, fd);
+        CHECK(shared.kind == check::Kind::Unified, "a merged cloud is still rejected");
+        CHECK(shared.kind == check::classify(r, 0).kind, "agreeing with the reference");
+    }
+
+    // The frame decision does not move when it is made from the larger sample.
+    // It used to be taken from 20,000 points and is now taken from the 200,000
+    // the merged-cloud test needs; more points sharpen a median and a
+    // least-squares fit rather than changing what they say, and this is the
+    // statement of that. Measured across 78 scans of real and synthetic files,
+    // none of them changed convention.
+    {
+        const std::string p = tmpPath("onepass_frame");
+        CHECK(fixture::write(p, {makeShellScan("single", 1, 60000)}, 1024), "fixture written");
+        e57::Reader r;
+        std::string err;
+        CHECK(r.open(p, err), "opened");
+        std::vector<double> small, big;
+        CHECK(r.sampleXYZ(0, 20000, small, err), "small sample");
+        CHECK(r.sampleXYZ(0, 200000, big, err), "large sample");
+        const viewer::FrameDecision ds = viewer::decideFrameFromSample(r.scan(0), small);
+        const viewer::FrameDecision db = viewer::decideFrameFromSample(r.scan(0), big);
+        CHECK(ds.convention == db.convention, "the same frame from either sample size");
+        CHECK(ds.applyPose() == db.applyPose(), "so the pose is applied the same way");
+    }
+
+    // A scan index that does not exist is refused with a reason, rather than
+    // returning an empty sample that would read as "nothing in it was valid".
+    {
+        const std::string p = tmpPath("onepass_bad");
+        e57::Reader r;
+        std::string err;
+        if (fixture::write(p, {makeShellScan("single", 1, 4000)}, 1024) && r.open(p, err)) {
+            std::vector<double> xyz;
+            CHECK(!r.sampleXYZ(99, 1000, xyz, err), "a bad scan index is refused");
+            CHECK(!err.empty(), "with a reason");
+            CHECK(xyz.empty(), "and no sample");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Cloud loading
 
@@ -663,6 +794,7 @@ int main() {
     testPivotPick();
     testClassifyMetadata();
     testClassifyGeometry();
+    testOneSampleServesBothDecisions();
     testDecimationAndPrecision();
     testPicker();
     testSceneOriginAlignment();

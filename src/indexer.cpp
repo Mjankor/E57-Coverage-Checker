@@ -320,8 +320,44 @@ Survey survey(const std::vector<std::string>& paths, const SurveyOptions& opt,
             ref.hasPose     = sc.hasPose;
             ref.recordCount = sc.recordCount;
 
-            const check::Result res = opt.classify ? check::classify(r, i)
-                                                   : check::classifyMetadata(sc);
+            // ONE decode pass for both decisions that need points.
+            //
+            // The frame decision and the merged-cloud test ask different
+            // questions of the same sample, and they used to take three passes
+            // between them — one here, one inside check::classify, and one more
+            // because classify called decideFrame itself. Measured on a 5.65 M
+            // point scan, that was 0.205 s a scan against 0.093 s for one pass,
+            // which over a thousand scans is three minutes against one.
+            //
+            // The sample is the finer of the two that were being taken
+            // (check::Thresholds::sampleTarget, 200k, against decideFrame's
+            // 20k). More points cannot hurt the frame decision: it is a median
+            // and a least-squares fit, so a larger sample of the same
+            // distribution gives the same answer more precisely.
+            check::Result res;
+            viewer::FrameDecision fd;
+            if (opt.classify) {
+                std::vector<double> xyz;
+                std::string serr;
+                const check::Thresholds th;
+                if (r.sampleXYZ(i, th.sampleTarget, xyz, serr)) {
+                    fd  = viewer::decideFrameFromSample(sc, xyz);
+                    res = check::classifyFromSample(sc, xyz, fd, th);
+                } else {
+                    // No cartesian points to sample — spherical storage, or a
+                    // decode that failed. Both are answered from metadata, and
+                    // spherical storage is scanner-centric by definition.
+                    res = check::classifyMetadata(sc);
+                    fd  = viewer::decideFrameFromSample(sc, {});
+                }
+            } else {
+                // A header-only survey must not decode points, so the frame
+                // decision here is the cheap one: trust the standard.
+                res = check::classifyMetadata(sc);
+                fd.convention = (sc.hasPose && !viewer::isIdentityPose(sc.pose))
+                              ? viewer::FrameConvention::ScannerLocal
+                              : viewer::FrameConvention::IdentityPose;
+            }
             ref.kind   = res.kind;
             ref.status = res.summary;
             // Only a positive merged-cloud finding excludes a scan. Ambiguity
@@ -331,15 +367,6 @@ Survey survey(const std::vector<std::string>& paths, const SurveyOptions& opt,
             for (int k = 0; k < 3; ++k) ref.setup[k] = sc.pose.t[k];
             expandBounds(out, ref.setup);
 
-            // A header-only survey must not decode points, so the frame
-            // decision here is the cheap one: trust the standard.
-            viewer::FrameDecision fd;
-            if (opt.classify) fd = viewer::decideFrame(r, i);
-            else {
-                fd.convention = (sc.hasPose && !viewer::isIdentityPose(sc.pose))
-                              ? viewer::FrameConvention::ScannerLocal
-                              : viewer::FrameConvention::IdentityPose;
-            }
             if (declaredExtentInFileFrame(sc, fd, ref.lo, ref.hi)) {
                 ref.hasExtent = true;
                 expandBounds(out, ref.lo);
