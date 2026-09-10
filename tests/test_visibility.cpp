@@ -1155,6 +1155,92 @@ static void testTheWrapSkinDescribesTheWrap() {
     CHECK(none.wrapSkin.empty() && none.wrapSkinCells == 0, "no wrap, no skin");
 }
 
+// The wrap skin is expressed against Result::origin, like everything else.
+//
+// This is a regression test for a shift the eye caught before any assertion did:
+// the skin drew a whole site origin away from the cloud, which looked like the
+// wrap being built from the wrong cells and was really a frame error.
+// buildWrapSkin writes each cell centre as `centre - r.origin`, and it was called
+// from vis::run one statement before r.origin was assigned — so it subtracted zero
+// and produced absolute world coordinates while the voxels were relative.
+//
+// The existing skin test missed it because its fixture sits near the world origin
+// AND that origin happened to be an exact multiple of the wrap cell, so the
+// absolute and relative frames both landed on the cell lattice. This one puts the
+// site at UTM magnitude with a fractional offset, where neither coincidence holds.
+static void testTheWrapSkinSharesTheVoxelsFrame() {
+    std::printf("the wrap skin is in the same frame as the voxels\n");
+
+    // The same room, moved by the pose alone: point data is unchanged and local,
+    // so only the coordinates the site lands on are different. The offset is
+    // deliberately not a multiple of the wrap cell.
+    const double offX = 500123.37, offY = 6200456.11;
+    const std::string path = tmpPath("wrapskin_utm");
+    {
+        std::vector<fixture::Scan> scans = {roomScan("west", -3.0, 2.0, 1.5),
+                                            roomScan("east",  3.0, 2.0, 1.5)};
+        for (fixture::Scan& sc : scans) { sc.t[0] += offX; sc.t[1] += offY; }
+        CHECK(fixture::write(path, scans, 512), "fixture written");
+    }
+
+    vis::Options opt;
+    opt.voxelSize  = 0.25;
+    opt.maxRange   = 8.0;
+    opt.tileVoxels = 32;
+    opt.domain     = vis::DomainMode::Shrinkwrap;
+    opt.wrapCell   = 0.25;
+
+    vis::Result r;
+    std::string err;
+    CHECK(vis::run({path}, opt, nullptr, r, err), err.empty() ? "ran" : err.c_str());
+    CHECK(!r.wrapGrid.empty(), "a wrap was built");
+    CHECK(!r.wrapSkin.empty(), "and a skin");
+    if (r.wrapSkin.empty() || r.wrapGrid.empty()) return;
+
+    CHECK(std::fabs(r.origin[0]) > 1000.0, "the site really is at a large origin");
+
+    // The decisive check, and the one the picture made: skin coordinates are
+    // RELATIVE. Absolute ones would be about half a million.
+    float far = 0;
+    for (const lod::StorePoint& p : r.wrapSkin)
+        far = std::max(far, std::max(std::fabs(p.x), std::max(std::fabs(p.y), std::fabs(p.z))));
+    CHECK(far < 1000.0f, "the skin is expressed against the origin, not in world coordinates");
+
+    // And it overlaps the voxels rather than sitting beside them. The wrap
+    // encloses the answer, so their boxes must intersect on every axis.
+    if (!r.voxels.empty()) {
+        float vlo[3] = {1e30f, 1e30f, 1e30f}, vhi[3] = {-1e30f, -1e30f, -1e30f};
+        float slo[3] = {1e30f, 1e30f, 1e30f}, shi[3] = {-1e30f, -1e30f, -1e30f};
+        auto span = [](const std::vector<lod::StorePoint>& v, float lo[3], float hi[3]) {
+            for (const lod::StorePoint& p : v) {
+                const float c[3] = {p.x, p.y, p.z};
+                for (int k = 0; k < 3; ++k) {
+                    lo[k] = std::min(lo[k], c[k]);
+                    hi[k] = std::max(hi[k], c[k]);
+                }
+            }
+        };
+        span(r.voxels, vlo, vhi);
+        span(r.wrapSkin, slo, shi);
+        bool overlaps = true;
+        for (int k = 0; k < 3; ++k) if (shi[k] < vlo[k] || slo[k] > vhi[k]) overlaps = false;
+        CHECK(overlaps, "the skin encloses the voxels rather than sitting beside them");
+    }
+
+    // Put back through the origin, every skin point is a wrap cell centre. With a
+    // fractional origin this only holds in the correct frame.
+    uint64_t offLattice = 0;
+    for (const lod::StorePoint& p : r.wrapSkin) {
+        const double w[3] = {double(p.x) + r.origin[0], double(p.y) + r.origin[1],
+                             double(p.z) + r.origin[2]};
+        for (int k = 0; k < 3; ++k) {
+            const double f = w[k] / r.wrapGrid.cell - 0.5;
+            if (std::fabs(f - std::round(f)) > 1e-2) { ++offLattice; break; }
+        }
+    }
+    CHECK(offLattice == 0, "and lands back on the wrap's own lattice");
+}
+
 int main() {
     testDefaultsAgreeWithTheLibrary();
     testVoxelHash();
@@ -1164,6 +1250,7 @@ int main() {
     testImageBudgetAndWhatCoarseningCosts();
     testShadingVariesWithShapeAndHeight();
     testTheWrapSkinDescribesTheWrap();
+    testTheWrapSkinSharesTheVoxelsFrame();
     testKnownSceneFromFiveSetups();
     testDatumSetupWithNoTranslation();
 

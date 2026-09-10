@@ -1068,13 +1068,17 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
 
     while (col.cap && col.out.size() > col.cap) col.halve();
 
-    // The wrap, as something to look at — see buildWrapSkin. Built last, so it
-    // is against the same origin the voxels ended up on.
-    buildWrapSkin(out, opt.displayCap);
-
     out.voxels = std::move(col.out);
     out.voxelFaces = std::move(col.faceOf);
     for (int k = 0; k < 3; ++k) out.origin[k] = origin[k];
+
+    // The wrap, as something to look at — see buildWrapSkin. AFTER out.origin is
+    // set, and that is the whole of it: buildWrapSkin writes each cell centre as
+    // `centre - out.origin`, so called any earlier it subtracts a zero and hands
+    // back absolute world coordinates while the voxels are relative. The two then
+    // draw a whole site origin apart, which looks exactly like the wrap being
+    // built from the wrong cells rather than like a frame error.
+    buildWrapSkin(out, opt.displayCap);
     out.qualified = col.qualified;
     out.keptFraction = col.qualified ? double(out.voxels.size()) / double(col.qualified) : 1.0;
 
