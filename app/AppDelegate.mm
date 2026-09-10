@@ -533,6 +533,15 @@ const char *kindLabel(check::Kind k) {
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"Cancel" action:@selector(cancelIndexing:) keyEquivalent:@"."];
     [fileMenu addItemWithTitle:@"Close All" action:@selector(closeAll:) keyEquivalent:@"w"];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+    // The way out of a cache that is wrong. An index is keyed by the corpus and
+    // reused on sight, so anything that leaves a store behind without finishing it
+    // — a cancelled import, a crash, a full disk — locks that corpus out: every
+    // later open finds the file, believes it, and never rebuilds.
+    [fileMenu addItemWithTitle:@"Reindex These Scans"
+                        action:@selector(reindexCurrent:) keyEquivalent:@"R"];
+    [fileMenu addItemWithTitle:@"Clear Cached Indexes…"
+                        action:@selector(clearCaches:) keyEquivalent:@""];
     fileItem.submenu = fileMenu;
     [bar addItem:fileItem];
 
@@ -881,6 +890,99 @@ const char *kindLabel(check::Kind k) {
     }];
 }
 
+// Throws away this corpus's cached index and builds it again.
+//
+// The targeted escape hatch, and the one to reach for first: a cancelled import
+// leaves a store that the corpus key then finds and trusts, so the scans that were
+// interrupted are the exact scans that can never be re-opened. This deletes that
+// one store and re-runs the open that would otherwise have been skipped.
+- (void)reindexCurrent:(id)sender {
+    (void)sender;
+    if (_busy) { _status.stringValue = @"Busy — cancel first."; return; }
+    if (_paths.empty()) { _status.stringValue = @"No scans open to reindex."; return; }
+
+    NSString *storePath = [self storePathForKey:corpusKey(_paths)];
+    NSError *rmErr = nil;
+    const BOOL existed = [NSFileManager.defaultManager fileExistsAtPath:storePath];
+    if (existed && ![NSFileManager.defaultManager removeItemAtPath:storePath error:&rmErr]) {
+        _status.stringValue = [NSString stringWithFormat:@"Could not remove the cached index: %@",
+                               rmErr.localizedDescription];
+        return;
+    }
+    // Chunk spill files live beside the store and are named after it. A cancelled
+    // build leaves them, and they are megabytes each.
+    [self removeSpillFilesBeside:storePath];
+
+    NSMutableArray<NSString *> *again = [NSMutableArray array];
+    for (const std::string &p : _paths) [again addObject:ns(p)];
+    _status.stringValue = existed ? @"Cached index discarded — rebuilding."
+                                  : @"No cached index for these scans — indexing.";
+    [self loadPaths:again];
+}
+
+// Everything cached, for every corpus. The blunt instrument, for when it is not
+// clear which index is the bad one.
+- (void)clearCaches:(id)sender {
+    (void)sender;
+    if (_busy) { _status.stringValue = @"Busy — cancel first."; return; }
+
+    NSString *dir = [self cacheDirectory];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSArray<NSString *> *names = [fm contentsOfDirectoryAtPath:dir error:nil];
+
+    uint64_t bytes = 0;
+    NSUInteger files = 0;
+    for (NSString *name in names) {
+        NSDictionary *at = [fm attributesOfItemAtPath:[dir stringByAppendingPathComponent:name]
+                                                error:nil];
+        if (at) { bytes += at.fileSize; ++files; }
+    }
+    if (files == 0) { _status.stringValue = @"Nothing cached."; return; }
+
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = @"Clear cached indexes?";
+    a.informativeText = [NSString stringWithFormat:
+        @"Deletes %lu cached file(s), %.1f MB, from\n%@\n\n"
+         "Nothing is lost that cannot be rebuilt from the E57 files — an index is a "
+         "cache of them. The next open of any corpus will rebuild it, which takes as "
+         "long as the first open did.\n\n"
+         "Do this when an import is refusing to re-run: a store left behind by a "
+         "cancelled or crashed build is found by the corpus key and trusted, and the "
+         "scans it covers cannot be opened again until it is gone.",
+        (unsigned long)files, double(bytes) / (1024.0 * 1024.0), dir];
+    [a addButtonWithTitle:@"Clear"];
+    [a addButtonWithTitle:@"Cancel"];
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+
+    NSUInteger removed = 0, failed = 0;
+    for (NSString *name in names) {
+        NSError *e = nil;
+        if ([fm removeItemAtPath:[dir stringByAppendingPathComponent:name] error:&e]) ++removed;
+        else ++failed;
+    }
+    // The survey's per-file verdicts go with it. They are keyed by path, size and
+    // mtime so they were never the stale thing, but "clear the cache" that leaves
+    // a cache behind is a worse answer than a slower next open.
+    _status.stringValue = failed
+        ? [NSString stringWithFormat:@"Cleared %lu cached file(s); %lu could not be removed.",
+           (unsigned long)removed, (unsigned long)failed]
+        : [NSString stringWithFormat:@"Cleared %lu cached file(s), %.1f MB. The next open "
+                                      "rebuilds.", (unsigned long)removed,
+           double(bytes) / (1024.0 * 1024.0)];
+}
+
+// Chunk spill files are named after the store they were built for and live beside
+// it. A finished build removes its own; a cancelled one cannot.
+- (void)removeSpillFilesBeside:(NSString *)storePath {
+    NSString *dir  = [storePath stringByDeletingLastPathComponent];
+    NSString *base = [storePath lastPathComponent];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    for (NSString *name in [fm contentsOfDirectoryAtPath:dir error:nil]) {
+        if (![name hasPrefix:base] || [name isEqualToString:base]) continue;
+        [fm removeItemAtPath:[dir stringByAppendingPathComponent:name] error:nil];
+    }
+}
+
 - (void)clearVoxels:(id)sender {
     (void)sender;
     [_cloudView clearVoxels];
@@ -894,6 +996,10 @@ const char *kindLabel(check::Kind k) {
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     if (item.action == @selector(toggleGpu:)) return [CarveGpu shared] != nil;
     if (item.action == @selector(toggleWrapMenu:)) return [_cloudView hasWrap];
+    // Both cache actions rewrite files an in-flight index is using, and reindexing
+    // needs something open to reindex.
+    if (item.action == @selector(reindexCurrent:)) return !_busy && !_paths.empty();
+    if (item.action == @selector(clearCaches:))    return !_busy;
     return YES;
 }
 
@@ -1115,8 +1221,25 @@ const char *kindLabel(check::Kind k) {
             if (!me) return;
             NSString *openErr = nil;
             if (![me->_cloudView openStore:storePath error:&openErr]) {
-                me->_status.stringValue =
-                    [NSString stringWithFormat:@"Could not open store: %@", openErr];
+                // A cached index that will not open is a dead end, and the corpus
+                // key will find it again on every future attempt — so the scans
+                // that failed once can never be opened again. Discard it and say
+                // what to do, rather than reporting the error and leaving the
+                // thing that caused it in place.
+                //
+                // Only when it came FROM the cache. A store this run just built
+                // and cannot open is a real fault worth seeing, and deleting the
+                // evidence would turn it into an infinite rebuild.
+                if (cached) {
+                    [NSFileManager.defaultManager removeItemAtPath:storePath error:nil];
+                    [me removeSpillFilesBeside:storePath];
+                    me->_status.stringValue = [NSString stringWithFormat:
+                        @"The cached index was unusable (%@) and has been discarded — "
+                         "File ▸ Reindex These Scans, or just open them again.", openErr];
+                } else {
+                    me->_status.stringValue =
+                        [NSString stringWithFormat:@"Could not open store: %@", openErr];
+                }
             } else {
                 me->_status.stringValue = [NSString stringWithFormat:
                     @"%zu setups   ·   store %@   ·   drag to navigate",
