@@ -66,6 +66,11 @@ uint8_t evidenceAt(const SetupView& s, const Params& p,
 
     double x = wx, y = wy, z = wz;
     s.worldToScanner.apply(x, y, z);
+    // Into the instrument's own frame, which is not the stored one when the
+    // tripod was not level — and it never quite is. The image's cells were built
+    // about this frame, so the direction asked for and the direction stored agree.
+    // See RangeImage::tilt.
+    s.image->toInstrument(x, y, z);
 
     double az, el, r;
     rimg::toSpherical(x, y, z, az, el, r);
@@ -286,6 +291,11 @@ BrickVerdict judgeBrick(const SetupView& s, const Params& p,
                         const double blo[3], const double bhi[3], bool allInRange) {
     const rimg::RangeImage& im = *s.image;
     if (im.pyramid.empty()) return BrickVerdict::Fallthrough;
+    // A setup whose angular mapping was refused cannot answer a question about a
+    // direction, so every voxel-by-voxel lookup into it returns nothing. The brick
+    // tests have to reach the same conclusion: AllVisible here would mark voxels
+    // visible on the strength of an image the carve will not read a single cell of.
+    if (!im.map.valid) return BrickVerdict::NoEvidence;
 
     const AngularBox b = boundBrick(s, blo, bhi);
     if (!b.valid) return BrickVerdict::Fallthrough;
@@ -299,8 +309,20 @@ BrickVerdict judgeBrick(const SetupView& s, const Params& p,
     // land on the neighbouring cell.
     const int64_t row0 = int64_t(std::floor(std::min(ra, rb))) - 1;
     const int64_t row1 = int64_t(std::ceil(std::max(ra, rb))) + 1;
-    const int64_t col0 = int64_t(std::floor(std::min(ca, cb))) - 1;
-    const int64_t col1 = int64_t(std::ceil(std::max(ca, cb))) + 1;
+    int64_t col0 = int64_t(std::floor(std::min(ca, cb))) - 1;
+    int64_t col1 = int64_t(std::ceil(std::max(ca, cb))) + 1;
+    // A sweep that runs past a full turn looked at some bearings twice, so a
+    // direction can resolve to either of two columns a whole turn apart while
+    // colCoord — a fractional position in one continuous table — can only name
+    // one of them. Rather than choose, which is what the last two attempts at this
+    // did and got wrong, the column bound simply opens to the whole raster on such
+    // a scan. That is a superset of whatever cell the lookup reaches, so the
+    // verdict stays conservative; it costs sharpness on the culling and nothing
+    // else, and only on instruments that overshoot the turn.
+    if (std::fabs(im.map.azSpanRad) > 6.28318530717958648) {
+        col0 = 0;
+        col1 = int64_t(im.cols) - 1;
+    }
 
     const rimg::RangeSpan span = im.span(row0, row1, col0, col1);
     if (!span.valid) return BrickVerdict::Fallthrough;

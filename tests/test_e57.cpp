@@ -291,6 +291,84 @@ static void testMultipleScans() {
     CHECK(ok, "every scan's section decodes independently");
 }
 
+// indexBounds/returnMinimum..returnMaximum and
+// pointGroupingSchemes/groupingByLine/idElementName: two parts of E2807 the
+// reader used to skip past entirely.
+//
+// Neither changes what the carve computes, and that is the point of reading
+// them. A multi-return scan puts several returns in one cell, and the cell keeps
+// the nearest because line of sight stops at the first surface — which the fill
+// already did, for binning, and which was therefore right for multi-return
+// without anything having checked. idElementName is the producer's own statement
+// of which field indexes a scan line, against a raster whose axes are measured
+// from the points. Both are evidence about whether the file and the data describe
+// the same thing, and evidence that is not read is not evidence.
+static void testReturnBoundsAndLineGrouping() {
+    std::printf("indexBounds returns, and groupingByLine\n");
+
+    fixture::Scan s;
+    s.name = "multiReturn";
+    s.hasIndexBounds = true;
+    s.rowMin = 0; s.rowMax = 9; s.colMin = 0; s.colMax = 19;
+    s.hasReturnBounds = true;
+    s.returnMin = 0; s.returnMax = 1;                 // first and last return
+    s.groupingIdElement = "rowIndex";
+    s.groupCount = 10;
+    s.fields = {
+        {"cartesianX", e57::FieldType::FloatDouble},
+        {"rowIndex", e57::FieldType::Integer, 0, 9},
+        {"columnIndex", e57::FieldType::Integer, 0, 19},
+        {"returnIndex", e57::FieldType::Integer, 0, 1},
+    };
+    s.data.assign(4, {});
+    for (int r = 0; r < 10; ++r)
+        for (int c = 0; c < 20; ++c)
+            for (int t = 0; t < 2; ++t) {            // two returns on every ray
+                s.data[0].push_back(3.0 + 2.0 * t);
+                s.data[1].push_back(double(r));
+                s.data[2].push_back(double(c));
+                s.data[3].push_back(double(t));
+            }
+
+    const std::string p = tmpPath("returnbounds");
+    CHECK(fixture::write(p, {s}, 64), "fixture written");
+
+    e57::Reader r;
+    std::string err;
+    CHECK(r.open(p, err), err.empty() ? "opened" : err.c_str());
+    const e57::Scan& sc = r.scan(0);
+
+    CHECK(sc.hasReturnIndexBounds, "the return bounds are read");
+    CHECK(sc.returnIndexMin == 0 && sc.returnIndexMax == 1, "and hold what the file said");
+    CHECK(sc.multiReturn(), "so this is recognised as a multi-return scan");
+    CHECK(sc.hasIndexBounds && sc.rowMax == 9 && sc.colMax == 19,
+          "and reading them did not disturb the row and column bounds");
+
+    CHECK(sc.hasPointGrouping, "pointGroupingSchemes is still noticed");
+    CHECK(sc.groupingIdElement == "rowIndex", "and the line index field is named");
+    CHECK(sc.groupCount == 10, "with the line count from the groups vector");
+
+    // A scan that declares neither must come out saying so, or "multi-return"
+    // would be the default reading of every single-return file in existence.
+    fixture::Scan plain;
+    plain.name = "plain";
+    plain.hasIndexBounds = true;
+    plain.rowMax = 9; plain.colMax = 19;
+    plain.fields = {{"cartesianX", e57::FieldType::FloatDouble}};
+    plain.data.assign(1, {});
+    for (int i = 0; i < 200; ++i) plain.data[0].push_back(double(i));
+    const std::string p2 = tmpPath("noreturnbounds");
+    CHECK(fixture::write(p2, {plain}, 64), "second fixture written");
+    e57::Reader r2;
+    CHECK(r2.open(p2, err), err.empty() ? "opened" : err.c_str());
+    CHECK(!r2.scan(0).hasReturnIndexBounds, "absent return bounds stay absent");
+    CHECK(!r2.scan(0).multiReturn(), "and a scan that says nothing is not multi-return");
+    CHECK(!r2.scan(0).hasPointGrouping, "absent grouping stays absent");
+    CHECK(r2.scan(0).groupingIdElement.empty(), "with no line index field named");
+    CHECK(r2.scan(0).hasIndexBounds && r2.scan(0).rowMax == 9,
+          "and its row and column bounds still read");
+}
+
 static void testRejectsBadFiles() {
     std::printf("malformed input\n");
     const std::string p = tmpPath("bad");
@@ -316,6 +394,7 @@ int main() {
     testMixedTypesAndFieldSkipping();
     testMultiPageAndPose();
     testMultipleScans();
+    testReturnBoundsAndLineGrouping();
     testRejectsBadFiles();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

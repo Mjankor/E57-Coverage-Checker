@@ -45,7 +45,12 @@ namespace {
 // The report itself lives in src/report.{h,cpp} so the app can produce it too:
 // Xcode builds the selected scheme, so building the app never builds this tool,
 // and a stale e57cov looks exactly like a current one.
-int info(const std::string& path, bool verifyCrc, double maxRange,
+// Every file at once, not one at a time. The blind cone is decided across the
+// whole corpus — a band unsampled at the same size in every scan is the
+// instrument's, one that varies from scan to scan is the scene it was standing in
+// — and a file-at-a-time report could only describe a decision the carve does not
+// make.
+int info(const std::vector<std::string>& paths, bool verifyCrc, double maxRange,
          const vis::Options& co) {
     report::Options ro;
     ro.verifyCrc        = verifyCrc;
@@ -54,7 +59,7 @@ int info(const std::string& path, bool verifyCrc, double maxRange,
     ro.noReturnRadius   = co.skyRadius;
     ro.noReturnFraction = co.skyFraction;
     std::string text;
-    const int failures = report::scanReport(path, ro, text);
+    const int failures = report::scanReport(paths, ro, text);
     std::fputs(text.c_str(), stdout);
     return failures;
 }
@@ -106,14 +111,27 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
 
     std::printf("\nsetups    : %llu used, %llu skipped\n",
                 (unsigned long long)res.setupsUsed, (unsigned long long)res.scansSkipped);
-    if (res.setupsWithoutMapping)
+    if (res.setupsWithoutMapping) {
         std::printf("            *** %llu of them contribute NOTHING: their angular mapping\n"
                     "                was refused, so every lookup falls outside the raster\n",
                     (unsigned long long)res.setupsWithoutMapping);
+        if (!res.mappingRefusedWhy.empty())
+            std::printf("                %s\n", res.mappingRefusedWhy.c_str());
+    }
     if (res.setupsWithBlindCone)
         std::printf("            %llu with an identified blind cone, %llu of those inverted\n",
                     (unsigned long long)res.setupsWithBlindCone,
                     (unsigned long long)res.setupsInverted);
+    // Which empty cells clear space and which establish nothing is the single
+    // decision that most changes the answer, so it is stated outright rather than
+    // being inferred from a count.
+    if (!res.coneVerdict.why.empty())
+        std::printf("blind cone: %s\n            %s\n",
+                    res.coneVerdict.decided
+                        ? (res.coneVerdict.atFirstRow ? "the START of each raster"
+                                                      : "the END of each raster")
+                        : "*** NOT IDENTIFIED — empty cells at both ends are believed ***",
+                    res.coneVerdict.why.c_str());
     std::printf("voxel     : %.3f m   ·   tile %u^3   ·   max range %.0f m   ·   %u thread(s)\n",
                 opt.voxelSize, opt.tileVoxels, opt.maxRange,
                 opt.threads ? opt.threads : std::thread::hardware_concurrency());
@@ -190,6 +208,7 @@ int probePoint(const std::vector<std::string>& paths, const vis::Options& opt,
 
     rimg::Options ro;
     ro.maxRange         = opt.maxRange;
+    ro.blindCone        = opt.blindCone;
     ro.noReturnRadius   = opt.skyRadius;
     ro.noReturnFraction = opt.skyFraction;
 
@@ -202,11 +221,27 @@ int probePoint(const std::vector<std::string>& paths, const vis::Options& opt,
             std::string rerr;
             if (!rimg::build(*r, i, ro, *img, rerr)) continue;
             images.push_back(std::move(img));
-            setups.push_back(carve::makeSetupView(*images.back()));
         }
         readers.push_back(std::move(r));
     }
-    if (setups.empty()) { std::printf("no usable scans\n"); return 1; }
+    if (images.empty()) { std::printf("no usable scans\n"); return 1; }
+
+    // The same corpus-wide blind cone decision the carve makes. This command
+    // exists to explain why a voxel came out the way it did, so it must not reach
+    // its own conclusion about which empty cells clear space — an explanation that
+    // disagrees with the run it is explaining is worse than none.
+    {
+        std::vector<rimg::RangeImage*> raw;
+        raw.reserve(images.size());
+        for (auto& im : images) raw.push_back(im.get());
+        const rimg::ConeVerdict v = rimg::markBlindConeAcrossCorpus(raw, ro);
+        std::printf("blind cone: %s\n            %s\n\n",
+                    v.decided ? (v.atFirstRow ? "the START of each raster"
+                                             : "the END of each raster")
+                              : "not identified",
+                    v.why.c_str());
+    }
+    for (auto& im : images) setups.push_back(carve::makeSetupView(*im));
 
     carve::Params p;
     p.voxelSize     = opt.voxelSize;
@@ -278,6 +313,13 @@ void usage() {
         "usage: e57cov info  [--crc] [--max-range <m>] <file.e57> [more.e57 ...]\n"
         "       e57cov carve [options] <file.e57> [more.e57 ...]\n"
         "       e57cov probe <x> <y> <z> <file.e57> [more.e57 ...]\n"
+        "       e57cov selftest [--max-range <m>] <file.e57> [more.e57 ...]\n"
+        "\n"
+        "  selftest  Ask the evidence primitive about each scan's own cells, where\n"
+        "          the right answer is not in doubt: in front of a return must read\n"
+        "          visible, on it occupied, behind it nothing, and every metre of an\n"
+        "          empty ray must clear. Reports percentages, and what each raster\n"
+        "          says the setup ought to clear.\n"
         "\n"
         "  info    Inspect scans and audit format conventions. Reports how each\n"
         "          file represents no-return rays and which coordinate frame its\n"
@@ -344,6 +386,15 @@ void usage() {
         "  --threads <n>\n"
         "          (carve) Worker threads over the tile list. Default 0, the\n"
         "          machine's count. The answer is identical at any count.\n"
+        "  --image-budget <GB>\n"
+        "          (carve) Memory the range images may occupy, all scans at once.\n"
+        "          Default 48, for a 64 GB machine: a 2500 x 5280 raster is 44 MB\n"
+        "          with its pyramid, so a thousand of them fit at full resolution.\n"
+        "          Too small and each raster is coarsened to fit its share, which\n"
+        "          does not blur the answer but changes it — a coarse cell clears\n"
+        "          to the nearest return in it, so less space is cleared and the\n"
+        "          unobserved volume comes out overstated. The report says when\n"
+        "          this happened, and by how much.\n"
         "  --solid (carve) Keep every unknown voxel rather than only those on the\n"
         "          frontier with observed space. Far more voxels, same answer:\n"
         "          an opaque volume hides its own interior anyway.\n");
@@ -359,7 +410,7 @@ int main(int argc, char** argv) {
 
     const std::string cmd = argv[1];
     if (cmd == "-h" || cmd == "--help" || cmd == "help") { usage(); return 0; }
-    if (cmd != "info" && cmd != "carve" && cmd != "probe") {
+    if (cmd != "info" && cmd != "carve" && cmd != "probe" && cmd != "selftest") {
         std::printf("unknown command '%s'\n\n", cmd.c_str());
         usage();
         return 2;
@@ -438,6 +489,19 @@ int main(int argc, char** argv) {
             co.threads = uint32_t(v);
             continue;
         }
+        // In gigabytes, because that is the unit the machine is sold in and the
+        // unit this decision gets made in. See vis::Options::imageBudgetBytes:
+        // too small a budget coarsens the rasters, and coarse rasters overstate
+        // the unobserved volume rather than merely softening it.
+        if (std::strcmp(argv[i], "--image-budget") == 0 && i + 1 < argc) {
+            const double gb = std::strtod(argv[++i], nullptr);
+            if (!(gb > 0.0) || gb > 1024.0) {
+                std::printf("--image-budget is in GB and must be in 0..1024\n");
+                return 2;
+            }
+            co.imageBudgetBytes = uint64_t(gb * 1073741824.0);
+            continue;
+        }
         paths.push_back(argv[i]);
     }
     if (paths.empty()) { usage(); return 2; }
@@ -454,10 +518,17 @@ int main(int argc, char** argv) {
         return probePoint(files, co, world);
     }
     if (cmd == "carve") return carveCorpus(paths, co);
+    if (cmd == "selftest") {
+        report::Options ro;
+        ro.maxRange         = co.maxRange;
+        ro.blindCone        = co.blindCone;
+        ro.noReturnRadius   = co.skyRadius;
+        ro.noReturnFraction = co.skyFraction;
+        std::string text;
+        const int failures = report::selfTest(paths, ro, text);
+        std::fputs(text.c_str(), stdout);
+        return failures == 0 ? 0 : 1;
+    }
 
-    int failures = 0;
-    for (const auto& p : paths) failures += info(p, crc, co.maxRange, co);
-    if (failures)
-        std::printf("%d file(s) reported problems.\n", failures);
-    return failures == 0 ? 0 : 1;
+    return info(paths, crc, co.maxRange, co) == 0 ? 0 : 1;
 }

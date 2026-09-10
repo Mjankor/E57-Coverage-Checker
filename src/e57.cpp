@@ -456,10 +456,36 @@ void parseIndexBounds(const XmlNode& x, Scan& s) {
     const XmlNode* r1 = ib->child("rowMaximum");
     const XmlNode* c0 = ib->child("columnMinimum");
     const XmlNode* c1 = ib->child("columnMaximum");
+    // The return bounds are independent of the row and column bounds, and are
+    // read whether or not those are present: a scan may declare how many returns
+    // one ray produced without declaring a grid at all. See
+    // Scan::hasReturnIndexBounds for why a visibility filter cares.
+    const XmlNode* t0 = ib->child("returnMinimum");
+    const XmlNode* t1 = ib->child("returnMaximum");
+    if (t0 && t1) {
+        s.hasReturnIndexBounds = true;
+        s.returnIndexMin = t0->asInt();
+        s.returnIndexMax = t1->asInt();
+    }
     if (!r0 || !r1 || !c0 || !c1) return;
     s.hasIndexBounds = true;
     s.rowMin = r0->asInt(); s.rowMax = r1->asInt();
     s.colMin = c0->asInt(); s.colMax = c1->asInt();
+}
+
+// pointGroupingSchemes/groupingByLine: the file saying in its own words which
+// field indexes a scan line. That is the one piece of raster structure E57 lets a
+// producer state outright rather than leaving to be inferred, so it is worth
+// having even though nothing depends on it — see Scan::groupingIdElement.
+void parsePointGrouping(const XmlNode& x, Scan& s) {
+    const XmlNode* pg = x.child("pointGroupingSchemes");
+    if (!pg) return;
+    s.hasPointGrouping = true;
+    const XmlNode* gbl = pg->child("groupingByLine");
+    if (!gbl) return;
+    if (const XmlNode* id = gbl->child("idElementName")) s.groupingIdElement = id->text;
+    if (const XmlNode* g = gbl->child("groups"))
+        s.groupCount = uint64_t(std::strtoull(g->attr("recordCount", "0").c_str(), nullptr, 10));
 }
 
 void parseCartesianBounds(const XmlNode& x, Scan& s) {
@@ -510,7 +536,7 @@ bool Reader::open(const std::string& path, std::string& err) {
         parsePose(vc, s);
         parseIndexBounds(vc, s);
         parseCartesianBounds(vc, s);
-        s.hasPointGrouping = vc.child("pointGroupingSchemes") != nullptr;
+        parsePointGrouping(vc, s);
 
         const XmlNode* pts = vc.child("points");
         if (!pts) { err = "scan '" + s.name + "' has no points node"; return false; }

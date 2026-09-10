@@ -579,6 +579,83 @@ static void testPreTransformedScanIsNotMovedTwice() {
     CHECK(ok, "coordinates are unchanged");
 }
 
+// The case the old test could never have caught, because every pre-transformed
+// fixture ever written for it sat at UTM magnitudes.
+//
+// A job referenced to an origin on the site has setup translations of tens of
+// metres, not hundreds of thousands, and the scans reach about as far. Comparing
+// how far the points sit from the two candidate centres then gives 28 m against
+// 15 m — a ratio of 1.9, under the factor of two the decision used to need — and
+// the answer comes out backwards. A pre-transformed scan read as scanner-local
+// has the pose applied on top of coordinates that already carry it, which puts
+// that setup a whole translation out: tens of metres, and downwards whenever the
+// translation has a z.
+//
+// So the instrument is located now rather than the radii compared. Both are
+// checked here: the answer, and that the thing which used to decide it would
+// still get it wrong — otherwise the test could quietly stop testing anything.
+static void testPreTransformedOnASiteLocalOrigin() {
+    std::printf("frame: pre-transformed, with a translation the size of the scan\n");
+
+    // A full sphere of directions at a few tens of metres, about a setup 25 m
+    // from the file's origin — the geometry of a real locally-referenced job.
+    const double t[3] = {18.0, 9.0, -14.0};
+    const double yaw = 1.5;
+    const double cy = std::cos(yaw), sy = std::sin(yaw);
+    std::vector<double> wx, wy, wz;
+    for (int r = 0; r < 120; ++r) {
+        const double el = -1.0 + 2.0 * (double(r) + 0.5) / 120.0;
+        for (int c = 0; c < 240; ++c) {
+            const double az = 6.28318530717958648 * double(c) / 240.0;
+            const double rr = 25.0 * (0.6 + 0.4 * std::sin(3 * az + 2 * el));
+            const double ce = std::cos(el);
+            const double lx = rr * ce * std::cos(az), ly = rr * ce * std::sin(az);
+            wx.push_back(cy * lx - sy * ly + t[0]);
+            wy.push_back(sy * lx + cy * ly + t[1]);
+            wz.push_back(rr * std::sin(el) + t[2]);
+        }
+    }
+
+    fixture::Scan s;
+    s.name = "siteLocalPreTransformed";
+    s.hasPose = true;
+    s.q[0] = std::cos(yaw * 0.5); s.q[3] = std::sin(yaw * 0.5);
+    s.t[0] = t[0]; s.t[1] = t[1]; s.t[2] = t[2];
+    s.fields = {
+        {"cartesianX", e57::FieldType::FloatDouble},
+        {"cartesianY", e57::FieldType::FloatDouble},
+        {"cartesianZ", e57::FieldType::FloatDouble},
+    };
+    s.data = {wx, wy, wz};
+
+    const std::string p = tmpPath("sitelocalpre");
+    CHECK(fixture::write(p, {s}, 256), "fixture written");
+
+    e57::Reader r;
+    std::string err;
+    CHECK(r.open(p, err), err.empty() ? "opened" : err.c_str());
+
+    const viewer::FrameDecision d = viewer::decideFrame(r, 0);
+    CHECK(d.convention == viewer::FrameConvention::AlreadyGlobal,
+          "the instrument's own rays say the points are already transformed");
+    CHECK(!d.applyPose(), "so the pose is not applied a second time");
+    CHECK(d.haveCentre, "and the decision came from locating the instrument");
+    CHECK(d.centrePairs > 100, "from a useful number of opposite ray pairs");
+    CHECK(d.centreRms >= 0.0 && d.centreRms < 1.0, "which met to well under a metre");
+    // The instrument, reported in the file's frame: the setup position itself.
+    double off = 0;
+    for (int k = 0; k < 3; ++k) off += (d.centre[k] - t[k]) * (d.centre[k] - t[k]);
+    CHECK(std::sqrt(off) < 1.0, "and it lands on the setup, within a metre");
+
+    // The radii the old decision compared, to show this is not a vacuous pass:
+    // they still point the wrong way, and a factor of two still cannot separate
+    // them.
+    CHECK(d.medianFromPoseOrigin < d.medianFromLocalOrigin,
+          "the points really are nearer the pose translation");
+    CHECK(!(d.medianFromPoseOrigin * 2.0 < d.medianFromLocalOrigin),
+          "but not by the factor of two the old test demanded — which was the bug");
+}
+
 int main() {
     std::printf("E57 Coverage Checker — viewer tests\n\n");
     testCameraProjection();
@@ -592,6 +669,7 @@ int main() {
     testPoseRoundTrip();
     testAlignedSetupsStayAligned();
     testPreTransformedScanIsNotMovedTwice();
+    testPreTransformedOnASiteLocalOrigin();
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -124,6 +124,14 @@
 }
 
 - (BOOL)hasVoxels { return _haveVoxels; }
+
+- (void)setVoxelShading:(uint8_t)mode {
+    if (!_haveVoxels) return;
+    vis::recolour(_voxelResult, mode);
+    [self rebuildVoxels];
+    [self setNeedsDisplay:YES];
+}
+
 - (size_t)voxelCount { return _voxelResult.voxels.size(); }
 
 - (void)frameVoxels {

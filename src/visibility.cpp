@@ -20,6 +20,79 @@ namespace {
 // review get their own and this becomes a lookup.
 constexpr uint8_t kUnknownR = 255, kUnknownG = 64, kUnknownB = 96;
 
+// The face directions, in the order visibleFaces reports them.
+const int32_t kFaceDirs[6][3] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
+
+// Shading, so a wall of identical dots reads as a shape.
+//
+// A frontier voxel is drawn as one flat-coloured sprite, and a hundred thousand
+// of them in one colour is a silhouette with no interior: you can see where the
+// unobserved volume is, and nothing at all about its form. Every part of the fix
+// below is free at collection time, which is why it is done here rather than in
+// the renderer — no depth pass, no normals buffer, no second geometry pass.
+//
+// Two cues, because they answer different questions:
+//
+//   Form. visibleFaces already looked at the six face neighbours to decide this
+//   voxel is on the frontier; the visible ones summed give the outward normal,
+//   and a fixed world-space light on that normal turns the blob into a surface
+//   with lit and shaded sides. World-space rather than a headlight on purpose:
+//   the shading then stays put as the model turns, which is what lets you read
+//   which way a face points instead of everything moving together.
+//
+//   Height. A ramp on z within the domain, so a slab seen edge-on still has a
+//   top and a bottom. On its own it is what was asked for and it is weak; under
+//   the lighting it stops distant unrelated surfaces reading as one mass.
+//
+// The base colour stays the unknown red in all cases — this modulates it, it
+// does not replace it, because the colour is what says these voxels are the
+// answer rather than the scene.
+enum class Shade : uint8_t { Flat, Lit, Height, LitAndHeight };
+
+// The light. Above, and off to one side, so no principal face of a voxel is left
+// exactly unlit and none is at full brightness — a light down any axis makes two
+// of the six faces identical and flattens the very thing this is for.
+constexpr double kLight[3] = {-0.35, -0.50, 0.79};
+// How dark a fully turned-away face goes. Not zero: an unlit face still has to
+// read as present, and these are the deliverable, not scenery.
+constexpr double kAmbient = 0.42;
+
+// The lit colour for one frontier voxel.
+void shadeFrontier(uint8_t faces, double heightT, Shade mode,
+                   uint8_t& r, uint8_t& g, uint8_t& b) {
+    double lit = 1.0;
+    if (mode == Shade::Lit || mode == Shade::LitAndHeight) {
+        double n[3] = {0, 0, 0};
+        for (int i = 0; i < 6; ++i) {
+            if (!(faces & (1u << i))) continue;
+            for (int k = 0; k < 3; ++k) n[k] += kFaceDirs[i][k];
+        }
+        const double len = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+        // A voxel with opposite faces both visible — a one-voxel film between two
+        // observed regions — sums to nothing and has no normal to speak of. It
+        // gets flat ambient rather than an arbitrary direction.
+        if (len > 1e-9) {
+            double d = 0;
+            for (int k = 0; k < 3; ++k) d += (n[k] / len) * kLight[k];
+            lit = kAmbient + (1.0 - kAmbient) * std::max(0.0, d);
+        } else {
+            lit = kAmbient + 0.5 * (1.0 - kAmbient);
+        }
+    }
+    double rr = kUnknownR * lit, gg = kUnknownG * lit, bb = kUnknownB * lit;
+    if (mode == Shade::Height || mode == Shade::LitAndHeight) {
+        // Low is the base red, high runs toward yellow: one hue sweep, so it
+        // stays legible to the colour-blind and stays obviously the unknown set
+        // rather than turning into a rainbow that competes with the point cloud.
+        const double t = std::min(1.0, std::max(0.0, heightT));
+        gg += (215.0 - kUnknownG) * t * lit;
+        bb += (40.0  - kUnknownB) * t * lit;
+    }
+    r = uint8_t(std::min(255.0, std::max(0.0, rr)));
+    g = uint8_t(std::min(255.0, std::max(0.0, gg)));
+    b = uint8_t(std::min(255.0, std::max(0.0, bb)));
+}
+
 std::string fmt(const char* f, ...) {
     char buf[512];
     va_list ap;
@@ -31,22 +104,36 @@ std::string fmt(const char* f, ...) {
 
 } // namespace
 
-// A voxel is on the observed frontier when a face neighbour is visible. Faces
-// only, not the 26-neighbourhood: a diagonal touch is a shared edge or corner,
-// which is not a line of sight passing between the two.
-bool touchesVisible(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
-    const int32_t d[6][3] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
-    for (const auto& o : d) {
-        const int64_t nx = int64_t(x) + o[0], ny = int64_t(y) + o[1], nz = int64_t(z) + o[2];
+// Which of a voxel's six face neighbours are visible, as a bit per face.
+//
+// The frontier test only needs to know whether any of them is, but the same six
+// lookups also say which way the frontier faces — and that is a surface normal,
+// for nothing. Summing the directions of the visible faces points from the
+// unobserved voxel out into the space that was seen, which is the outward normal
+// of the shadow's mouth. It is what makes the drawn result readable as a shape
+// rather than as a fog of identical dots. See shadeFrontier.
+//
+// Faces only, not the 26-neighbourhood: a diagonal touch is a shared edge or
+// corner, which is not a line of sight passing between the two.
+uint8_t visibleFaces(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
+    uint8_t mask = 0;
+    for (int i = 0; i < 6; ++i) {
+        const int64_t nx = int64_t(x) + kFaceDirs[i][0];
+        const int64_t ny = int64_t(y) + kFaceDirs[i][1];
+        const int64_t nz = int64_t(z) + kFaceDirs[i][2];
         // The apron guarantees these are in range for every interior voxel, so
         // a tile seam cannot change the answer. Without it this bounds check
         // would silently make the frontier depend on the tiling.
         if (nx < 0 || ny < 0 || nz < 0 ||
             nx >= int64_t(t.dim) || ny >= int64_t(t.dim) || nz >= int64_t(t.dim)) continue;
         if (t.state[t.index(uint32_t(nx), uint32_t(ny), uint32_t(nz))] & carve::kVisible)
-            return true;
+            mask |= uint8_t(1u << i);
     }
-    return false;
+    return mask;
+}
+
+bool touchesVisible(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
+    return visibleFaces(t, x, y, z) != 0;
 }
 
 // A position hash, used to pick which voxels survive the display cap. It has to
@@ -82,7 +169,13 @@ struct Collector {
     uint64_t qualified = 0;
     double   origin[3] = {0, 0, 0};
 
-    void add(const double centre[3], const int64_t gi[3]) {
+    // The shading needs the whole domain's height range before it can place a
+    // voxel within it, so these are set once, before collection starts, for the
+    // same reason `origin` is.
+    Shade  shade = Shade::LitAndHeight;
+    double zLo = 0, zSpan = 0;
+
+    void add(const double centre[3], const int64_t gi[3], uint8_t faces) {
         ++qualified;
         const uint64_t h = voxelHash(gi[0], gi[1], gi[2]);
         if (h >= threshold) return;
@@ -91,10 +184,26 @@ struct Collector {
         p.x = float(centre[0] - origin[0]);
         p.y = float(centre[1] - origin[1]);
         p.z = float(centre[2] - origin[2]);
-        p.r = kUnknownR; p.g = kUnknownG; p.b = kUnknownB; p.a = 255;
+        if (shade == Shade::Flat) {
+            p.r = kUnknownR; p.g = kUnknownG; p.b = kUnknownB;
+        } else {
+            // Height taken back out of the stored float rather than from
+            // `centre`, which is the same number to within a rounding. The point
+            // is that recolour has only the float to work from, and a shading
+            // that changes in the last bit when you switch mode and back is not
+            // a view of the answer, it is an edit of it.
+            const double z = origin[2] + double(p.z);
+            shadeFrontier(faces, zSpan > 0 ? (z - zLo) / zSpan : 0.5,
+                          shade, p.r, p.g, p.b);
+        }
+        p.a = 255;
         p.scanId = 0;
         out.push_back(p);
         keys.push_back(h);
+        // The normal, kept so the shading can be changed later without carving
+        // the site again. Three arrays in lockstep from here on: every filter,
+        // every merge, every halving moves all three or none.
+        faceOf.push_back(faces);
 
         if (cap && out.size() > cap) halve();
     }
@@ -108,16 +217,21 @@ struct Collector {
         threshold = std::min(threshold, other.threshold);
         out.insert(out.end(), other.out.begin(), other.out.end());
         keys.insert(keys.end(), other.keys.begin(), other.keys.end());
+        faceOf.insert(faceOf.end(), other.faceOf.begin(), other.faceOf.end());
         other.out.clear();
         other.keys.clear();
+        other.faceOf.clear();
     }
 
     void filterToThreshold() {
         size_t w = 0;
         for (size_t i = 0; i < out.size(); ++i)
-            if (keys[i] < threshold) { out[w] = out[i]; keys[w] = keys[i]; ++w; }
+            if (keys[i] < threshold) {
+                out[w] = out[i]; keys[w] = keys[i]; faceOf[w] = faceOf[i]; ++w;
+            }
         out.resize(w);
         keys.resize(w);
+        faceOf.resize(w);
     }
 
     // Halving the threshold drops about half the kept set, and re-testing what
@@ -131,9 +245,56 @@ struct Collector {
     }
 
     std::vector<uint64_t> keys;
+    std::vector<uint8_t>  faceOf;
 };
 
 } // namespace
+
+uint64_t imageCellsPerScan(const Options& opt, uint64_t scanCount) {
+    if (scanCount == 0) return opt.minImageCells;
+    // Bytes into cells. A cell is three bytes of raster, and the min/max pyramid
+    // over it adds one node per 4x4 block at every level — five bytes a node,
+    // which summed over the levels is a third of a byte per cell. Kept as thirds
+    // of a byte in integers so there is no rounding to argue about.
+    constexpr uint64_t kThirdBytesPerCell = 10;          // 3 + 1/3, times three
+    uint64_t cells = (opt.imageBudgetBytes / kThirdBytesPerCell * 3) / scanCount;
+    cells = std::max<uint64_t>(cells, opt.minImageCells);
+    // rimg::Options::maxCells is 32 bits, and no raster approaches it.
+    return std::min<uint64_t>(cells, 0xFFFFFFFFull);
+}
+
+void recolour(Result& r, uint8_t shading) {
+    if (r.voxelFaces.size() != r.voxels.size()) return;
+    // The height range the ramp spans, recovered the same way the run chose it:
+    // the domain when it is bounded, and otherwise the drawn voxels' own extent.
+    // Taken from the result rather than remembered, so a result that has been
+    // saved and reloaded shades identically.
+    double zLo = 0, zSpan = 0;
+    if (r.domain.kind == carve::Domain::Kind::Box) {
+        zLo = r.domain.lo[2];
+        zSpan = r.domain.hi[2] - r.domain.lo[2];
+    } else if (!r.voxels.empty()) {
+        float lo = r.voxels[0].z, hi = r.voxels[0].z;
+        for (const lod::StorePoint& p : r.voxels) {
+            lo = std::min(lo, p.z);
+            hi = std::max(hi, p.z);
+        }
+        zLo = r.origin[2] + double(lo);
+        zSpan = double(hi) - double(lo);
+    }
+    const Shade mode = Shade(shading);
+    for (size_t i = 0; i < r.voxels.size(); ++i) {
+        lod::StorePoint& p = r.voxels[i];
+        if (mode == Shade::Flat) {
+            p.r = kUnknownR; p.g = kUnknownG; p.b = kUnknownB;
+            continue;
+        }
+        // The voxel's world height, back out of the origin it was rebased on.
+        const double z = r.origin[2] + double(p.z);
+        shadeFrontier(r.voxelFaces[i], zSpan > 0 ? (z - zLo) / zSpan : 0.5,
+                      mode, p.r, p.g, p.b);
+    }
+}
 
 void rebase(const Result& r, const double origin[3], std::vector<lod::StorePoint>& out) {
     out = r.voxels;
@@ -171,9 +332,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     }
     if (scanCount == 0) { err = "no scans in the selected files"; return false; }
 
-    uint64_t perImage = opt.totalImageCells / scanCount;
-    perImage = std::max<uint64_t>(perImage, opt.minImageCells);
-    perImage = std::min<uint64_t>(perImage, 0xFFFFFFFFull);
+    const uint64_t perImage = imageCellsPerScan(opt, scanCount);
+    out.imageCellsAllowed = perImage;
 
     rimg::Options ro;
     ro.maxRange = opt.maxRange;
@@ -188,39 +348,134 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     images.reserve(size_t(scanCount));
     setups.reserve(size_t(scanCount));
 
-    uint64_t seen = 0;
     uint64_t isolated = 0, believedSky = 0;
-    for (const auto& r : readers) {
-        for (size_t i = 0; i < r->scanCount(); ++i) {
-            auto img = std::make_unique<rimg::RangeImage>();
-            std::string rerr;
-            if (rimg::build(*r, i, ro, *img, rerr)) {
-                isolated    += img->diag.isolatedNoReturns;
-                believedSky += img->diag.noReturns;
-                if (!img->map.valid) ++out.setupsWithoutMapping;
-                if (img->diag.blindConeRows) {
-                    ++out.setupsWithBlindCone;
-                    if (img->diag.hasConeAxis && img->diag.coneAxisWorld[2] > 0.5)
-                        ++out.setupsInverted;
+
+    // Built in parallel across scans. Range images are independent — one scan's
+    // raster, tilt, mapping and round trip involve no other scan — so this is
+    // the one stage of the pipeline that parallelises with nothing shared, and
+    // at a second a scan it is the difference between a quarter of an hour and
+    // two minutes on a thousand-scan job.
+    //
+    // Each worker opens its own reader rather than sharing one. The readers
+    // above are kept for their headers; decoding through the same object from
+    // several threads would mean sharing its field decoders, which carry the
+    // bit cursor that makes a bytestream continuous across packets.
+    //
+    // Results are written into a slot indexed by job, never appended, so the
+    // order of `images` is the order of the corpus whatever order the threads
+    // finish in. Every count derived from them is taken afterwards, in that same
+    // order, for the same reason.
+    struct Job { size_t path; size_t scan; };
+    std::vector<Job> jobs;
+    jobs.reserve(size_t(scanCount));
+    for (size_t f = 0; f < readers.size(); ++f)
+        for (size_t i = 0; i < readers[f]->scanCount(); ++i) jobs.push_back({f, i});
+
+    std::vector<std::unique_ptr<rimg::RangeImage>> built(jobs.size());
+    {
+        unsigned nb = opt.threads ? opt.threads : std::thread::hardware_concurrency();
+        if (nb == 0) nb = 1;
+        // Each concurrent build holds that scan's decoded returns — about 20
+        // bytes a point, so a hundred megabytes for a large scan. That is the
+        // cost of this, and it is why the thread count is not simply unbounded.
+        nb = unsigned(std::min<uint64_t>(nb, std::max<uint64_t>(1, jobs.size())));
+
+        std::atomic<uint64_t> next{0};
+        std::atomic<uint64_t> done{0};
+        std::atomic<bool>     stop{false};
+        std::mutex            tickLock;
+
+        auto worker = [&]() {
+            e57::Reader own;
+            size_t openPath = SIZE_MAX;
+            for (;;) {
+                if (stop.load(std::memory_order_relaxed)) break;
+                const uint64_t j = next.fetch_add(1, std::memory_order_relaxed);
+                if (j >= jobs.size()) break;
+                const Job& job = jobs[size_t(j)];
+                // Reopened only when the file changes, so a multi-scan file is
+                // opened once per worker rather than once per scan.
+                std::string e;
+                if (openPath != job.path) {
+                    own = e57::Reader{};
+                    if (!own.open(paths[job.path], e)) { openPath = SIZE_MAX; }
+                    else openPath = job.path;
                 }
-                // The accelerator the carve culls with. About 5/16 of a byte
-                // per cell, and it settles most bricks with one lookup instead
-                // of 512 voxel tests.
-                rimg::buildPyramid(*img);
-                images.push_back(std::move(img));
-                setups.push_back(carve::makeSetupView(*images.back()));
-            } else {
-                // A scan with no usable raster cannot contribute evidence, and
-                // inventing one would invent visibility. Skipped and counted.
-                ++out.scansSkipped;
+                if (openPath == job.path) {
+                    auto img = std::make_unique<rimg::RangeImage>();
+                    std::string rerr;
+                    if (rimg::build(own, job.scan, ro, *img, rerr))
+                        built[size_t(j)] = std::move(img);
+                }
+                const uint64_t d = done.fetch_add(1, std::memory_order_relaxed) + 1;
+                std::lock_guard<std::mutex> lk(tickLock);
+                if (!tick("building range images", d, scanCount))
+                    stop.store(true, std::memory_order_relaxed);
             }
-            if (!tick("building range images", ++seen, scanCount)) {
-                out.cancelled = true;
-                err = "cancelled";
-                return false;
-            }
+        };
+
+        if (nb == 1) {
+            worker();
+        } else {
+            std::vector<std::thread> pool;
+            pool.reserve(nb);
+            for (unsigned i = 0; i < nb; ++i) pool.emplace_back(worker);
+            for (std::thread& t : pool) t.join();
         }
+        if (stop.load()) { out.cancelled = true; err = "cancelled"; return false; }
     }
+
+    for (auto& img : built) {
+        if (!img) {
+            // A scan with no usable raster cannot contribute evidence, and
+            // inventing one would invent visibility. Skipped and counted.
+            ++out.scansSkipped;
+            continue;
+        }
+        if (!img->map.valid) {
+            ++out.setupsWithoutMapping;
+            if (out.mappingRefusedWhy.empty()) out.mappingRefusedWhy = img->diag.note;
+        }
+        if (img->diag.binStep > 1) {
+            ++out.setupsBinned;
+            out.worstBinStep = std::max(out.worstBinStep, img->diag.binStep);
+        }
+        images.push_back(std::move(img));
+    }
+
+    // The blind cone, decided once across every scan rather than scan by scan.
+    // It has to happen here, after all the images exist and before anything reads
+    // a cell, because the evidence is the corpus: a band unsampled at the same
+    // size in every scan is the instrument, and one that varies from 87 rows to
+    // 576 is the scene it was standing in. No single scan can tell those apart —
+    // on the job this was built against the per-scan test refused two and called
+    // two more inverted, and every one of those mistakes either clears a cone to
+    // the rated range straight through the ground or throws away the sky that
+    // clears the volume above the site.
+    {
+        std::vector<rimg::RangeImage*> raw;
+        raw.reserve(images.size());
+        for (auto& im : images) raw.push_back(im.get());
+        out.coneVerdict = rimg::markBlindConeAcrossCorpus(raw, ro);
+    }
+
+    for (auto& img : images) {
+        isolated    += img->diag.isolatedNoReturns;
+        believedSky += img->diag.noReturns;
+        if (img->diag.blindConeRows) {
+            ++out.setupsWithBlindCone;
+            if (img->diag.hasConeAxis && img->diag.coneAxisWorld[2] > 0.5)
+                ++out.setupsInverted;
+        }
+        // The accelerator the carve culls with. About 5/16 of a byte per cell, and
+        // it settles most bricks with one lookup instead of 512 voxel tests. Built
+        // after the cone is marked: it summarises cell statuses, so a pyramid
+        // built before the marking would answer for an image that no longer
+        // exists.
+        rimg::buildPyramid(*img);
+        setups.push_back(carve::makeSetupView(*img));
+    }
+
     if (setups.empty()) {
         err = "no scan produced a usable range image — none of them declare a "
               "sampling grid (indexBounds with rowIndex/columnIndex)";
@@ -373,6 +628,25 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     if (opt.carver) nthreads = 1;
     nthreads = unsigned(std::min<uint64_t>(nthreads, std::max<uint64_t>(1, plannedTiles)));
 
+    // The height range the ramp spans. The domain when it is bounded — that is
+    // the region being asked about, so the ramp uses all of its contrast on the
+    // part of the site anyone is looking at — and the tiles' own extent when it
+    // is not. Fixed before collection for the same reason `origin` is: with
+    // several workers, anything derived as voxels arrive is a race.
+    double shadeZLo = 0, shadeZSpan = 0;
+    if (p.domain.kind == carve::Domain::Kind::Box) {
+        shadeZLo = p.domain.lo[2];
+        shadeZSpan = p.domain.hi[2] - p.domain.lo[2];
+    } else if (!keys.empty()) {
+        int64_t zlo = keys[0].z, zhi = keys[0].z;
+        for (const carve::TileKey& k : keys) {
+            zlo = std::min(zlo, k.z);
+            zhi = std::max(zhi, k.z);
+        }
+        shadeZLo   = double(zlo) * p.tileMetres();
+        shadeZSpan = double(zhi - zlo + 1) * p.tileMetres();
+    }
+
     // Per worker: its own statistics, its own collector, its own tile scratch.
     // Nothing is shared but the tile cursor and the progress lock.
     struct Worker {
@@ -394,6 +668,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         // handed out dynamically, so in practice a worker holds about its share.
         w.col.cap = opt.displayCap;
         for (int k = 0; k < 3; ++k) w.col.origin[k] = origin[k];
+        w.col.shade = Shade(opt.shading);
+        w.col.zLo = shadeZLo; w.col.zSpan = shadeZSpan;
     }
 
     std::atomic<uint64_t> cursor{0};
@@ -472,12 +748,15 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                             // observed it. Anything else is either outside the
                             // question or was seen by something.
                             if (tile.state[tile.index(x, y, z)] != carve::kReachable) continue;
-                            if (!opt.solid && !touchesVisible(tile, x, y, z)) continue;
+                            // The same six lookups decide the frontier and give
+                            // the outward normal — see visibleFaces.
+                            const uint8_t faces = visibleFaces(tile, x, y, z);
+                            if (!opt.solid && !faces) continue;
                             double c[3];
                             tile.centre(x, y, z, p.voxelSize, c);
                             int64_t gi[3];
                             tile.globalIndex(x, y, z, gi);
-                            w.col.add(c, gi);
+                            w.col.add(c, gi, faces);
                         }
                     }
                 }
@@ -508,6 +787,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     // whatever order the tiles finished in.
     Collector col;
     col.cap = opt.displayCap;
+    col.shade = Shade(opt.shading);
+    col.zLo = shadeZLo; col.zSpan = shadeZSpan;
     for (int k = 0; k < 3; ++k) col.origin[k] = origin[k];
     for (Worker& w : workers) {
         out.stats.voxels     += w.stats.voxels;
@@ -541,7 +822,9 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                     double c[3];
                     grid.centre(x, y, z, c);
                     const int64_t gi[3] = {grid.lo[0] + x, grid.lo[1] + y, grid.lo[2] + z};
-                    col.add(c, gi);
+                    // The connectivity grid answers "observed", not "visible", so
+                    // its faces are found here rather than by visibleFaces.
+                    col.add(c, gi, voids::observedFaces(grid, x, y, z));
                 }
             }
         }
@@ -550,6 +833,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     while (col.cap && col.out.size() > col.cap) col.halve();
 
     out.voxels = std::move(col.out);
+    out.voxelFaces = std::move(col.faceOf);
     for (int k = 0; k < 3; ++k) out.origin[k] = origin[k];
     out.qualified = col.qualified;
     out.keptFraction = col.qualified ? double(out.voxels.size()) / double(col.qualified) : 1.0;
@@ -567,8 +851,19 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     }
 
     std::string note;
-    if (perImage < (32ull << 20))
-        note += fmt("range images binned to %llu cells each; ",
+    // Whether rasters were actually coarsened, not whether the budget looked
+    // tight. This used to fire whenever the per-image allowance fell below 32 M
+    // cells, which is a guess about what probably happened rather than a report of
+    // what did: at a thousand scans the allowance is 15 M cells and a 13.2 M cell
+    // raster fits inside it untouched, so the guess cries coarsening over a run
+    // that coarsened nothing — and the real thing, which overstates the answer,
+    // would read the same as the false alarm.
+    if (out.setupsBinned)
+        note += fmt("%llu of %llu raster(s) COARSENED, up to %u declared cells into one per "
+                    "edge, to fit %llu cells each — coarse cells clear less space, so the "
+                    "unobserved volume below is OVERSTATED; raise the image budget; ",
+                    (unsigned long long)out.setupsBinned,
+                    (unsigned long long)out.setupsUsed, out.worstBinStep,
                     (unsigned long long)perImage);
     if (out.scansSkipped)
         note += fmt("%llu scan(s) skipped for want of a sampling grid; ",

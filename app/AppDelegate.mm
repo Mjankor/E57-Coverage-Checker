@@ -39,6 +39,23 @@
 
 namespace {
 
+// Above this share of voxels, a carver's disagreement with the CPU is a fault
+// rather than arithmetic.
+//
+// The Metal kernel computes in float and the CPU in double, and the two
+// genuinely differ for a voxel whose direction lands within a rounding error of
+// a raster cell boundary — the bin index runs to tens of thousands, where float
+// resolves about a four-hundredth of a bin. Replaying both paths over a real
+// 5.6 M point scan put 0.014% of voxels in a different cell, and every single
+// disagreement sat within 0.006 of a bin of an edge. Metal has no float64, so
+// that floor cannot be lowered.
+//
+// 0.1% is five times the measured ceiling and two orders below what a real
+// kernel fault produces — a wrong index or a wrong transform misses by whole
+// cells, not by a thousandth of one. Wide enough not to cry wolf, narrow enough
+// that nothing real hides under it.
+constexpr double kCarverFloatNoise = 0.001;
+
 NSString *ns(const std::string &s) { return [NSString stringWithUTF8String:s.c_str()]; }
 
 std::string humanCount(uint64_t n) {
@@ -136,6 +153,7 @@ const char *kindLabel(check::Kind k) {
     CGFloat              _sidebarWidth;
     NSButton            *_cloudToggle;
     NSButton            *_voxelToggle;
+    NSMutableArray<NSMenuItem *> *_shadingItems;
     NSWindow            *_reportWindow;
     NSTextView          *_reportText;
 
@@ -379,29 +397,75 @@ const char *kindLabel(check::Kind k) {
     for (auto &d : defs) {
         NSButton *b = [[NSButton alloc] initWithFrame:NSZeroRect];
         b.title       = d.title;
-        b.bezelStyle  = NSBezelStyleRounded;
         [b setButtonType:NSButtonTypePushOnPushOff];
         b.state       = NSControlStateValueOn;
         b.font        = [NSFont systemFontOfSize:11];
         b.target      = self;
         b.action      = d.action;
+        // The chip is drawn here rather than by the system bezel.
+        //
+        // A stock push-on/push-off button shows its state by filling when on and
+        // showing a plain bezel when off — and the plain bezel in dark mode is a
+        // grey a shade or two off this view's background, which is a fixed
+        // (0.09, 0.10, 0.12) whatever the system appearance is. Switching a layer
+        // off therefore made its own button disappear, which is precisely the
+        // moment you need it: the thing you have just hidden is the thing you
+        // want to bring back.
+        //
+        // So both states are painted explicitly, against a background that is
+        // known and does not follow the system: filled when on, a translucent
+        // chip with a light rim when off, and legible either way.
+        b.bordered    = NO;
         // MTKView forces the window layer-backed, so a sibling drawn over it
         // needs its own layer or it renders underneath.
         b.wantsLayer  = YES;
+        b.layer.cornerRadius = 6;
+        b.layer.borderWidth  = 1;
         [_rightPane addSubview:b];
         *d.slot = b;
+        [self styleLayerToggle:b];
     }
 }
 
+// The two states of a layer toggle, painted for a dark viewport.
+- (void)styleLayerToggle:(NSButton *)b {
+    const BOOL on = (b.state == NSControlStateValueOn);
+    // Colours in the view's own space rather than semantic ones: the background
+    // they sit on is fixed, so a palette that follows the system appearance
+    // would drift away from it in one direction or the other.
+    NSColor *fill   = on ? [NSColor colorWithSRGBRed:0.22 green:0.47 blue:0.86 alpha:0.92]
+                         : [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.10];
+    NSColor *border = on ? [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.55]
+                         : [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.38];
+    NSColor *text   = on ? [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:1.00]
+                         : [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.82];
+    b.layer.backgroundColor = fill.CGColor;
+    b.layer.borderColor     = border.CGColor;
+    // An attributed title, because a borderless button's plain `title` is drawn
+    // in the system's label colour and would go dark along with the appearance.
+    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+    para.alignment = NSTextAlignmentCenter;
+    b.attributedTitle = [[NSAttributedString alloc]
+        initWithString:b.title
+            attributes:@{NSForegroundColorAttributeName: text,
+                         NSFontAttributeName: [NSFont systemFontOfSize:11],
+                         NSParagraphStyleAttributeName: para}];
+}
+
 - (void)toggleClouds:(id)sender {
-    _cloudView.showClouds = (((NSButton *)sender).state == NSControlStateValueOn);
+    NSButton *b = (NSButton *)sender;
+    _cloudView.showClouds = (b.state == NSControlStateValueOn);
+    [self styleLayerToggle:b];
 }
 
 - (void)toggleVoxels:(id)sender {
-    _cloudView.showVoxels = (((NSButton *)sender).state == NSControlStateValueOn);
+    NSButton *b = (NSButton *)sender;
+    _cloudView.showVoxels = (b.state == NSControlStateValueOn);
+    [self styleLayerToggle:b];
 }
 
 - (void)buildMenu {
+    _shadingItems = [NSMutableArray array];
     NSMenu *bar = [[NSMenu alloc] init];
 
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
@@ -428,8 +492,24 @@ const char *kindLabel(check::Kind k) {
     [procMenu addItemWithTitle:@"Run Visibility Filter…"
                         action:@selector(runVisibilityFilter:) keyEquivalent:@"r"];
     [procMenu addItemWithTitle:@"Scan Report…" action:@selector(scanReport:) keyEquivalent:@"i"];
+    [procMenu addItemWithTitle:@"Evidence Self-Test…" action:@selector(selfTest:) keyEquivalent:@"t"];
     [procMenu addItem:[NSMenuItem separatorItem]];
-    [procMenu addItemWithTitle:@"Use the GPU" action:@selector(toggleGpu:) keyEquivalent:@""];
+    // On by default. The carver is a "try" — every failure it can have comes
+    // back as a declined tile that the CPU then carves — so the worst a machine
+    // without a usable one suffers is the speed it would have had anyway. The
+    // item is left unticked and disabled when there is genuinely no device, so
+    // the menu says which case this machine is in rather than offering a switch
+    // that does nothing.
+    NSMenuItem *gpuItem =
+        [procMenu addItemWithTitle:@"Use the GPU" action:@selector(toggleGpu:)
+                     keyEquivalent:@""];
+    _useGpu = ([CarveGpu shared] != nil);
+    gpuItem.state = _useGpu ? NSControlStateValueOn : NSControlStateValueOff;
+    // Greyed out when there is no device — see validateMenuItem:, which is what
+    // actually decides. Setting `enabled` here would not survive: menus
+    // autoenable, and an item whose target implements its action is switched
+    // back on before it is drawn.
+    if (!_useGpu) gpuItem.toolTip = [CarveGpu unavailableReason];
     [procMenu addItemWithTitle:@"Verify the GPU against the CPU"
                         action:@selector(toggleVerifyGpu:) keyEquivalent:@""];
     [procMenu addItem:[NSMenuItem separatorItem]];
@@ -445,6 +525,28 @@ const char *kindLabel(check::Kind k) {
     [viewMenu addItemWithTitle:@"Original Clouds"
                         action:@selector(toggleCloudsMenu:) keyEquivalent:@"1"];
     [viewMenu addItemWithTitle:@"Voxels" action:@selector(toggleVoxelsMenu:) keyEquivalent:@"2"];
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    // Shading. Here rather than in the run sheet because it is a way of looking
+    // at the answer, not a parameter of computing it: the outward normals are
+    // kept with the result, so switching costs a recolour rather than a carve.
+    // Radio items, since the four are one choice.
+    {
+        struct { NSString *title; uint8_t mode; } modes[] = {
+            {@"Shading: Lit and Height Ramp", 3},
+            {@"Shading: Lit",                 1},
+            {@"Shading: Height Ramp",         2},
+            {@"Shading: Flat",                0},
+        };
+        for (auto &m : modes) {
+            NSMenuItem *it = [viewMenu addItemWithTitle:m.title
+                                                 action:@selector(chooseShading:)
+                                          keyEquivalent:@""];
+            it.tag   = m.mode;
+            it.state = (m.mode == _visOptions.shading) ? NSControlStateValueOn
+                                                       : NSControlStateValueOff;
+            [_shadingItems addObject:it];
+        }
+    }
     [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"Larger Points" action:@selector(biggerPoints:) keyEquivalent:@"]"];
     [viewMenu addItemWithTitle:@"Smaller Points" action:@selector(smallerPoints:) keyEquivalent:@"["];
@@ -522,6 +624,7 @@ const char *kindLabel(check::Kind k) {
     const BOOL on = !_cloudView.showClouds;
     _cloudView.showClouds = on;
     _cloudToggle.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    [self styleLayerToggle:_cloudToggle];
 }
 
 - (void)toggleVoxelsMenu:(id)sender {
@@ -529,6 +632,7 @@ const char *kindLabel(check::Kind k) {
     const BOOL on = !_cloudView.showVoxels;
     _cloudView.showVoxels = on;
     _voxelToggle.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    [self styleLayerToggle:_voxelToggle];
 }
 
 // The scan report, in the app. Everything `e57cov info` prints — the raster,
@@ -588,6 +692,64 @@ const char *kindLabel(check::Kind k) {
             me->_status.stringValue = wrote
                 ? [NSString stringWithFormat:@"Scan report written to %@", file]
                 : @"Scan report ready (could not write a file)";
+        });
+      }
+    });
+}
+
+// The same window, for the self-test: the evidence primitive asked about each
+// scan's own cells, where the right answer is not in doubt, plus whether the
+// setups are where the files say they are.
+//
+// Here rather than only in the CLI for the same reason the scan report is: the
+// command line tool is not what gets run, and a diagnostic nobody can reach is
+// not a diagnostic.
+- (void)selfTest:(id)sender {
+    (void)sender;
+    if (_busy) return;
+    if (_paths.empty()) {
+        _status.stringValue = @"Open some E57 scans first.";
+        return;
+    }
+
+    _busy = YES;
+    _spinner.hidden = NO;
+    [_spinner startAnimation:nil];
+    _status.stringValue = @"Testing the evidence path…";
+
+    report::Options ro;
+    ro.maxRange         = _visOptions.maxRange;
+    ro.blindCone        = _visOptions.blindCone;
+    ro.noReturnRadius   = _visOptions.skyRadius;
+    ro.noReturnFraction = _visOptions.skyFraction;
+
+    auto paths = std::make_shared<std::vector<std::string>>(_paths);
+    __weak AppDelegate *weakSelf = self;
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      @autoreleasepool {
+        auto text = std::make_shared<std::string>();
+        report::selfTest(*paths, ro, *text);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *me = weakSelf;
+            if (!me) return;
+            me->_busy = NO;
+            [me->_spinner stopAnimation:nil];
+            me->_spinner.hidden = YES;
+
+            NSString *body = [NSString stringWithUTF8String:text->c_str()] ?: @"(unreadable)";
+            NSString *dir = NSSearchPathForDirectoriesInDomains(
+                NSDesktopDirectory, NSUserDomainMask, YES).firstObject
+                ?: NSTemporaryDirectory();
+            NSString *file = [dir stringByAppendingPathComponent:@"e57cov-self-test.txt"];
+            NSError *werr = nil;
+            const BOOL wrote = [body writeToFile:file atomically:YES
+                                        encoding:NSUTF8StringEncoding error:&werr];
+            [me showReport:body savedTo:(wrote ? file : nil)];
+            me->_status.stringValue = wrote
+                ? [NSString stringWithFormat:@"Self-test written to %@", file]
+                : @"Self-test ready (could not write a file)";
         });
       }
     });
@@ -666,6 +828,13 @@ const char *kindLabel(check::Kind k) {
     _status.stringValue = @"Voxels cleared.";
 }
 
+// A switch with nothing to switch to should not look available. This is the
+// only item that can be in that position, so everything else validates through.
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(toggleGpu:)) return [CarveGpu shared] != nil;
+    return YES;
+}
+
 - (void)toggleGpu:(id)sender {
     _useGpu = !_useGpu;
     ((NSMenuItem *)sender).state = _useGpu ? NSControlStateValueOn : NSControlStateValueOff;
@@ -678,6 +847,18 @@ const char *kindLabel(check::Kind k) {
     }
     _status.stringValue = _useGpu ? @"Visibility filter will run on the GPU."
                                   : @"Visibility filter will run on the CPU.";
+}
+
+// One of four, so the four keep each other in step.
+- (void)chooseShading:(id)sender {
+    NSMenuItem *picked = (NSMenuItem *)sender;
+    _visOptions.shading = uint8_t(picked.tag);
+    for (NSMenuItem *it in _shadingItems)
+        it.state = (it == picked) ? NSControlStateValueOn : NSControlStateValueOff;
+    // Applies to what is already on screen. A carve is minutes and a recolour is
+    // a pass over the drawn voxels, so this is not a setting that waits for the
+    // next run to mean anything.
+    [_cloudView setVoxelShading:_visOptions.shading];
 }
 
 - (void)toggleVerifyGpu:(id)sender {
@@ -934,6 +1115,9 @@ const char *kindLabel(check::Kind k) {
     solid.font = [NSFont systemFontOfSize:11];
     solid.state = _visOptions.solid ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:solid];
+    // Shading is not here. It is in the View menu, because it changes how the
+    // answer is drawn rather than what the answer is, and it applies to a
+    // finished carve without running another one.
 
     NSAlert *a = [[NSAlert alloc] init];
     a.messageText = @"Run visibility filter";
@@ -1056,21 +1240,109 @@ const char *kindLabel(check::Kind k) {
         // nothing; one mounted upside down is worth knowing about. Neither is
         // visible from the totals, and both change how the picture reads.
         NSString *warn = @"";
-        if (result->setupsWithoutMapping)
+        if (result->setupsWithoutMapping) {
             warn = [warn stringByAppendingFormat:
                     @"   ·   ⚠︎ %llu setup(s) contribute NOTHING (mapping refused)",
                     (unsigned long long)result->setupsWithoutMapping];
+            // With the reason. A run that produces no voxels at all and says only
+            // "refused" sends you off to run something else to find out why.
+            if (!result->mappingRefusedWhy.empty())
+                warn = [warn stringByAppendingFormat:@" — %s",
+                        result->mappingRefusedWhy.c_str()];
+        }
         if (result->setupsInverted)
             warn = [warn stringByAppendingFormat:@"   ·   %llu inverted",
                     (unsigned long long)result->setupsInverted];
+        // A corpus too large for the image budget gets its rasters coarsened, and
+        // coarse cells clear less space — so the unobserved volume on this line is
+        // overstated by however much. That is a different answer, not a blurrier
+        // one, and it has to be on the line the number is on.
+        if (result->setupsBinned)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   ⚠︎ %llu raster(s) COARSENED up to %ux to fit memory — "
+                     "unobserved volume is overstated; raise the image budget",
+                    (unsigned long long)result->setupsBinned, result->worstBinStep];
+        // Which end of the raster the blind cone is at decides whether a band of
+        // empty cells clears space to the rated range or establishes nothing, and
+        // nothing else on this line changes the picture as much. Undecided leaves
+        // both ends believed, which carves a cone through the ground under every
+        // setup — a warning, not a footnote.
+        if (!result->coneVerdict.decided)
+            warn = [warn stringByAppendingString:
+                    @"   ·   ⚠︎ blind cone NOT identified — empty cells at both ends "
+                     "of the raster are believed"];
+        else
+            warn = [warn stringByAppendingFormat:@"   ·   cone at the %@ of the raster",
+                    result->coneVerdict.atFirstRow ? @"start" : @"end"];
+
+        // Which path actually ran, and — when asked to check it — what the check
+        // found. A verification that prints nothing is indistinguishable from one
+        // that never ran, so it says so either way, pass or fail. Same for a
+        // carver that declined every tile: the run is still correct, because the
+        // CPU caught them, but "CPU" alone would hide that the GPU was asked and
+        // said no.
+        NSString *carver = @"CPU";
+        if (opt.carver) {
+            if (result->carverTiles == 0)
+                carver = [NSString stringWithFormat:
+                          @"⚠︎ the GPU declined all %llu tiles — the CPU carved them",
+                          (unsigned long long)result->carverRefused];
+            else if (result->carverRefused)
+                carver = [NSString stringWithFormat:@"%llu tiles on the GPU, %llu on the CPU",
+                          (unsigned long long)result->carverTiles,
+                          (unsigned long long)result->carverRefused];
+            else
+                carver = [NSString stringWithFormat:@"%llu tiles on the GPU",
+                          (unsigned long long)result->carverTiles];
+            if (opt.verifyCarver) {
+                const double frac = result->carverVoxelsCompared
+                                  ? double(result->carverDisagreements) /
+                                    double(result->carverVoxelsCompared)
+                                  : 0.0;
+                // What a disagreement rate means, which a bare "FAILED" does not
+                // say. The kernel works in float and the CPU in double, and the
+                // raster cell a voxel lands in is chosen by a bin index of tens
+                // of thousands — which float resolves to about a
+                // four-hundredth of a bin. A voxel that close to a cell edge can
+                // land either side of it, and then reads a neighbouring cell
+                // holding a different distance.
+                //
+                // That is not a fault and cannot be fixed in float: measured by
+                // replaying both paths over a real scan, it puts 0.014% of voxels
+                // in a different cell, and every one of them sits within 0.006 of
+                // a bin of an edge. A kernel that is actually wrong — a bad
+                // index, a bad transform — misses by whole cells and shows up
+                // percent-wide. So the two are separated here rather than both
+                // being called failure.
+                if (result->carverVoxelsCompared == 0)
+                    carver = [carver stringByAppendingString:
+                              @", verified against the CPU: ⚠︎ NOTHING WAS COMPARED"];
+                else if (result->carverDisagreements == 0)
+                    carver = [carver stringByAppendingFormat:
+                              @", verified: %.1f M voxels against the CPU, every one identical",
+                              double(result->carverVoxelsCompared) / 1e6];
+                else if (frac <= kCarverFloatNoise)
+                    carver = [carver stringByAppendingFormat:
+                              @", verified: %llu of %.1f M voxels differ (%.4f%%, %.2f m³) — "
+                               "float32 rounding at raster cell edges, not a fault",
+                              (unsigned long long)result->carverDisagreements,
+                              double(result->carverVoxelsCompared) / 1e6, 100.0 * frac,
+                              double(result->carverDisagreements) * opt.voxelSize *
+                                  opt.voxelSize * opt.voxelSize];
+                else
+                    carver = [carver stringByAppendingFormat:
+                              @", ⚠︎ VERIFICATION FAILED: %llu of %.1f M voxels differ (%.4f%%) "
+                               "— far more than float32 rounding explains",
+                              (unsigned long long)result->carverDisagreements,
+                              double(result->carverVoxelsCompared) / 1e6, 100.0 * frac];
+            }
+        }
 
         NSString *line = [NSString stringWithFormat:
             @"%llu setups   ·   %.0f m³ unobserved (%.1f%% of what was in range)   ·   "
             @"%zu voxels drawn   ·   %@%@%@%@",
             (unsigned long long)result->setupsUsed, vol, pct, result->voxels.size(),
-            result->carverTiles ? [NSString stringWithFormat:@"%llu tiles on the GPU",
-                                   (unsigned long long)result->carverTiles]
-                                : @"CPU",
+            carver,
             result->partial ? @"   ·   PARTIAL RUN" : @"", warn, note];
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -1078,6 +1350,7 @@ const char *kindLabel(check::Kind k) {
             if (!me) return;
             [me->_cloudView setVoxelResult:*result];
             me->_voxelToggle.state = NSControlStateValueOn;
+            [me styleLayerToggle:me->_voxelToggle];
             me->_cloudView.showVoxels = YES;
             me->_status.stringValue = line;
             me->_progress.stringValue = @"";

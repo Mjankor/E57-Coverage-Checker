@@ -28,9 +28,12 @@ struct GpuSetup {
     float tOffX, tOffY, tOffZ;
     // Setup position in the tile's local frame.
     float originX, originY, originZ;
-    float az0, dAzPerCol, el0, dElPerRow;
+    // The reverse index's geometry: see rimg::Mapping. The tables themselves come
+    // in as their own buffers, beside the cells.
+    float elLo, elBin, azLo, azBin;
     float maxRange, surfaceMargin;
     uint32_t rows, cols;
+    uint32_t nElBins, nAzBins;
     uint32_t mapValid;
     uint32_t earlyOut;      // 0 none, 1 saturated, 2 any evidence
 };
@@ -49,8 +52,10 @@ struct GpuTile {
 // a device buffer of three-byte records cannot be indexed without unaligned
 // loads, and on the GPU that costs more than the extra 13 MB.
 struct ImageBuffer {
-    id<MTLBuffer> buffer;
-    uint64_t      bytes = 0;
+    id<MTLBuffer> buffer;     // cells
+    id<MTLBuffer> rowOfEl;    // the mapping's reverse index, uploaded with it
+    id<MTLBuffer> colOfAz;
+    uint64_t      bytes = 0;  // all three, so eviction accounts for what it frees
     uint64_t      lastUse = 0;
 };
 
@@ -82,7 +87,6 @@ static NSString *const kCarveShader = @R"METAL(
 #include <metal_stdlib>
 using namespace metal;
 
-constant float kPi  = 3.14159265358979323846f;
 constant float kTau = 6.28318530717958648f;
 
 constant uchar kVisible   = 1;
@@ -95,9 +99,10 @@ struct GpuSetup {
     float R2x, R2y, R2z;
     float tOffX, tOffY, tOffZ;
     float originX, originY, originZ;
-    float az0, dAzPerCol, el0, dElPerRow;
+    float elLo, elBin, azLo, azBin;
     float maxRange, surfaceMargin;
     uint  rows, cols;
+    uint  nElBins, nAzBins;
     uint  mapValid;
     uint  earlyOut;
 };
@@ -124,6 +129,8 @@ kernel void carveVoxels(device uchar             *state   [[buffer(0)]],
                         constant GpuTile         &t       [[buffer(2)]],
                         device const uint        *cells   [[buffer(3)]],
                         device atomic_uint       *tests   [[buffer(4)]],
+                        device const int         *rowOfEl [[buffer(5)]],
+                        device const int         *colOfAz [[buffer(6)]],
                         uint3                     gid     [[thread_position_in_grid]],
                         uint                      lane    [[thread_index_in_simdgroup]])
 {
@@ -161,24 +168,34 @@ kernel void carveVoxels(device uchar             *state   [[buffer(0)]],
         float r = sqrt(dot(q, q));
 
         if (r <= s.maxRange && r >= 1e-9f && s.mapValid != 0u &&
-            abs(s.dElPerRow) > 1e-12f && abs(s.dAzPerCol) > 1e-12f) {
+            s.elBin > 0.0f && s.azBin > 0.0f) {
             float az = atan2(q.y, q.x);
             if (az < 0.0f) az += kTau;
             float el = asin(clamp(q.z / r, -1.0f, 1.0f));
 
-            int ri = int(rint((el - s.el0) / s.dElPerRow));
-            if (ri >= 0 && ri < int(s.rows)) {
-                // The same bounded unwrap the CPU does. Bounded rather than a
-                // while loop: az is in [0, 2pi) and az0 in (-pi, pi], so the
-                // difference needs at most two steps, and a NaN must not hang a
-                // GPU thread.
-                float dd = az - s.az0;
-                for (int i = 0; i < 4 && dd > kPi; ++i)  dd -= kTau;
-                for (int i = 0; i < 4 && dd <= -kPi; ++i) dd += kTau;
+            // The reverse index, mirroring rimg::Mapping::rowFor and colFor.
+            // Two table reads, no arithmetic inversion — which is the whole point:
+            // the raster these instruments produce is not a line, and a sweep past
+            // a full turn cannot be inverted by folding modulo 2pi at all.
+            //
+            // float is comfortable here in a way the old form was not. The bins are
+            // 1.5e-4 rad wide against float's ~1.2e-7 absolute resolution at these
+            // magnitudes, so quantisation costs a thousandth of a bin.
+            int ri = -1;
+            float fb = (el - s.elLo) / s.elBin;
+            if (fb >= 0.0f && fb < float(s.nElBins)) ri = rowOfEl[uint(fb)];
 
-                int ci = int(rint(dd / s.dAzPerCol)) % int(s.cols);
-                if (ci < 0) ci += int(s.cols);
+            float dd = az - s.azLo;
+            dd -= kTau * floor(dd / kTau);              // onto the turn the bins cover
+            float cb = dd / s.azBin;
+            // Only the top edge can land exactly on nAzBins, so this clamps rather
+            // than rejecting; a NaN fails the comparison and takes bin zero, whose
+            // answer is then gated by the validity test below like any other.
+            uint cbi = (cb >= 0.0f && cb < float(s.nAzBins)) ? uint(cb)
+                                                             : (s.nAzBins - 1u);
+            int ci = colOfAz[cbi];
 
+            if (ri >= 0 && ri < int(s.rows) && ci >= 0 && ci < int(s.cols)) {
                 uint  cell    = cells[uint(ri) * s.cols + uint(ci)];
                 float surface = float(cell & 0xFFFFu) * 0.01f;
                 uint  status  = (cell >> 16) & 0xFFu;
@@ -278,17 +295,24 @@ static NSString *g_unavailable = @"not initialised";
 
 // --- range image upload, with a byte-budgeted LRU ---------------------------
 
-- (id<MTLBuffer>)bufferForImage:(const rimg::RangeImage *)image {
+// The cells and the mapping's reverse index travel together: they are read by the
+// same lookup, and an image resident without its index could not answer a single
+// direction. Budgeted and evicted as one unit for the same reason.
+- (ImageBuffer)buffersForImage:(const rimg::RangeImage *)image {
     auto it = _images.find(image);
     if (it != _images.end()) {
         it->second.lastUse = ++_clock;
-        return it->second.buffer;
+        return it->second;
     }
 
     const size_t count = image->cells.size();
-    if (count == 0) return nil;
-    const uint64_t bytes = uint64_t(count) * 4;
-    if (bytes > _device.maxBufferLength) return nil;
+    if (count == 0) return ImageBuffer{};
+    const size_t nrow = image->map.rowOfEl.size(), ncol = image->map.colOfAz.size();
+    if (nrow == 0 || ncol == 0) return ImageBuffer{};
+    const uint64_t cellBytes = uint64_t(count) * 4;
+    const uint64_t idxBytes  = uint64_t(nrow + ncol) * sizeof(int32_t);
+    const uint64_t bytes     = cellBytes + idxBytes;
+    if (cellBytes > _device.maxBufferLength) return ImageBuffer{};
 
     // Evict until it fits. Dropping an image is free — it is a copy of data the
     // CPU still holds, and re-uploading it is the only cost.
@@ -305,17 +329,26 @@ static NSString *g_unavailable = @"not initialised";
         packed[i] = uint32_t(image->cells[i].rangeCm) | (uint32_t(image->cells[i].status) << 16);
 
     id<MTLBuffer> buf = [_device newBufferWithBytes:packed.data()
-                                             length:size_t(bytes)
+                                             length:size_t(cellBytes)
                                             options:MTLResourceStorageModeShared];
-    if (!buf) return nil;
+    if (!buf) return ImageBuffer{};
+    id<MTLBuffer> rbuf = [_device newBufferWithBytes:image->map.rowOfEl.data()
+                                              length:nrow * sizeof(int32_t)
+                                             options:MTLResourceStorageModeShared];
+    id<MTLBuffer> cbuf = [_device newBufferWithBytes:image->map.colOfAz.data()
+                                              length:ncol * sizeof(int32_t)
+                                             options:MTLResourceStorageModeShared];
+    if (!rbuf || !cbuf) return ImageBuffer{};
 
     ImageBuffer rec;
     rec.buffer  = buf;
+    rec.rowOfEl = rbuf;
+    rec.colOfAz = cbuf;
     rec.bytes   = bytes;
     rec.lastUse = ++_clock;
     _images[image] = rec;
     _residentBytes += bytes;
-    return buf;
+    return rec;
 }
 
 // --- the carve --------------------------------------------------------------
@@ -425,36 +458,51 @@ static NSString *g_unavailable = @"not initialised";
 
     for (size_t si : reach) {
         const carve::SetupView &s = setups[si];
-        id<MTLBuffer> cells = [self bufferForImage:s.image];
-        if (!cells) { return NO; }         // nothing has been committed yet
+        const ImageBuffer img = [self buffersForImage:s.image];
+        if (!img.buffer || !img.rowOfEl || !img.colOfAz) { return NO; }   // nothing committed yet
 
         const viewer::Rigid &R = s.worldToScanner;
+        const rimg::RangeImage &im = *s.image;
+        // The instrument's own frame folded straight into the rotation, so the
+        // kernel needs no knowledge of it and costs nothing for it. A tripod is
+        // never quite level, and the image's cells are built about the axis it
+        // actually had — see rimg::RangeImage::tilt.
+        double M[9];
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                M[3 * r + c] = im.tilt[3 * r + 0] * R.R[0 + c] +
+                               im.tilt[3 * r + 1] * R.R[3 + c] +
+                               im.tilt[3 * r + 2] * R.R[6 + c];
         GpuSetup gs{};
-        gs.R0x = float(R.R[0]); gs.R0y = float(R.R[1]); gs.R0z = float(R.R[2]);
-        gs.R1x = float(R.R[3]); gs.R1y = float(R.R[4]); gs.R1z = float(R.R[5]);
-        gs.R2x = float(R.R[6]); gs.R2y = float(R.R[7]); gs.R2z = float(R.R[8]);
-        // R * tileOrigin + t, in double, then cast: the tile origin can be at
-        // UTM magnitudes and this is the one product that must not be formed in
+        gs.R0x = float(M[0]); gs.R0y = float(M[1]); gs.R0z = float(M[2]);
+        gs.R1x = float(M[3]); gs.R1y = float(M[4]); gs.R1z = float(M[5]);
+        gs.R2x = float(M[6]); gs.R2y = float(M[7]); gs.R2z = float(M[8]);
+        // M * tileOrigin + tilt * t, in double, then cast: the tile origin can be
+        // at UTM magnitudes and this is the one product that must not be formed in
         // float.
         for (int r = 0; r < 3; ++r) {
-            const double v = R.R[3 * r + 0] * out.origin[0] +
-                             R.R[3 * r + 1] * out.origin[1] +
-                             R.R[3 * r + 2] * out.origin[2] + R.t[r];
+            const double tr = im.tilt[3 * r + 0] * R.t[0] +
+                              im.tilt[3 * r + 1] * R.t[1] +
+                              im.tilt[3 * r + 2] * R.t[2];
+            const double v = M[3 * r + 0] * out.origin[0] +
+                             M[3 * r + 1] * out.origin[1] +
+                             M[3 * r + 2] * out.origin[2] + tr;
             (&gs.tOffX)[r] = float(v);
         }
         gs.originX = float(s.origin[0] - out.origin[0]);
         gs.originY = float(s.origin[1] - out.origin[1]);
         gs.originZ = float(s.origin[2] - out.origin[2]);
 
-        const rimg::RangeImage &im = *s.image;
-        gs.az0           = float(im.map.az0);
-        gs.dAzPerCol     = float(im.map.dAzPerCol);
-        gs.el0           = float(im.map.el0);
-        gs.dElPerRow     = float(im.map.dElPerRow);
+        gs.elLo          = float(im.map.elLo);
+        gs.elBin         = float(im.map.elBin);
+        gs.azLo          = float(im.map.azLo);
+        gs.azBin         = float(im.map.azBin);
         gs.maxRange      = float(p.maxRange);
         gs.surfaceMargin = float(p.surfaceMargin);
         gs.rows          = im.rows;
         gs.cols          = im.cols;
+        gs.nElBins       = uint32_t(im.map.rowOfEl.size());
+        gs.nAzBins       = uint32_t(im.map.colOfAz.size());
         gs.mapValid      = im.map.valid ? 1u : 0u;
         gs.earlyOut      = (p.earlyOut == carve::EarlyOut::Saturated)   ? 1u
                          : (p.earlyOut == carve::EarlyOut::AnyEvidence) ? 2u : 0u;
@@ -465,8 +513,10 @@ static NSString *g_unavailable = @"not initialised";
         [enc setBuffer:_stateBuffer offset:0 atIndex:0];
         [enc setBytes:&gs length:sizeof(gs) atIndex:1];
         [enc setBytes:&gt length:sizeof(gt) atIndex:2];
-        [enc setBuffer:cells offset:0 atIndex:3];
+        [enc setBuffer:img.buffer offset:0 atIndex:3];
         [enc setBuffer:_testsBuffer offset:0 atIndex:4];
+        [enc setBuffer:img.rowOfEl offset:0 atIndex:5];
+        [enc setBuffer:img.colOfAz offset:0 atIndex:6];
         [enc dispatchThreadgroups:grid threadsPerThreadgroup:group];
         [enc endEncoding];
     }

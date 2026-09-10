@@ -19,9 +19,21 @@ whose range sits on the surface margin — and that the count of such voxels is 
 vanishing fraction. A disagreement anywhere else means the replica of the kernel
 has a real bug in it.
 
+The raster here is the one real instruments produce, not a tidy one:
+
+  Azimuth sweeps 364.5 degrees over the columns, so the last few repeat the
+  bearings of the first few. This is what broke the old arithmetic inversion —
+  folding modulo 2pi and then wrapping modulo cols shifted every column past the
+  seam by the excess — and it is the case a replica of a table lookup has to be
+  exercised on, because it is the case the table exists for.
+
+  Elevation carries a full-period sinusoid on its step, ten cells from a
+  straight line, so neither axis is invertible by arithmetic at all.
+
 Usage:  python3 tools/validate_carve_kernel.py [trials]
 """
 
+import bisect
 import math
 import random
 import sys
@@ -39,18 +51,37 @@ VISIBLE, OCCUPIED, REACHABLE = 1, 2, 4
 TAU = 6.28318530717958648
 PI = 3.14159265358979323846
 
+# src/range_image.h: kReverseBinsPerCell.
+BINS_PER_CELL = 8
+
 
 class Raster:
-    """A range image: a uniform raster with a surface distance per cell."""
+    """A range image with a measured (row, col) -> (el, az) mapping.
+
+    Mirrors rimg::indexMapping: the tables are the mapping, and the reverse index
+    stamps each bin with the nearest entry. Both sides of the comparison read the
+    same index — the question is whether float32 lands in the same bin as float64,
+    not whether the index is right, which is tests/test_range_image.cpp's job.
+    """
 
     def __init__(self, rows, cols, rng):
         self.rows, self.cols = rows, cols
-        self.az0 = rng.uniform(-PI, PI)
-        self.d_az = TAU / cols
-        self.el0 = -0.8
-        self.d_el = 1.6 / rows
-        # A surface that varies smoothly, plus a scattering of no-returns, so
-        # both branches of evidenceAt are exercised across a brick.
+
+        # Elevation: a step with a full-period sinusoid on it, monotonic.
+        el_lo, el_step = -0.8, 1.6 / rows
+        el_amp = 10.0 * el_step
+        self.el_by_row = [el_lo + el_step * r + el_amp * math.sin(TAU * r / rows)
+                          for r in range(rows)]
+        # Azimuth: 364.5 degrees, decreasing with column, as the real scans are.
+        az_sweep = 364.5 * PI / 180.0
+        self.d_az = -az_sweep / cols
+        az0 = rng.uniform(-PI, PI)          # drawn once: this is one sweep, not cols of them
+        self.az_by_col = [az0 + self.d_az * c for c in range(cols)]
+
+        self._index()
+
+        # A surface that varies smoothly, plus a scattering of no-returns, so both
+        # branches of evidenceAt are exercised across a brick.
         self.range_cm = []
         self.status = []
         for r in range(rows):
@@ -58,6 +89,54 @@ class Raster:
                 v = 8.0 + 4.0 * math.sin(3.0 * c / cols) + 2.0 * math.cos(5.0 * r / rows)
                 self.range_cm.append(int(v * 100.0 + 0.5))
                 self.status.append(NO_RETURN if rng.random() < 0.15 else HIT)
+
+    def _stamp(self, sorted_pairs, lo, bin_w, tol, nbins):
+        vals = [v for v, _ in sorted_pairs]
+        out = []
+        for b in range(nbins):
+            v = lo + (b + 0.5) * bin_w
+            j = bisect.bisect_right(vals, v) - 1
+            j = max(0, min(j, len(vals) - 1))
+            best = j
+            if j + 1 < len(vals) and abs(vals[j + 1] - v) < abs(vals[j] - v):
+                best = j + 1
+            out.append(sorted_pairs[best][1] if abs(vals[best] - v) <= tol else -1)
+        return out
+
+    def _index(self):
+        def max_step(t):
+            return max(abs(t[i] - t[i - 1]) for i in range(1, len(t)))
+
+        el_step = abs(self.el_by_row[-1] - self.el_by_row[0]) / (self.rows - 1)
+        lo, hi = min(self.el_by_row), max(self.el_by_row)
+        n = (self.rows + 2) * BINS_PER_CELL
+        self.el_lo = lo - el_step
+        self.el_bin = ((hi + el_step) - self.el_lo) / n
+        srt = sorted((self.el_by_row[r], r) for r in range(self.rows))
+        self.row_of_el = self._stamp(
+            srt, self.el_lo, self.el_bin,
+            max(el_step, 0.5 * max_step(self.el_by_row)) + self.el_bin, n)
+        self.n_el_bins = n
+
+        az_step = abs(self.az_by_col[-1] - self.az_by_col[0]) / (self.cols - 1)
+        # One turn's worth of consecutive columns, chosen by index and centred, so
+        # the seam gap stays under one step — see rimg::indexMapping.
+        keep = max(2, min(int(math.floor(TAU / az_step)) + 1, self.cols))
+        c0 = (self.cols - keep) // 2
+        c1 = c0 + keep - 1
+        a0 = min(self.az_by_col[c0], self.az_by_col[c1])
+        a1 = max(self.az_by_col[c0], self.az_by_col[c1])
+        self.az_lo = a0 - 0.5 * max(0.0, TAU - (a1 - a0))
+        n = self.cols * BINS_PER_CELL
+        self.az_bin = TAU / n
+        kept = sorted((self.az_by_col[c], c) for c in range(c0, c1 + 1))
+        kept = ([(kept[-1][0] - TAU, kept[-1][1])] + kept
+                + [(kept[0][0] + TAU, kept[0][1])])
+        self.az_kept = keep
+        self.col_of_az = self._stamp(
+            kept, self.az_lo, self.az_bin,
+            max(az_step, 0.5 * max_step(self.az_by_col)) + self.az_bin, n)
+        self.n_az_bins = n
 
     def cell(self, r, c):
         i = r * self.cols + c
@@ -80,17 +159,27 @@ def evidence_cpu(raster, world_to_scanner, origin, p, max_range, margin):
     if r > max_range or r < 1e-9:
         return 0
 
-    ri = round((el - raster.el0) / raster.d_el)
-    if ri < 0 or ri >= raster.rows:
+    # rimg::Mapping::rowFor
+    fb = (el - raster.el_lo) / raster.el_bin
+    if not fb >= 0.0:
         return 0
-    dd = az - raster.az0
-    while dd > PI:
-        dd -= TAU
-    while dd <= -PI:
-        dd += TAU
-    ci = round(dd / raster.d_az) % raster.cols
+    b = int(fb)
+    if b >= raster.n_el_bins:
+        return 0
+    ri = raster.row_of_el[b]
 
-    cm, st = raster.cell(int(ri), int(ci))
+    # rimg::Mapping::colFor
+    d = az - raster.az_lo
+    d -= TAU * math.floor(d / TAU)
+    cb = int(d / raster.az_bin)
+    if cb >= raster.n_az_bins:
+        cb = raster.n_az_bins - 1
+    ci = raster.col_of_az[cb]
+
+    if ri < 0 or ri >= raster.rows or ci < 0 or ci >= raster.cols:
+        return 0
+
+    cm, st = raster.cell(ri, ci)
     surface = cm * 0.01
     if st == OUTSIDE_FOV:
         return 0
@@ -125,21 +214,22 @@ def evidence_gpu(raster, world_to_scanner, origin, p, max_range, margin):
         az = f32(az + f32(TAU))
     el = f32(math.asin(max(-1.0, min(1.0, f32(z / r)))))
 
-    ri = int(round(f32(f32(el - f32(raster.el0)) / f32(raster.d_el))))
-    if ri < 0 or ri >= raster.rows:
+    el_lo, el_bin = f32(raster.el_lo), f32(raster.el_bin)
+    az_lo, az_bin = f32(raster.az_lo), f32(raster.az_bin)
+
+    ri = -1
+    fb = f32(f32(el - el_lo) / el_bin)
+    if fb >= 0.0 and fb < f32(raster.n_el_bins):
+        ri = raster.row_of_el[int(fb)]
+
+    dd = f32(az - az_lo)
+    dd = f32(dd - f32(f32(TAU) * math.floor(f32(dd / f32(TAU)))))
+    cb = f32(dd / az_bin)
+    cbi = int(cb) if (cb >= 0.0 and cb < f32(raster.n_az_bins)) else raster.n_az_bins - 1
+    ci = raster.col_of_az[cbi]
+
+    if ri < 0 or ri >= raster.rows or ci < 0 or ci >= raster.cols:
         return 0
-    dd = f32(az - f32(raster.az0))
-    for _ in range(4):
-        if dd <= f32(PI):
-            break
-        dd = f32(dd - f32(TAU))
-    for _ in range(4):
-        if dd > -f32(PI):
-            break
-        dd = f32(dd + f32(TAU))
-    ci = int(round(f32(dd / f32(raster.d_az)))) % raster.cols
-    if ci < 0:
-        ci += raster.cols
 
     cm, st = raster.cell(ri, ci)
     surface = f32(cm * f32(0.01))
@@ -157,9 +247,11 @@ def evidence_gpu(raster, world_to_scanner, origin, p, max_range, margin):
 def near_a_boundary(raster, world_to_scanner, p, max_range, margin):
     """Is this voxel sitting on a decision edge, where a difference is expected?
 
-    Two kinds of edge: the projection landing within a small fraction of a cell
-    of a cell boundary, and the range sitting within a hair of the surface plus
-    or minus the margin. A disagreement anywhere else is a bug.
+    Three kinds of edge: the range sitting within a hair of the surface plus or
+    minus the margin or of the rated range, the projection landing within a
+    whisker of a reverse-index bin boundary, and the projection landing near the
+    top or bottom of the raster where a row either resolves or does not. A
+    disagreement anywhere else is a bug.
     """
     R, t = world_to_scanner
     x = R[0] * p[0] + R[1] * p[1] + R[2] * p[2] + t[0]
@@ -176,18 +268,23 @@ def near_a_boundary(raster, world_to_scanner, p, max_range, margin):
         az += TAU
     el = math.asin(max(-1.0, min(1.0, z / r)))
 
-    # float32 gives ~1e-7 relative precision; a cell is d_el / d_az wide. Allow
-    # a thousand times the expected error as "on the edge".
-    rf = (el - raster.el0) / raster.d_el
-    cf = ((az - raster.az0 + PI) % TAU - PI) / raster.d_az
-    for v in (rf, cf):
-        if abs(v - math.floor(v) - 0.5) < 1e-3:
+    # float32 gives ~1e-7 relative precision. A bin is el_bin / az_bin wide, so
+    # allow a thousand times the expected error as "on the edge".
+    fb = (el - raster.el_lo) / raster.el_bin
+    d = az - raster.az_lo
+    d -= TAU * math.floor(d / TAU)
+    cb = d / raster.az_bin
+    for v in (fb, cb):
+        if abs(v - math.floor(v)) < 1e-3 or abs(v - math.floor(v) - 1.0) < 1e-3:
             return True
-    if rf < 0.5 or rf > raster.rows - 0.5:
+    if fb < 1.0 or fb > raster.n_el_bins - 1.0:
         return True
 
-    ri = int(round(rf)) % raster.rows
-    ci = int(round(cf)) % raster.cols
+    b = max(0, min(int(fb), raster.n_el_bins - 1))
+    ri = raster.row_of_el[b]
+    ci = raster.col_of_az[max(0, min(int(cb), raster.n_az_bins - 1))]
+    if ri < 0 or ci < 0:
+        return True
     cm, _ = raster.cell(ri, ci)
     surface = cm * 0.01
     for edge in (surface - margin, surface + margin, surface):
@@ -216,6 +313,21 @@ def main():
          -(R[6] * origin[0] + R[7] * origin[1] + R[8] * origin[2])]
 
     max_range, margin = 20.0, 0.5 * 0.05 * math.sqrt(3.0)
+
+    # The raster the replica is exercised on is the awkward one, so say so: a
+    # report that did not mention a 364.5 degree sweep would let the next reader
+    # assume it had been checked on a tidy one.
+    print(f"raster                 : {raster.rows} x {raster.cols}, "
+          f"azimuth sweep {abs(raster.d_az) * raster.cols * 180.0 / PI:.1f} deg "
+          f"({raster.n_el_bins} el bins, {raster.n_az_bins} az bins)")
+    indexed = len({v for v in raster.col_of_az if v >= 0})
+    print(f"  columns indexed      : {indexed} of {raster.cols}, one turn's worth "
+          f"being {raster.az_kept} — the rest repeat bearings already covered")
+    # Every column in the kept window has to own some bins, or a cell of the raster
+    # is unreachable and the replica is not exercising what it claims to.
+    if indexed != raster.az_kept:
+        print("  *** columns in the kept window are missing from the index")
+        return 1
 
     disagree = 0
     disagree_off_boundary = []

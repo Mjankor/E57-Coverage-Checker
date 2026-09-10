@@ -73,6 +73,15 @@ struct Scan {
     // with no record is a ray that came back empty.
     bool                             hasIndexBounds = false;
     long long                        rowMin = 0, rowMax = 0, colMin = 0, colMax = 0;
+    // indexBounds/returnMinimum and returnMaximum: how many returns one fired
+    // ray produced. Written only when returnMax > returnMin or this is set, so
+    // every existing fixture keeps emitting exactly the XML it emitted before.
+    bool                             hasReturnBounds = false;
+    long long                        returnMin = 0, returnMax = 0;
+    // pointGroupingSchemes/groupingByLine/idElementName: the producer naming
+    // which field indexes a scan line. Empty writes no pointGroupingSchemes.
+    std::string                      groupingIdElement;
+    long long                        groupCount = 0;
     double                           q[4] = {1, 0, 0, 0};
     double                           t[3] = {0, 0, 0};
     std::vector<Field>               fields;
@@ -241,15 +250,40 @@ inline bool write(const std::string& path,
             "   <name type=\"String\"><![CDATA[%s]]></name>\n", i, s.name.c_str());
         xml += buf;
 
-        if (s.hasIndexBounds) {
+        if (s.hasIndexBounds || s.hasReturnBounds) {
+            xml += "   <indexBounds type=\"Structure\">\n";
+            if (s.hasIndexBounds) {
+                std::snprintf(buf, sizeof(buf),
+                    "    <rowMinimum type=\"Integer\">%lld</rowMinimum>\n"
+                    "    <rowMaximum type=\"Integer\">%lld</rowMaximum>\n"
+                    "    <columnMinimum type=\"Integer\">%lld</columnMinimum>\n"
+                    "    <columnMaximum type=\"Integer\">%lld</columnMaximum>\n",
+                    s.rowMin, s.rowMax, s.colMin, s.colMax);
+                xml += buf;
+            }
+            if (s.hasReturnBounds) {
+                std::snprintf(buf, sizeof(buf),
+                    "    <returnMinimum type=\"Integer\">%lld</returnMinimum>\n"
+                    "    <returnMaximum type=\"Integer\">%lld</returnMaximum>\n",
+                    s.returnMin, s.returnMax);
+                xml += buf;
+            }
+            xml += "   </indexBounds>\n";
+        }
+
+        // groupingByLine. The groups vector itself is not written: nothing reads
+        // it, and a CompressedVector with no backing data would be a lie in the
+        // file. The recordCount attribute is what carries the line count.
+        if (!s.groupingIdElement.empty()) {
             std::snprintf(buf, sizeof(buf),
-                "   <indexBounds type=\"Structure\">\n"
-                "    <rowMinimum type=\"Integer\">%lld</rowMinimum>\n"
-                "    <rowMaximum type=\"Integer\">%lld</rowMaximum>\n"
-                "    <columnMinimum type=\"Integer\">%lld</columnMinimum>\n"
-                "    <columnMaximum type=\"Integer\">%lld</columnMaximum>\n"
-                "   </indexBounds>\n",
-                s.rowMin, s.rowMax, s.colMin, s.colMax);
+                "   <pointGroupingSchemes type=\"Structure\">\n"
+                "    <groupingByLine type=\"Structure\">\n"
+                "     <idElementName type=\"String\">%s</idElementName>\n"
+                "     <groups type=\"CompressedVector\" recordCount=\"%lld\" "
+                "fileOffset=\"0\"/>\n"
+                "    </groupingByLine>\n"
+                "   </pointGroupingSchemes>\n",
+                s.groupingIdElement.c_str(), s.groupCount);
             xml += buf;
         }
 

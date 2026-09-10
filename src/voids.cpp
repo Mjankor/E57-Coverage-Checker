@@ -23,18 +23,26 @@ struct Span {
 
 } // namespace
 
-bool touchesObserved(const Grid& g, uint32_t x, uint32_t y, uint32_t z) {
+uint8_t observedFaces(const Grid& g, uint32_t x, uint32_t y, uint32_t z) {
+    // Same order as vis::kFaceDirs, because the shading reads these bits as
+    // directions and a different order there would light the wrong faces.
     const int32_t d[6][3] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
-    for (const auto& o : d) {
-        const int64_t nx = int64_t(x) + o[0];
-        const int64_t ny = int64_t(y) + o[1];
-        const int64_t nz = int64_t(z) + o[2];
+    uint8_t mask = 0;
+    for (int i = 0; i < 6; ++i) {
+        const int64_t nx = int64_t(x) + d[i][0];
+        const int64_t ny = int64_t(y) + d[i][1];
+        const int64_t nz = int64_t(z) + d[i][2];
         if (nx < 0 || ny < 0 || nz < 0 ||
             nx >= int64_t(g.dim[0]) || ny >= int64_t(g.dim[1]) || nz >= int64_t(g.dim[2]))
             continue;
-        if (observed(g.state[g.index(uint32_t(nx), uint32_t(ny), uint32_t(nz))])) return true;
+        if (observed(g.state[g.index(uint32_t(nx), uint32_t(ny), uint32_t(nz))]))
+            mask |= uint8_t(1u << i);
     }
-    return false;
+    return mask;
+}
+
+bool touchesObserved(const Grid& g, uint32_t x, uint32_t y, uint32_t z) {
+    return observedFaces(g, x, y, z) != 0;
 }
 
 Report classify(Grid& g) {
