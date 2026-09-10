@@ -159,6 +159,10 @@ const char *kindLabel(check::Kind k) {
     NSButton            *_voxelToggle;
     NSButton            *_wrapToggle;
     NSMutableArray<NSMenuItem *> *_shadingItems;
+    // Whether to draw only the unobserved voxels inside the shrinkwrap. A display
+    // filter over a finished carve, remembered between runs like the rest of the
+    // run sheet's settings.
+    BOOL                 _intersectWrap;
     NSWindow            *_reportWindow;
     NSTextView          *_reportText;
 
@@ -1169,20 +1173,23 @@ const char *kindLabel(check::Kind k) {
     // adding a control by eyeballing a y is how the region popup ended up drawn
     // over the fourth parameter row.
     //
-    //   192 164 136 108   four label/value rows, 28 apart
-    //    77              the region popup, 24 tall, clearing 108 by seven
-    //    52  30   8      three tick boxes, 22 apart
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 220)];
+    //   214 186 158 130   four label/value rows, 28 apart
+    //    99               the region popup, 24 tall, clearing 130 by seven
+    //    74  52  30   8    four tick boxes, 22 apart
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 242)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
         {@"Tile size (voxels)", [NSString stringWithFormat:@"%u", _visOptions.tileVoxels]},
-        {@"Margin past the last return (m)",
+        // The shrinkwrap's buffer and the box's margin are the same number meaning
+        // the same thing — how far past the last return the question still applies
+        // — so the label names both rather than making it look like two settings.
+        {@"Buffer / margin past the last return (m)",
                                 [NSString stringWithFormat:@"%.1f", _visOptions.domainMargin]},
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (int i = 0; i < 4; ++i) {
-        const CGFloat y = 192 - i * 28;
+        const CGFloat y = 214 - i * 28;
         [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 220, 20)]];
         NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(230, y - 3, 90, 22)];
         [acc addSubview:f];
@@ -1191,9 +1198,9 @@ const char *kindLabel(check::Kind k) {
 
     // What region the question covers — the setting that changes the answer more
     // than any other, so it is a choice rather than a tick box.
-    [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 80, 60, 20)]];
+    [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 102, 60, 20)]];
     NSPopUpButton *region =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 77, 396, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 99, 396, 24) pullsDown:NO];
     [region addItemsWithTitles:@[@"Shrinkwrap of the returns (tightest)",
                                  @"Box around the surveyed extent",
                                  @"Everything in range of a setup"]];
@@ -1204,7 +1211,7 @@ const char *kindLabel(check::Kind k) {
         if (regionOrder[i] == _visOptions.domain) [region selectItemAtIndex:i];
     [acc addSubview:region];
 
-    NSButton *interior = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 460, 20)];
+    NSButton *interior = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
     interior.title = @"Scanned entirely indoors (leave the space outside the walls out)";
     [interior setButtonType:NSButtonTypeSwitch];
     interior.font = [NSFont systemFontOfSize:11];
@@ -1212,7 +1219,7 @@ const char *kindLabel(check::Kind k) {
                                                   : NSControlStateValueOff;
     [acc addSubview:interior];
 
-    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 460, 20)];
+    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 460, 20)];
     firstHit.title = @"Stop at the first evidence (faster; visible and occupied become "
                      @"lower bounds)";
     [firstHit setButtonType:NSButtonTypeSwitch];
@@ -1221,12 +1228,24 @@ const char *kindLabel(check::Kind k) {
                    ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:firstHit];
 
-    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 460, 20)];
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 460, 20)];
     solid.title = @"Show every unobserved voxel, not just the frontier";
     [solid setButtonType:NSButtonTypeSwitch];
     solid.font = [NSFont systemFontOfSize:11];
     solid.state = _visOptions.solid ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:solid];
+
+    // The intersection. A display filter over a finished carve rather than a
+    // parameter of it, but it belongs here: it only means anything when the region
+    // is the shrinkwrap, and it is the difference between seeing the site and
+    // seeing a solid red mass in front of it.
+    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 460, 20)];
+    insideWrap.title = @"Keep only unobserved voxels inside the shrinkwrap "
+                       @"(drops the blanket running out to the range limit)";
+    [insideWrap setButtonType:NSButtonTypeSwitch];
+    insideWrap.font = [NSFont systemFontOfSize:11];
+    insideWrap.state = _intersectWrap ? NSControlStateValueOn : NSControlStateValueOff;
+    [acc addSubview:insideWrap];
     // Shading is not here. It is in the View menu, because it changes how the
     // answer is drawn rather than what the answer is, and it applies to a
     // finished carve without running another one.
@@ -1271,6 +1290,8 @@ const char *kindLabel(check::Kind k) {
         opt.domain = (i >= 0 && i < 3) ? order[i] : vis::DomainMode::Shrinkwrap;
     }
     opt.wrapInteriorOnly = (interior.state == NSControlStateValueOn);
+    _intersectWrap   = (insideWrap.state == NSControlStateValueOn);
+    const BOOL intersectWrap = _intersectWrap;
     opt.solid        = (solid.state == NSControlStateValueOn);
     opt.earlyOut     = (firstHit.state == NSControlStateValueOn)
                      ? carve::EarlyOut::AnyEvidence : carve::EarlyOut::Saturated;
@@ -1345,6 +1366,16 @@ const char *kindLabel(check::Kind k) {
             return;
         }
 
+        // The intersection, applied to the finished carve. Here rather than inside
+        // vis::run because it changes what is DRAWN and not what was measured: the
+        // volume and the percentage on the status line below stay the figures for
+        // the whole unobserved set, which is the honest number, while the display
+        // drops the part of it running out to the range limit.
+        uint64_t voxelsBeforeWrapFilter = result->voxels.size();
+        if (intersectWrap && !result->wrapGrid.empty())
+            vis::keepVoxelsInsideWrap(*result);
+        const uint64_t voxelsDrawn = result->voxels.size();
+
         const double vol = result->unknownVolume();
         const double pct = result->stats.reachable
                          ? 100.0 * double(result->stats.unknown) / double(result->stats.reachable)
@@ -1394,6 +1425,15 @@ const char *kindLabel(check::Kind k) {
             warn = [warn stringByAppendingFormat:
                     @"   ·   interior only: %llu wrap cells outside the shell dropped",
                     (unsigned long long)result->wrapGrid.droppedOutside];
+        if (intersectWrap && voxelsBeforeWrapFilter != voxelsDrawn)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   drawing %llu of %llu unobserved voxels — those inside the "
+                     "shrinkwrap; the volume above is still the whole set",
+                    (unsigned long long)voxelsDrawn,
+                    (unsigned long long)voxelsBeforeWrapFilter];
+        else if (intersectWrap && result->wrapGrid.empty())
+            warn = [warn stringByAppendingString:
+                    @"   ·   ⚠︎ no shrinkwrap to intersect with — pick the shrinkwrap region"];
         if (!result->wrapNote.empty())
             warn = [warn stringByAppendingFormat:@"   ·   ⚠︎ %s", result->wrapNote.c_str()];
         if (result->setupsBinned)
