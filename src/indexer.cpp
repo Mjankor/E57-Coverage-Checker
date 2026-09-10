@@ -1,5 +1,9 @@
 #include "indexer.h"
 
+#include <fstream>
+#include <sstream>
+#include <limits>
+#include <sys/stat.h>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -294,6 +298,161 @@ std::string directoryOf(const std::string& path) {
 }
 
 // ---------------------------------------------------------------------------
+// the per-file check cache
+
+// One line a field, which is what makes a status string safe to store: statuses
+// are produced from measured numbers and read back into the UI, and they contain
+// commas, percent signs and em dashes. A length-prefixed line carries any of
+// those without quoting or escaping, and a line whose length does not match is a
+// corrupt entry rather than a mis-parse that goes unnoticed.
+//
+// Text rather than a binary blob because this is a cache of verdicts about files
+// on disk: when one looks wrong the first thing anybody wants is to read it.
+constexpr const char* kCacheMagic = "e57cov-survey-cache";
+constexpr int         kCacheVersion = 1;
+
+void writeStr(std::string& o, const std::string& s) {
+    o += std::to_string(s.size());
+    o += ':';
+    o += s;
+    o += '\n';
+}
+
+bool readStr(std::istream& in, std::string& s) {
+    std::string head;
+    if (!std::getline(in, head)) return false;
+    const size_t colon = head.find(':');
+    if (colon == std::string::npos) return false;
+    size_t n = 0;
+    try { n = size_t(std::stoull(head.substr(0, colon))); }
+    catch (...) { return false; }
+    s = head.substr(colon + 1);
+    // The value itself may have held newlines; keep reading until it is the
+    // declared length. A declared length longer than what is there fails rather
+    // than silently truncating.
+    while (s.size() < n) {
+        std::string more;
+        if (!std::getline(in, more)) return false;
+        s += '\n';
+        s += more;
+    }
+    return s.size() == n;
+}
+
+} // namespace
+
+bool SurveyCache::load(const std::string& path) {
+    byPath.clear();
+    std::ifstream in(path);
+    if (!in) return true;   // no cache yet is not a failure
+
+    std::string magic;
+    int version = 0;
+    if (!(in >> magic >> version)) return false;
+    if (magic != kCacheMagic || version != kCacheVersion) return false;
+    size_t files = 0;
+    if (!(in >> files)) return false;
+    in.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+
+    for (size_t f = 0; f < files; ++f) {
+        std::string key;
+        if (!readStr(in, key)) { byPath.clear(); return false; }
+        Entry e;
+        size_t nscans = 0;
+        int ec = 1;
+        if (!(in >> e.size >> e.mtime >> ec >> nscans)) { byPath.clear(); return false; }
+        in.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        e.extentComplete = (ec != 0);
+        for (size_t s = 0; s < nscans; ++s) {
+            ScanRef r;
+            if (!readStr(in, r.path) || !readStr(in, r.name) || !readStr(in, r.guid) ||
+                !readStr(in, r.status)) { byPath.clear(); return false; }
+            int kind = 0, usable = 0, hasPose = 0, hasExtent = 0;
+            if (!(in >> r.scanIndex >> r.recordCount >> kind >> usable >> hasPose >>
+                  hasExtent)) { byPath.clear(); return false; }
+            for (int k = 0; k < 4; ++k) if (!(in >> r.pose.q[k])) { byPath.clear(); return false; }
+            for (int k = 0; k < 3; ++k) if (!(in >> r.pose.t[k])) { byPath.clear(); return false; }
+            for (int k = 0; k < 3; ++k) if (!(in >> r.setup[k])) { byPath.clear(); return false; }
+            for (int k = 0; k < 3; ++k) if (!(in >> r.lo[k])) { byPath.clear(); return false; }
+            for (int k = 0; k < 3; ++k) if (!(in >> r.hi[k])) { byPath.clear(); return false; }
+            in.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+            if (kind < 0 || kind > 2) { byPath.clear(); return false; }
+            r.kind      = check::Kind(kind);
+            r.usable    = (usable != 0);
+            r.hasPose   = (hasPose != 0);
+            r.hasExtent = (hasExtent != 0);
+            e.scans.push_back(std::move(r));
+        }
+        byPath[key] = std::move(e);
+    }
+    return true;
+}
+
+bool SurveyCache::save(const std::string& path) const {
+    std::string o;
+    o += kCacheMagic;
+    o += ' ';
+    o += std::to_string(kCacheVersion);
+    o += ' ';
+    o += std::to_string(byPath.size());
+    o += '\n';
+    for (const auto& kv : byPath) {
+        writeStr(o, kv.first);
+        const Entry& e = kv.second;
+        o += std::to_string(e.size); o += ' ';
+        o += std::to_string(e.mtime); o += ' ';
+        o += (e.extentComplete ? "1 " : "0 ");
+        o += std::to_string(e.scans.size());
+        o += '\n';
+        for (const ScanRef& r : e.scans) {
+            writeStr(o, r.path);
+            writeStr(o, r.name);
+            writeStr(o, r.guid);
+            writeStr(o, r.status);
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
+                          "%zu %llu %d %d %d %d %.17g %.17g %.17g %.17g %.17g %.17g %.17g "
+                          "%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g\n",
+                          r.scanIndex, (unsigned long long)r.recordCount, int(r.kind),
+                          int(r.usable), int(r.hasPose), int(r.hasExtent),
+                          r.pose.q[0], r.pose.q[1], r.pose.q[2], r.pose.q[3],
+                          r.pose.t[0], r.pose.t[1], r.pose.t[2],
+                          r.setup[0], r.setup[1], r.setup[2],
+                          r.lo[0], r.lo[1], r.lo[2], r.hi[0], r.hi[1], r.hi[2]);
+            o += buf;
+        }
+    }
+    // Written through a temporary and renamed, so an interrupted save leaves the
+    // previous cache rather than a half-written one that would be read back as
+    // corrupt — and a corrupt cache discards every entry, not just the last.
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        out.write(o.data(), std::streamsize(o.size()));
+        if (!out) return false;
+    }
+    return std::rename(tmp.c_str(), path.c_str()) == 0;
+}
+
+size_t SurveyCache::entries() const { return byPath.size(); }
+
+namespace {
+
+// How a file is identified: its path, size and modification time. The same
+// ingredients the store's corpus key uses, per file rather than over all of
+// them. Zeroed when it cannot be stat'd, which never matches a stored entry.
+void fileStamp(const std::string& path, uint64_t& size, int64_t& mtime) {
+    size = 0;
+    mtime = 0;
+    struct stat st{};
+    if (::stat(path.c_str(), &st) == 0) {
+        size  = uint64_t(st.st_size);
+        mtime = int64_t(st.st_mtime);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // survey
 
 // What checking ONE file produces. Kept per file so the work can run on several
@@ -421,10 +580,25 @@ Survey survey(const std::vector<std::string>& paths, const SurveyOptions& opt,
     const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
     nt = std::min({nt, cores, unsigned(paths.size())});
 
+    // The cache of per-file verdicts, when one was asked for. Only for the
+    // classifying survey: the header-only path costs nothing and reaches a
+    // cheaper verdict that must not be mistaken for this one.
+    SurveyCache cache;
+    const bool useCache = opt.classify && !opt.cachePath.empty();
+    if (useCache) cache.load(opt.cachePath);   // unreadable is empty, not fatal
+
+    // What each file's stamp is now, read before any work so a file that changes
+    // mid-survey is stored under what was actually checked.
+    std::vector<uint64_t> sizes(paths.size(), 0);
+    std::vector<int64_t>  mtimes(paths.size(), 0);
+    if (useCache)
+        for (size_t fi = 0; fi < paths.size(); ++fi) fileStamp(paths[fi], sizes[fi], mtimes[fi]);
+
     // A slot per file, so nothing is shared but the cursor and the progress
     // report. Merged in path order below, which is what keeps the result
     // independent of how the threads happened to interleave.
     std::vector<FileResult> results(paths.size());
+    std::vector<char>       fromCache(paths.size(), 0);
     std::atomic<size_t> next{0};
     std::atomic<size_t> done{0};
     std::atomic<bool>   stop{false};
@@ -435,7 +609,38 @@ Survey survey(const std::vector<std::string>& paths, const SurveyOptions& opt,
             if (stop.load(std::memory_order_relaxed)) break;
             const size_t fi = next.fetch_add(1, std::memory_order_relaxed);
             if (fi >= paths.size()) break;
-            checkOneFile(paths[fi], opt, results[fi]);
+
+            // A hit means this exact file — same path, same size, same
+            // modification time — was checked before, and checking depends on
+            // nothing else. Reading the cache needs no lock because nothing
+            // writes to it while the workers run; the entries they produce go to
+            // their own slots and are folded in afterwards.
+            bool hit = false;
+            if (useCache && sizes[fi] != 0) {
+                const auto it = cache.byPath.find(paths[fi]);
+                if (it != cache.byPath.end() && it->second.size == sizes[fi] &&
+                    it->second.mtime == mtimes[fi]) {
+                    FileResult& out = results[fi];
+                    out.opened = true;
+                    out.scans = it->second.scans;
+                    out.extentComplete = it->second.extentComplete;
+                    // The bounds are re-derived rather than stored: they are a
+                    // reduction over the very scans just restored, so storing
+                    // them would be a second copy of the same fact that could
+                    // disagree with the first.
+                    for (const ScanRef& r : out.scans) {
+                        expandFileBounds(out, r.setup);
+                        if (r.hasExtent) {
+                            expandFileBounds(out, r.lo);
+                            expandFileBounds(out, r.hi);
+                        }
+                    }
+                    fromCache[fi] = 1;
+                    hit = true;
+                }
+            }
+            if (!hit) checkOneFile(paths[fi], opt, results[fi]);
+
             const size_t d = done.fetch_add(1, std::memory_order_relaxed) + 1;
             if (progress) {
                 std::lock_guard<std::mutex> lk(reportLock);
@@ -454,6 +659,35 @@ Survey survey(const std::vector<std::string>& paths, const SurveyOptions& opt,
         for (std::thread& t : pool) t.join();
     }
 
+    // Saved BEFORE the merge, because the merge moves each ScanRef's strings out
+    // into the survey and would leave the entries here holding empty names and
+    // statuses. Copying them first instead would work and costs a copy of every
+    // scan on every run; doing it in this order costs nothing.
+    //
+    // Only files in this corpus are kept, so the cache does not grow without
+    // bound as directories come and go. A cancelled run saves what it reached —
+    // entries are per file and each is complete or absent.
+    if (useCache) {
+        SurveyCache fresh;
+        for (size_t fi = 0; fi < paths.size(); ++fi) {
+            if (sizes[fi] == 0) continue;            // unstattable: nothing to key on
+            if (fromCache[fi]) {
+                const auto it = cache.byPath.find(paths[fi]);
+                if (it != cache.byPath.end()) fresh.byPath[paths[fi]] = it->second;
+                continue;
+            }
+            const FileResult& f = results[fi];
+            if (!f.opened) continue;                 // unreadable or never reached
+            SurveyCache::Entry e;
+            e.size  = sizes[fi];
+            e.mtime = mtimes[fi];
+            e.scans = f.scans;
+            e.extentComplete = f.extentComplete;
+            fresh.byPath[paths[fi]] = std::move(e);
+        }
+        fresh.save(opt.cachePath);                   // a failed save costs a re-check
+    }
+
     // Merged in path order. A cancelled run leaves the files it never reached
     // unopened, and an unopened file with no error contributes nothing — the
     // same as the serial version breaking out of its loop.
@@ -462,6 +696,7 @@ Survey survey(const std::vector<std::string>& paths, const SurveyOptions& opt,
         if (!f.error.empty()) { out.errors.push_back(f.error); continue; }
         if (!f.opened) continue;
         ++out.filesRead;
+        if (fromCache[fi]) ++out.filesFromCache;
         if (f.hasBounds) {
             expandBounds(out, f.lo);
             expandBounds(out, f.hi);

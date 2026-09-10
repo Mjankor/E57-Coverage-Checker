@@ -15,7 +15,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <set>
+#include <sys/stat.h>
+#include <utime.h>
 #include <string>
 #include <vector>
 
@@ -255,6 +259,204 @@ static void testSurveyDoesNotDependOnThreadCount() {
     CHECK(s.scans.size() == 12, "an absurd thread count still reads the corpus");
 }
 
+// The per-file check cache: a hit must be indistinguishable from doing the work.
+//
+// This is the one that earns the most on a real corpus, and it is also the one
+// whose failure mode is worst. The store is cached under a key over the whole
+// corpus, so adding one scan to a thousand rebuilds it and re-checks all of them;
+// checking depends on nothing but the file, so 999 of those are waste. The risk
+// is the mirror image: a cache consulted when it should not be serves a stale
+// verdict, and a verdict decides whether a scan is indexed at all.
+//
+// So what is checked is equality with the uncached answer, and invalidation on
+// each of the things that identify a file.
+static void testTheCheckCacheIsIndistinguishableFromChecking() {
+    std::printf("indexer: the per-file check cache\n");
+
+    const std::vector<std::string> paths =
+        writeCorpus("cachecorpus", 6, 4000, 30.0, 0.0, 0.0);
+    CHECK(paths.size() == 6, "corpus written");
+    const std::string cachePath = tmpDir() + "/e57cov_checkcache.txt";
+    std::remove(cachePath.c_str());
+
+    auto flatten = [](const indexer::Survey& s) {
+        std::string o;
+        char buf[512];
+        std::snprintf(buf, sizeof(buf), "%zu|%zu|%d|%d|%.9f,%.9f,%.9f|%.9f,%.9f,%.9f\n",
+                      s.filesRead, s.scans.size(), int(s.extentComplete), int(s.hasBounds),
+                      s.lo[0], s.lo[1], s.lo[2], s.hi[0], s.hi[1], s.hi[2]);
+        o += buf;
+        for (const auto& sc : s.scans) {
+            std::snprintf(buf, sizeof(buf), "%s#%zu|%s|%s|%d|%d|%d|%llu|%s|%.9f,%.9f,%.9f|%.9f,%.9f,%.9f\n",
+                          sc.path.c_str(), sc.scanIndex, sc.name.c_str(), sc.guid.c_str(),
+                          int(sc.kind), int(sc.usable), int(sc.hasExtent),
+                          (unsigned long long)sc.recordCount, sc.status.c_str(),
+                          sc.setup[0], sc.setup[1], sc.setup[2], sc.lo[0], sc.lo[1], sc.lo[2]);
+            o += buf;
+        }
+        return o;
+    };
+
+    // The uncached answer, which is the one being preserved.
+    indexer::SurveyOptions plain;
+    plain.classify = true;
+    const std::string want = flatten(indexer::survey(paths, plain, nullptr));
+
+    // Cold: nothing cached, so everything is checked and the file is written.
+    indexer::SurveyOptions cached = plain;
+    cached.cachePath = cachePath;
+    const indexer::Survey cold = indexer::survey(paths, cached, nullptr);
+    CHECK(cold.filesFromCache == 0, "a cold run reuses nothing");
+    CHECK(flatten(cold) == want, "and answers exactly as the uncached survey does");
+
+    // Warm: every file unchanged, so every file is a hit — and the answer is the
+    // same one, which is the whole claim.
+    const indexer::Survey warm = indexer::survey(paths, cached, nullptr);
+    CHECK(warm.filesFromCache == 6, "a warm run reuses every file");
+    CHECK(flatten(warm) == want, "and still answers identically");
+
+    // The status strings are the part most likely to come back mangled: they are
+    // built from measured numbers and carry punctuation and multi-byte
+    // characters, so they are stored length-prefixed rather than delimited.
+    bool statusesSurvived = !warm.scans.empty();
+    for (size_t i = 0; i < warm.scans.size() && i < cold.scans.size(); ++i)
+        if (warm.scans[i].status != cold.scans[i].status ||
+            warm.scans[i].name != cold.scans[i].name) statusesSurvived = false;
+    CHECK(statusesSurvived, "names and verdict strings come back intact");
+
+    // Touched: a file whose modification time moves is re-checked, not believed.
+    {
+        const std::string victim = paths[2];
+        struct stat st{};
+        CHECK(::stat(victim.c_str(), &st) == 0, "victim stat'd");
+        const struct utimbuf times{st.st_atime, st.st_mtime + 120};
+        CHECK(::utime(victim.c_str(), &times) == 0, "mtime moved");
+        const indexer::Survey after = indexer::survey(paths, cached, nullptr);
+        CHECK(after.filesFromCache == 5, "the touched file is checked again");
+        CHECK(flatten(after) == want, "and the answer does not change");
+    }
+
+    // Changed in size: same test, the other half of the stamp. Rewritten with a
+    // different point count, so both the size and the verdict's inputs move —
+    // which also means the expected answer moves, and every check after this
+    // point compares against the rewritten corpus.
+    std::string wantBigger;
+    {
+        const std::vector<std::string> rewritten =
+            writeCorpus("cachecorpus", 6, 5000, 30.0, 0.0, 0.0);
+        CHECK(rewritten.size() == 6, "corpus rewritten at a different size");
+        wantBigger = flatten(indexer::survey(paths, plain, nullptr));
+        CHECK(wantBigger != want, "the rewritten corpus really does survey differently");
+        const indexer::Survey after = indexer::survey(paths, cached, nullptr);
+        CHECK(after.filesFromCache == 0, "every rewritten file is checked again");
+        CHECK(flatten(after) == wantBigger, "and matches what checking them says");
+    }
+
+    // A corpus that shrinks does not leave its old entries behind for ever.
+    {
+        const std::vector<std::string> two(paths.begin(), paths.begin() + 2);
+        indexer::survey(two, cached, nullptr);
+        indexer::SurveyCache c;
+        CHECK(c.load(cachePath), "cache loaded");
+        CHECK(c.entries() == 2, "only the files still in the corpus are kept");
+    }
+
+    // A truncated cache is treated as absent rather than trusted as far as it
+    // goes. This is the realistic corruption — a save interrupted, a disk full —
+    // and a half-read cache serving a few entries would be worse than none,
+    // because the entries it did serve would look authoritative.
+    {
+        indexer::survey(paths, cached, nullptr);          // refill it
+        std::string whole;
+        {
+            std::ifstream in(cachePath, std::ios::binary);
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            whole = ss.str();
+        }
+        CHECK(whole.size() > 200, "the cache has something in it to truncate");
+        {
+            std::ofstream out(cachePath, std::ios::binary | std::ios::trunc);
+            out << whole.substr(0, whole.size() / 2);     // cut mid-entry
+        }
+        indexer::SurveyCache c;
+        CHECK(!c.load(cachePath), "a truncated cache fails to load");
+        CHECK(c.entries() == 0, "and yields nothing rather than a partial set");
+        const indexer::Survey recovered = indexer::survey(paths, cached, nullptr);
+        CHECK(recovered.filesFromCache == 0, "so the survey checks everything");
+        CHECK(flatten(recovered) == wantBigger, "and is still right");
+    }
+
+    // An entry whose declared length does not match its content is refused. The
+    // length prefix is what makes a status string safe to store; this is the
+    // check that it is actually being honoured rather than merely written.
+    {
+        indexer::survey(paths, cached, nullptr);
+        std::string whole;
+        {
+            std::ifstream in(cachePath, std::ios::binary);
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            whole = ss.str();
+        }
+        const size_t nl = whole.find('\n');
+        const size_t colon = whole.find(':', nl);
+        CHECK(colon != std::string::npos, "found a length-prefixed field");
+        {
+            // Claim one more byte than the field holds.
+            std::string bent = whole;
+            bent.insert(colon, "9");
+            std::ofstream out(cachePath, std::ios::binary | std::ios::trunc);
+            out << bent;
+        }
+        indexer::SurveyCache c;
+        CHECK(!c.load(cachePath), "a field whose length does not match is refused");
+        CHECK(c.entries() == 0, "and takes the whole cache with it");
+    }
+
+    // A cache of the wrong version is ignored, which is what lets the format
+    // change without a stale file being read as the new one.
+    {
+        {
+            std::ofstream wrong(cachePath, std::ios::trunc);
+            wrong << "e57cov-survey-cache 99 0\n";
+        }
+        indexer::SurveyCache c;
+        CHECK(!c.load(cachePath), "a future version is refused");
+        const indexer::Survey after = indexer::survey(paths, cached, nullptr);
+        CHECK(after.filesFromCache == 0, "and the work is simply done again");
+        CHECK(flatten(after) == wantBigger, "correctly");
+    }
+
+    // The header-only survey must never read or write this cache: it reaches a
+    // cheaper verdict from metadata alone, and storing that under the same key
+    // would serve it to a run that asked for the full check.
+    {
+        std::remove(cachePath.c_str());
+        indexer::SurveyOptions headers;
+        headers.cachePath = cachePath;       // classify stays false
+        const indexer::Survey h = indexer::survey(paths, headers, nullptr);
+        CHECK(h.filesFromCache == 0, "the header survey reuses nothing");
+        indexer::SurveyCache c;
+        c.load(cachePath);
+        CHECK(c.entries() == 0, "and writes nothing for a later run to find");
+    }
+
+    // And an unreadable file is not cached as an answer.
+    {
+        std::remove(cachePath.c_str());
+        std::vector<std::string> withGhost = paths;
+        withGhost.push_back(tmpDir() + "/e57cov_cache_absent.e57");
+        const indexer::Survey g = indexer::survey(withGhost, cached, nullptr);
+        CHECK(g.errors.size() == 1, "the missing file is reported");
+        indexer::SurveyCache c;
+        CHECK(c.load(cachePath), "cache loaded");
+        CHECK(c.entries() == 6, "and only the six real files are remembered");
+    }
+
+    std::remove(cachePath.c_str());
+}
+
 static void testBuildRoundTrip() {
     std::printf("indexer: build a store from a corpus\n");
     const std::vector<std::string> paths = writeCorpus("build", 20, 4000, 60.0, 500000.0, 6200000.0);
@@ -435,6 +637,7 @@ int main() {
     testCellIndex();
     testSurveyIsHeaderOnly();
     testSurveyDoesNotDependOnThreadCount();
+    testTheCheckCacheIsIndistinguishableFromChecking();
     testBuildRoundTrip();
     testBuildRefusesImpossibleInput();
     testBuildCancels();

@@ -932,13 +932,26 @@ const char *kindLabel(check::Kind k) {
 
 // --- the two-phase open ---------------------------------------------------
 
-- (NSString *)storePathForKey:(const std::string &)key {
+- (NSString *)cacheDirectory {
     NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
     NSString *base = dirs.count ? dirs[0] : NSTemporaryDirectory();
     NSString *dir = [base stringByAppendingPathComponent:@"E57CoverageChecker"];
     [NSFileManager.defaultManager createDirectoryAtPath:dir withIntermediateDirectories:YES
                                              attributes:nil error:nil];
-    return [dir stringByAppendingPathComponent:ns(key + ".lod")];
+    return dir;
+}
+
+- (NSString *)storePathForKey:(const std::string &)key {
+    return [[self cacheDirectory] stringByAppendingPathComponent:ns(key + ".lod")];
+}
+
+// Where per-file scan verdicts are remembered. ONE file for all corpora, not one
+// per corpus, and that is the whole point: the store is keyed over the corpus so
+// adding a scan invalidates it, while a verdict about a file keeps as long as the
+// file does. Entries are keyed by path, size and mtime — see
+// indexer::SurveyOptions::cachePath.
+- (NSString *)checkCachePath {
+    return [[self cacheDirectory] stringByAppendingPathComponent:@"scan-checks.txt"];
 }
 
 - (void)loadPaths:(NSArray<NSString *> *)paths {
@@ -1040,17 +1053,32 @@ const char *kindLabel(check::Kind k) {
             // Threads left at the default, which is the hardware's count: files
             // are checked in parallel and the answer does not depend on how many
             // at once. See indexer::SurveyOptions::threads.
+            //
+            // And the verdicts are remembered per file, so adding a scan to a
+            // large corpus re-checks the scan rather than the corpus. The store
+            // below still has to be rebuilt — an octree over the corpus is a
+            // corpus-wide thing — but that is the unavoidable half.
             indexer::SurveyOptions full;
-            full.classify = true;
+            full.classify  = true;
+            full.cachePath = [self checkCachePath].UTF8String;
             indexer::Survey checked =
                 indexer::survey(cpaths, full, makeProgress(@"checking scans", 10));
             if (cancel->load()) { finish(@"Cancelled."); return; }
+            const size_t reused = checked.filesFromCache;
+            const size_t fresh  = checked.filesRead > reused ? checked.filesRead - reused : 0;
 
             dispatch_async(dispatch_get_main_queue(), ^{
                 AppDelegate *me = weakSelf;
                 if (!me) return;
                 me->_survey = checked;
                 [me->_table reloadData];
+                // What the check actually cost, which is otherwise invisible:
+                // on an incremental corpus nearly every file is reused, and a
+                // figure that drops to zero unexpectedly is the visible symptom
+                // of something rewriting the files.
+                if (reused)
+                    me->_progress.stringValue = [NSString stringWithFormat:
+                        @"checked %zu scan file(s), reused %zu from cache", fresh, reused];
             });
 
             indexer::BuildOptions bo;

@@ -35,6 +35,7 @@
 #include "point_store.h"
 #include "scan_check.h"
 
+#include <map>
 #include <functional>
 #include <string>
 #include <vector>
@@ -81,6 +82,11 @@ struct Survey {
     std::vector<ScanRef>     scans;
     std::vector<std::string> errors;      // one per unreadable file
     size_t                   filesRead = 0;
+    // Of those, how many were answered from the cache rather than checked. Worth
+    // reporting: on an incremental corpus it is nearly all of them, and a figure
+    // that suddenly drops to zero is the visible symptom of a cache that is
+    // being invalidated by something — a re-written file, a moved directory.
+    size_t                   filesFromCache = 0;
 
     // Union of declared extents and setup positions. `extentComplete` is false
     // when any usable scan lacked declared bounds.
@@ -111,6 +117,52 @@ struct SurveyOptions {
     // and are merged in path order afterwards, so the scan list, the bounds and
     // the error list come out identical at any thread count — there is a test.
     unsigned threads = 0;
+
+    // Where to remember per-file verdicts between runs. Empty disables it.
+    //
+    // Checking a file depends on NOTHING but that file, so the result keeps as
+    // long as the file does not change. That matters because the octree store is
+    // cached under a key covering the whole corpus — add one scan to a thousand
+    // and the key moves, so the store is rebuilt and every scan re-checked. The
+    // rebuild is unavoidable, an octree over the corpus being a corpus-wide
+    // thing; re-checking the 999 unchanged files is not.
+    //
+    // Only consulted and only written when `classify` is set, because that is
+    // the expensive path and the only one worth remembering: a header-only
+    // survey costs nothing and reaches a different (cheaper) verdict, which must
+    // never be confused with this one.
+    //
+    // A file is identified by its path, size and modification time, so an edited
+    // or replaced scan is re-checked rather than believed. A cache that cannot
+    // be read, or is of the wrong version, or has an entry that does not parse,
+    // is treated as absent — the only cost of that is doing the work.
+    std::string cachePath;
+};
+
+// Per-file verdicts remembered between runs. See SurveyOptions::cachePath.
+//
+// Exposed for testing and for a caller that wants to manage the file itself;
+// survey() loads and saves it on its own when given a path.
+struct SurveyCache {
+    // Missing file is not an error — it is an empty cache. False means the file
+    // existed and could not be used, which is also not fatal to a survey.
+    bool load(const std::string& path);
+    bool save(const std::string& path) const;
+
+    // Entries held. What a survey did with the cache is reported through
+    // Survey::filesFromCache rather than from here, because survey() loads its
+    // own copy and the caller never sees it.
+    size_t entries() const;
+
+    struct Entry {
+        uint64_t             size = 0;
+        int64_t              mtime = 0;
+        std::vector<ScanRef> scans;
+        bool                 extentComplete = true;
+    };
+    // Keyed by path. Public so a test can reach in; the invariant that matters
+    // is checked on use rather than on insertion.
+    std::map<std::string, Entry> byPath;
 };
 
 Survey survey(const std::vector<std::string>& paths, const SurveyOptions& opt,
