@@ -454,7 +454,23 @@ struct Cell {
 #pragma pack(pop)
 static_assert(sizeof(Cell) == 3, "Cell must stay three bytes");
 
+// A process-unique number for the next range image. Never reused, including
+// after an image is destroyed — which is the point. See RangeImage::uid.
+uint64_t nextImageUid();
+
 struct RangeImage {
+    // Identity, for anything that caches per image.
+    //
+    // A cache keyed on the ADDRESS of a range image is wrong in a way that only
+    // shows up on the second run: images are built fresh for each run and freed at
+    // the end of it, and the allocator hands the same addresses straight back. A
+    // lookup then hits on a pointer that now refers to a different image and
+    // returns the previous run's data. This number is never reused, so it cannot.
+    //
+    // Copies share it deliberately: an image and its copy hold the same content,
+    // which is what a cache key is about. Images are built once and read afterwards.
+    uint64_t uid = nextImageUid();
+
     uint32_t rows = 0, cols = 0;
     std::vector<Cell> cells;
     Mapping     map;

@@ -237,7 +237,11 @@ kernel void carveVoxels(device uchar             *state   [[buffer(0)]],
     id<MTLCommandQueue>        _queue;
     id<MTLComputePipelineState> _pipeline;
 
-    std::unordered_map<const void *, ImageBuffer> _images;
+    // Keyed by RangeImage::uid, NOT by the image's address. Images are built
+    // fresh for each run and freed at the end of it, and the allocator hands the
+    // same addresses straight back — so an address key hits on the second run and
+    // serves the FIRST run's uploaded range data. See RangeImage::uid.
+    std::unordered_map<uint64_t, ImageBuffer> _images;
     uint64_t                   _residentBytes;
     uint64_t                   _clock;
 
@@ -299,7 +303,7 @@ static NSString *g_unavailable = @"not initialised";
 // same lookup, and an image resident without its index could not answer a single
 // direction. Budgeted and evicted as one unit for the same reason.
 - (ImageBuffer)buffersForImage:(const rimg::RangeImage *)image {
-    auto it = _images.find(image);
+    auto it = _images.find(image->uid);
     if (it != _images.end()) {
         it->second.lastUse = ++_clock;
         return it->second;
@@ -346,7 +350,7 @@ static NSString *g_unavailable = @"not initialised";
     rec.colOfAz = cbuf;
     rec.bytes   = bytes;
     rec.lastUse = ++_clock;
-    _images[image] = rec;
+    _images[image->uid] = rec;
     _residentBytes += bytes;
     return rec;
 }

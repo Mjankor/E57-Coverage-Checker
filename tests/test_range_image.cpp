@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <algorithm>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -1261,7 +1262,51 @@ static void testInstrumentNotLevel() {
     CHECK(wrong == 0, "every levelled direction reaches the cell that measured it");
 }
 
+// Range images are identified by a number that is never reused, even when the
+// allocator hands back the address a freed image occupied.
+//
+// This is the root cause of a real defect: the GPU carver cached uploaded range
+// data in a map keyed by the image's ADDRESS. Images are built fresh for each run
+// of the visibility filter and freed at the end of it, so a second run allocates
+// at the same addresses, the cache reports a hit, and the carve runs against the
+// PREVIOUS run's range images. With changed parameters that silently drops voxels.
+//
+// The address reuse is the part worth demonstrating, because it is the step that
+// makes the old key unsafe and it is invisible in a single-run test.
+static void testRangeImagesHaveIdentityThatIsNeverReused() {
+    std::printf("range image: identity survives address reuse\n");
+
+    uint64_t firstUid = 0;
+    const void* firstAddr = nullptr;
+    {
+        auto a = std::make_unique<rimg::RangeImage>();
+        firstUid  = a->uid;
+        firstAddr = a.get();
+        CHECK(firstUid != 0, "an image gets a uid");
+    }   // freed here
+
+    // Allocated again, very likely at the same address.
+    auto b = std::make_unique<rimg::RangeImage>();
+    CHECK(b->uid != firstUid, "a later image never reuses an earlier uid");
+    if (b.get() == firstAddr)
+        std::printf("      (the allocator did reuse the address, as expected)\n");
+
+    // And distinct live images differ from each other.
+    rimg::RangeImage c, d;
+    CHECK(c.uid != d.uid, "two live images have different uids");
+    CHECK(c.uid != b->uid && d.uid != b->uid, "and differ from the heap one");
+
+    // Monotone, so a cache can also use it to order by age.
+    CHECK(d.uid > c.uid, "uids increase");
+
+    // A copy carries the same identity, which is deliberate: it holds the same
+    // content, and that is what a cache key is about.
+    const rimg::RangeImage e = c;
+    CHECK(e.uid == c.uid, "a copy shares the identity of what it copied");
+}
+
 int main() {
+    testRangeImagesHaveIdentityThatIsNeverReused();
     std::printf("E57 Coverage Checker — range image tests\n\n");
     testInstrumentNotLevel();
     testWobblyRowsAreStillUsable();

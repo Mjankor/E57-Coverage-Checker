@@ -1,5 +1,7 @@
 #include "range_image.h"
 
+#include <atomic>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -7,6 +9,13 @@
 #include <vector>
 
 namespace rimg {
+
+uint64_t nextImageUid() {
+    // Starts at one, so a zero uid is recognisably "never set".
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+
 
 static constexpr double kPi  = 3.14159265358979323846;
 static constexpr double kTau = 2.0 * kPi;
