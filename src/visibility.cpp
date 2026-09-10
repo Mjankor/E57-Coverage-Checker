@@ -421,39 +421,23 @@ void buildWrapSkin(Result& r, uint64_t cap) {
     }
 }
 
-uint64_t keepOnlyWrapSkinVoxels(Result& r, int cells) {
+uint64_t keepVoxelsInsideWrap(Result& r) {
     const wrap::Grid& g = r.wrapGrid;
     if (g.empty() || !(g.cell > 0)) return r.voxels.size();
     const bool haveFaces = r.voxelFaces.size() == r.voxels.size();
 
     std::vector<lod::StorePoint> keptV;
     std::vector<uint8_t>         keptF;
-    keptV.reserve(r.voxels.size() / 4 + 1);
-    if (haveFaces) keptF.reserve(r.voxels.size() / 4 + 1);
+    keptV.reserve(r.voxels.size());
+    if (haveFaces) keptF.reserve(r.voxels.size());
 
     for (size_t i = 0; i < r.voxels.size(); ++i) {
         const lod::StorePoint& p = r.voxels[i];
-        // Back to world, then to the wrap's own lattice. The voxels are stored
-        // against r.origin and the grid is indexed on a global lattice of `cell`
-        // metres, so this is the same mapping Grid::contains uses.
-        const double w[3] = {double(p.x) + r.origin[0],
-                             double(p.y) + r.origin[1],
-                             double(p.z) + r.origin[2]};
-        int64_t c[3];
-        for (int k = 0; k < 3; ++k)
-            c[k] = int64_t(std::floor(w[k] / g.cell)) - g.lo[k];
-
-        if (!g.cellInDomain(c[0], c[1], c[2])) continue;
-        // Near the shell: within `cells` of a cell that is outside the domain,
-        // measured along the axes. A reach of one is the boundary layer itself and
-        // is usually empty — see the header — so the default looks one further.
-        bool onShell = false;
-        for (int f = 0; f < 6 && !onShell; ++f)
-            for (int d = 1; d <= cells; ++d)
-                if (!g.cellInDomain(c[0] + kFaceDirs[f][0] * d, c[1] + kFaceDirs[f][1] * d,
-                                    c[2] + kFaceDirs[f][2] * d)) { onShell = true; break; }
-        if (!onShell) continue;
-
+        // Back to world, which is the frame the wrap is indexed in. The voxels are
+        // stored against r.origin; Grid::contains does the rest.
+        if (!g.contains(double(p.x) + r.origin[0],
+                        double(p.y) + r.origin[1],
+                        double(p.z) + r.origin[2])) continue;
         keptV.push_back(p);
         if (haveFaces) keptF.push_back(r.voxelFaces[i]);
     }

@@ -1241,84 +1241,119 @@ static void testTheWrapSkinSharesTheVoxelsFrame() {
     CHECK(offLattice == 0, "and lands back on the wrap's own lattice");
 }
 
-// The intersection of the unknown set with the wrap's boundary shell.
+// The unknown set intersected with the wrap VOLUME — inside the shell, not near it.
 //
-// Under a wrap most of the unknown set is a buffer-thick blanket behind the
-// ground and behind every wall: true, and a solid mass that hides the site inside
-// it. What is worth looking at is where the unobserved region reaches the edge of
-// the question. This keeps that and drops the rest.
-static void testKeepingOnlyTheVoxelsOnTheWrapShell() {
-    std::printf("unknown voxels intersected with the wrap's shell\n");
+// The case that matters is a wall. On the scanner side the wall was seen, so there
+// are no unknown voxels there and the intersection correctly keeps nothing. On the
+// far side the scanner saw nothing, so unknown voxels run from the wall out to the
+// range limit; the wrap reaches only a buffer past the wall, so what survives is a
+// buffer's thickness of them against the back of it. That is the statement worth
+// drawing — coverage stopped HERE — and the rest of that column, running to the
+// range limit, is the mass that hides the site.
+//
+// So the filter is worth its keep on a run carved over a WIDER domain than the
+// wrap. A run already carved over the wrap has its voxels inside it by
+// construction, and this then changes nothing; that is checked too.
+static void testKeepingOnlyTheVoxelsInsideTheWrap() {
+    std::printf("unknown voxels intersected with the wrap volume\n");
 
-    const std::string path = tmpPath("shellonly");
+    const std::string path = tmpPath("insidewrap");
     CHECK(fixture::write(path, {roomScan("west", -3.0, 2.0, 1.5),
                                 roomScan("east",  3.0, 2.0, 1.5)}, 512), "fixture written");
     vis::Options opt;
     opt.voxelSize  = 0.25;
     opt.maxRange   = 8.0;
     opt.tileVoxels = 32;
-    opt.domain     = vis::DomainMode::Shrinkwrap;
     opt.wrapCell   = 0.25;
 
-    vis::Result r;
+    // The wrap, from a shrinkwrap run.
+    vis::Options wopt = opt;
+    wopt.domain = vis::DomainMode::Shrinkwrap;
+    vis::Result wrapRun;
     std::string err;
-    CHECK(vis::run({path}, opt, nullptr, r, err), err.empty() ? "ran" : err.c_str());
-    if (r.voxels.empty() || r.wrapGrid.empty()) { CHECK(false, "fixture produced a wrap"); return; }
+    CHECK(vis::run({path}, wopt, nullptr, wrapRun, err), err.empty() ? "wrap run" : err.c_str());
+    CHECK(!wrapRun.wrapGrid.empty(), "a wrap was built");
+    if (wrapRun.wrapGrid.empty()) return;
 
-    const std::vector<lod::StorePoint> all = r.voxels;
-    const size_t before = all.size();
-    const bool hadFaces = r.voxelFaces.size() == before;
+    // A run carved over the range spheres — everything within maxRange of any
+    // setup, which reaches well past the wrap. This is the one carrying the
+    // blanket that runs out to the range limit.
+    vis::Options bopt = opt;
+    bopt.domain = vis::DomainMode::RangeSpheres;
+    vis::Result box;
+    CHECK(vis::run({path}, bopt, nullptr, box, err), err.empty() ? "box run" : err.c_str());
+    CHECK(!box.voxels.empty(), "the box run produced voxels");
+    if (box.voxels.empty()) return;
 
-    const uint64_t kept = vis::keepOnlyWrapSkinVoxels(r);
-    CHECK(kept == r.voxels.size(), "the count returned is the count kept");
-    CHECK(kept <= before, "it only ever drops");
-    // On THIS fixture the answer is zero, and that is the measured finding rather
-    // than a fixture quirk: every unknown voxel sits deep inside the domain, hard
-    // against the surfaces that shadow it, while the domain boundary lies a whole
-    // buffer further out in space the scanners did see. The two sets do not touch.
-    // The filter is correct; the intersection is simply empty here.
-    std::printf("      (kept %llu of %zu on an indoor fixture)\n",
-                (unsigned long long)kept, before);
-    if (hadFaces)
-        CHECK(r.voxelFaces.size() == r.voxels.size(),
+    const std::vector<lod::StorePoint> before = box.voxels;
+    // The grid is indexed on a global lattice in WORLD coordinates, so it
+    // transplants between runs whatever origin each of them chose — the filter
+    // puts each voxel back into world before asking.
+    box.wrapGrid = wrapRun.wrapGrid;
+
+    const uint64_t kept = vis::keepVoxelsInsideWrap(box);
+    CHECK(kept == box.voxels.size(), "the count returned is the count kept");
+    CHECK(kept > 0, "the wrap does contain some of the unknown set");
+    CHECK(kept <= before.size(), "it only ever drops");
+    // How much it drops depends on the scene, and on this enclosed-room fixture
+    // the answer is little or nothing: the room IS the wrap, so a domain drawn
+    // round the same room barely reaches past it. The reduction this exists for
+    // needs a wall with open space behind it, which is an outdoor shape. What is
+    // checked here is that the filter is exactly right about which side each voxel
+    // falls on, in both directions.
+    std::printf("      (kept %llu of %zu)\n", (unsigned long long)kept, before.size());
+    if (box.voxelFaces.size() || !box.voxels.empty())
+        CHECK(box.voxelFaces.empty() || box.voxelFaces.size() == box.voxels.size(),
               "shading stays attached to the voxel it was computed for");
-    (void)hadFaces;
 
-    // Every survivor is a subset of what was there, and every survivor is
-    // genuinely on the shell: in the domain, with a face neighbour outside it.
+    // Every survivor was there before, and every survivor is genuinely inside the
+    // wrap; everything dropped is genuinely outside it. Both directions, because a
+    // filter that kept too much would look the same at a glance.
     std::set<std::array<int64_t, 3>> was;
-    for (const lod::StorePoint& p : all)
+    for (const lod::StorePoint& p : before)
         was.insert({int64_t(std::llround(p.x * 1000)), int64_t(std::llround(p.y * 1000)),
                     int64_t(std::llround(p.z * 1000))});
-    static const int kF[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
-    const int reach = 2;
-    uint64_t strangers = 0, offShell = 0;
-    for (const lod::StorePoint& p : r.voxels) {
-        if (!was.count({int64_t(std::llround(p.x * 1000)), int64_t(std::llround(p.y * 1000)),
-                        int64_t(std::llround(p.z * 1000))})) ++strangers;
-        int64_t c[3];
-        for (int k = 0; k < 3; ++k)
-            c[k] = int64_t(std::floor((double(k == 0 ? p.x : k == 1 ? p.y : p.z) +
-                                       r.origin[k]) / r.wrapGrid.cell)) - r.wrapGrid.lo[k];
-        bool shell = false;
-        if (r.wrapGrid.cellInDomain(c[0], c[1], c[2]))
-            for (int f = 0; f < 6 && !shell; ++f)
-                for (int d = 1; d <= reach; ++d)
-                    if (!r.wrapGrid.cellInDomain(c[0]+kF[f][0]*d, c[1]+kF[f][1]*d,
-                                                 c[2]+kF[f][2]*d)) { shell = true; break; }
-        if (!shell) ++offShell;
+    std::set<std::array<int64_t, 3>> now;
+    uint64_t strangers = 0, outside = 0;
+    for (const lod::StorePoint& p : box.voxels) {
+        const std::array<int64_t, 3> k{int64_t(std::llround(p.x * 1000)),
+                                       int64_t(std::llround(p.y * 1000)),
+                                       int64_t(std::llround(p.z * 1000))};
+        if (!was.count(k)) ++strangers;
+        now.insert(k);
+        if (!box.wrapGrid.contains(double(p.x) + box.origin[0], double(p.y) + box.origin[1],
+                                   double(p.z) + box.origin[2])) ++outside;
     }
     CHECK(strangers == 0, "no voxel is invented, only dropped");
-    CHECK(offShell == 0, "and every survivor really is on the shell");
+    CHECK(outside == 0, "every survivor is inside the wrap");
 
-    // No wrap means nothing to intersect with, so nothing is dropped.
-    vis::Result box;
-    vis::Options bopt = opt;
-    bopt.domain = vis::DomainMode::MeasuredExtent;
-    CHECK(vis::run({path}, bopt, nullptr, box, err), "ran on the box domain");
-    const size_t boxBefore = box.voxels.size();
-    CHECK(vis::keepOnlyWrapSkinVoxels(box) == boxBefore, "with no wrap, everything is kept");
-    CHECK(box.voxels.size() == boxBefore, "and the voxels are untouched");
+    uint64_t wronglyDropped = 0;
+    for (const lod::StorePoint& p : before) {
+        const std::array<int64_t, 3> k{int64_t(std::llround(p.x * 1000)),
+                                       int64_t(std::llround(p.y * 1000)),
+                                       int64_t(std::llround(p.z * 1000))};
+        if (now.count(k)) continue;
+        if (box.wrapGrid.contains(double(p.x) + box.origin[0], double(p.y) + box.origin[1],
+                                  double(p.z) + box.origin[2])) ++wronglyDropped;
+    }
+    CHECK(wronglyDropped == 0, "and nothing inside the wrap was dropped");
+
+    // A run already carved over the wrap is unchanged by this, its voxels being
+    // inside the wrap by construction.
+    {
+        vis::Result again = wrapRun;
+        const size_t n = again.voxels.size();
+        CHECK(vis::keepVoxelsInsideWrap(again) == n, "a wrap run is already inside its wrap");
+    }
+
+    // And a Result with no wrap keeps everything, there being nothing to intersect.
+    {
+        vis::Result none;
+        vis::Options n2 = bopt;
+        CHECK(vis::run({path}, n2, nullptr, none, err), "ran without a wrap");
+        const size_t n = none.voxels.size();
+        CHECK(vis::keepVoxelsInsideWrap(none) == n, "no wrap, nothing dropped");
+    }
 }
 
 int main() {
@@ -1331,7 +1366,7 @@ int main() {
     testShadingVariesWithShapeAndHeight();
     testTheWrapSkinDescribesTheWrap();
     testTheWrapSkinSharesTheVoxelsFrame();
-    testKeepingOnlyTheVoxelsOnTheWrapShell();
+    testKeepingOnlyTheVoxelsInsideTheWrap();
     testKnownSceneFromFiveSetups();
     testDatumSetupWithNoTranslation();
 

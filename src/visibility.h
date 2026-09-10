@@ -343,27 +343,33 @@ void recolour(Result& r, uint8_t shading);
 // caller holding a result can rebuild it, and so it can be tested.
 void buildWrapSkin(Result& r, uint64_t cap);
 
-// Keeps only the unknown voxels that lie on the wrap's boundary shell, dropping
-// the rest — the boolean intersection of the answer with the skin.
+// Keeps only the unknown voxels that lie INSIDE the wrap, dropping the rest —
+// the boolean intersection of the answer with the shrinkwrap volume.
 //
-// What it is for. Under a wrap the unknown set is everything within the buffer of
-// a measured surface that nobody saw, and most of that is a buffer-thick blanket
-// lying behind the ground and behind every wall. It is true, and it is a solid
-// red mass that hides the site inside it. The part worth looking at is where the
-// unobserved region reaches the EDGE of the question — the shell where coverage
-// actually stopped — and that is exactly the wrap's boundary.
+// Containment, not proximity to the shell. That distinction is the whole point and
+// it is easy to get backwards: what is wanted is everything within the wrap, not
+// the thin layer at its edge.
+//
+// What it does to a wall, which is the case worth holding in mind. On the scanner
+// side, the scanner saw the wall, so that space is visible and there are no
+// unknown voxels to keep — the intersection correctly picks up nothing there. On
+// the far side the scanner saw nothing, so unknown voxels run from the wall out to
+// the edge of range; the wrap reaches only a buffer past the wall, so what
+// survives is one buffer's thickness of them against the back of the wall. That
+// is the statement worth drawing: coverage stopped HERE. The rest of that column,
+// running to the range limit, is space nobody ever asked about and it is what
+// turns the display into a solid mass.
 //
 // Filters Result::voxels and Result::voxelFaces together, so the shading stays
 // attached to the voxel it was computed for. Returns how many were kept.
-// Destructive: the dropped voxels are gone from the Result, so a caller that
-// wants both views keeps a copy or re-runs. A run with no wrap keeps everything,
-// there being no shell to intersect with.
-// `cells` is how close to the boundary counts as on it, in wrap cells. One cell
-// exactly is usually EMPTY and that is not a bug: the outermost domain cells lie a
-// full buffer out from any return, in space the scanners generally did see, so no
-// unobserved voxel lands there. Two is the useful default — it catches the outer
-// face of the unknown blanket, which is the surface the eye is looking for.
-uint64_t keepOnlyWrapSkinVoxels(Result& r, int cells = 2);
+// Destructive: the dropped voxels are gone from the Result, so a caller wanting
+// both views keeps a copy. A Result with no wrap grid keeps everything, there
+// being nothing to intersect with.
+//
+// Most useful on a run whose DOMAIN was wider than the wrap — a box or the range
+// spheres — since a run already carved over the wrap has its voxels inside it
+// by construction and this then changes nothing.
+uint64_t keepVoxelsInsideWrap(Result& r);
 
 // Exposed for testing: the frontier rule and the sampling decision.
 bool touchesVisible(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z);
