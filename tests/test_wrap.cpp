@@ -22,6 +22,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <thread>
 #include <vector>
 
 static int g_failures = 0;
@@ -41,8 +42,9 @@ static int g_checks   = 0;
 // path. One "row" per point, one column.
 struct PointList {
     std::vector<double> xyz;
-    static bool at(const void* user, uint32_t row, uint32_t col, double out[3]) {
-        (void)col;
+    static bool at(const void* user, const void* image, uint32_t row, uint32_t col,
+                   double out[3]) {
+        (void)col; (void)image;
         const PointList& p = *static_cast<const PointList*>(user);
         if (size_t(row) * 3 + 2 >= p.xyz.size()) return false;
         out[0] = p.xyz[size_t(row) * 3 + 0];
@@ -58,9 +60,6 @@ static wrap::MarkSource sourceFor(const PointList& pl) {
     src.cols = 1;
     src.user = &pl;
     src.pointAt = &PointList::at;
-    // No angular spread: stride one, every point marked.
-    src.angularStep = 0.0;
-    src.furthest = 0.0;
     return src;
 }
 
@@ -446,6 +445,56 @@ static void testTheSealIsAThresholdNotADial() {
     CHECK(wide.droppedOutside > 0, "a seal wider than the buffer still leaves the flood a seed");
 }
 
+// Marking from several threads gives the same grid as marking from one.
+//
+// The bit is set with an atomic OR rather than a plain |=, and the difference is
+// not cosmetic: two threads reading the same byte, setting their own bit and
+// writing it back lose one of the two. What is lost is an occupied cell, which
+// shrinks the wrap — and a smaller domain removes questions rather than
+// answering them differently, so the failure would be silent and in the
+// dangerous direction.
+//
+// Contended on purpose. Every thread marks the same points into the same cells,
+// which is the worst case for a lost update and the only way a test at this size
+// has a chance of catching one.
+static void testMarkingIsTheSameFromAnyNumberOfThreads() {
+    std::printf("marking is atomic, so threads do not lose cells\n");
+
+    PointList pl;
+    for (int i = 0; i < 4000; ++i) {
+        const double t = 0.013 * i;
+        pl.xyz.push_back(3.0 * std::cos(t));
+        pl.xyz.push_back(3.0 * std::sin(t));
+        pl.xyz.push_back(0.002 * i - 4.0);
+    }
+    const double lo[3] = {-4, -4, -5}, hi[3] = {4, 4, 5};
+    wrap::Options opt;
+    opt.buffer = 1.0;
+    opt.cell   = 0.25;
+
+    wrap::Grid one;
+    std::string err;
+    CHECK(wrap::size(lo, hi, opt, one, err), "sized");
+    wrap::markScan(sourceFor(pl), one);
+    wrap::build(opt, one);
+    CHECK(one.occupiedCells > 100, "the single-threaded run marked a useful number");
+
+    for (unsigned n : {2u, 4u, 8u}) {
+        wrap::Grid many;
+        CHECK(wrap::size(lo, hi, opt, many, err), "sized again");
+        std::vector<std::thread> pool;
+        pool.reserve(n);
+        for (unsigned i = 0; i < n; ++i)
+            pool.emplace_back([&]() { wrap::markScan(sourceFor(pl), many); });
+        for (std::thread& t : pool) t.join();
+        wrap::build(opt, many);
+        CHECK(many.occupiedCells == one.occupiedCells,
+              "the same cells hold returns however many threads marked them");
+        CHECK(many.domainCells == one.domainCells, "so the same domain comes out");
+        CHECK(many.inDomain == one.inDomain, "byte for byte");
+    }
+}
+
 static void testBudgetCoarsensAndThenRefuses() {
     std::printf("the cell budget coarsens, and says when it cannot\n");
 
@@ -502,6 +551,7 @@ int main() {
     testInteriorOnlyDropsTheOutside();
     testASealedDoorwayAndNoSkinOutside();
     testTheSealIsAThresholdNotADial();
+    testMarkingIsTheSameFromAnyNumberOfThreads();
     testBudgetCoarsensAndThenRefuses();
     testNoReturnsMeansNoWrap();
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

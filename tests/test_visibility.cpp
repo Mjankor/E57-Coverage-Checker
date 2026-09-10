@@ -1052,6 +1052,109 @@ static void testDatumSetupWithNoTranslation() {
     CHECK(failures >= 0, "the self-test still completes on a mis-framed corpus");
 }
 
+// The wrap's drawable skin describes the wrap, and keeps doing so when it is
+// thinned to fit the display.
+//
+// This is a picture, so the thing to check is not how it looks but that it is
+// made of the grid rather than of something near the grid. The wrap decides what
+// the whole answer covers while being invisible in that answer — a wrap built
+// from less than the survey measured produces voxels that look exactly like a
+// survey which missed different space — so the skin is the only way to see it,
+// and a skin that drifts from the grid would be worse than none.
+static void testTheWrapSkinDescribesTheWrap() {
+    std::printf("the wrap's skin is the wrap's own cells, thinned or not\n");
+
+    const std::string path = tmpPath("wrapskin");
+    CHECK(fixture::write(path, {roomScan("west", -3.0, 2.0, 1.5),
+                                roomScan("east",  3.0, 2.0, 1.5)}, 512),
+          "fixture written");
+
+    vis::Options opt;
+    opt.voxelSize  = 0.25;
+    opt.maxRange   = 8.0;
+    opt.tileVoxels = 32;
+    opt.domain     = vis::DomainMode::Shrinkwrap;
+    opt.wrapCell   = 0.25;
+
+    vis::Result r;
+    std::string err;
+    CHECK(vis::run({path}, opt, nullptr, r, err), err.empty() ? "ran" : err.c_str());
+    const wrap::Grid& g = r.wrapGrid;
+    CHECK(!g.empty(), "a wrap was built");
+    if (g.empty()) return;
+
+    // Counted again here, from the grid, by the rule the header states: a cell
+    // holding returns, or a domain cell with a face neighbour outside the domain.
+    static const int kFaces[6][3] = {{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
+    uint64_t occ = 0, bnd = 0;
+    for (int64_t z = 0; z < int64_t(g.dim[2]); ++z)
+        for (int64_t y = 0; y < int64_t(g.dim[1]); ++y)
+            for (int64_t x = 0; x < int64_t(g.dim[0]); ++x) {
+                if (g.cellOccupied(x, y, z)) { ++occ; continue; }
+                if (!g.cellInDomain(x, y, z)) continue;
+                for (int i = 0; i < 6; ++i)
+                    if (!g.cellInDomain(x + kFaces[i][0], y + kFaces[i][1], z + kFaces[i][2])) {
+                        ++bnd;
+                        break;
+                    }
+            }
+    CHECK(occ == g.occupiedCells, "the grid's own occupancy count is the cells that are occupied");
+    CHECK(r.wrapSkinCells == occ + bnd, "the skin is exactly the occupancy and the boundary");
+    CHECK(r.wrapSkin.size() == r.wrapSkinCells, "and under a generous cap, none of it was dropped");
+
+    // Every point on a cell centre of the grid's own lattice, expressed against
+    // the result's origin. Off by half a cell is the mistake this catches, and
+    // half a cell of drift is invisible by eye on a surface this size.
+    uint64_t offLattice = 0;
+    for (const lod::StorePoint& p : r.wrapSkin) {
+        const double w[3] = {double(p.x) + r.origin[0], double(p.y) + r.origin[1],
+                             double(p.z) + r.origin[2]};
+        for (int k = 0; k < 3; ++k) {
+            const double f = w[k] / g.cell - 0.5;
+            if (std::fabs(f - std::round(f)) > 1e-3) { ++offLattice; break; }
+        }
+    }
+    CHECK(offLattice == 0, "every skin point sits on a cell centre");
+
+    // The two kinds stay distinguishable: returns warm, boundary cool. The point
+    // of drawing both is telling "the wrap is wrong" from "the returns went
+    // somewhere unexpected", which needs them to be different colours.
+    uint64_t warm = 0, cool = 0;
+    for (const lod::StorePoint& p : r.wrapSkin) {
+        if (p.r > p.b) ++warm; else if (p.b > p.r) ++cool;
+    }
+    CHECK(warm == occ, "the warm points are the cells holding returns");
+    CHECK(cool == bnd, "and the cool ones are the boundary");
+
+    // Thinned. A cap well under the cell count keeps the surface inside it and
+    // still draws something — a stride, so what is left is a lattice and still
+    // reads as a surface.
+    const uint64_t cap = r.wrapSkinCells / 4;
+    CHECK(cap > 0, "the fixture is big enough to thin");
+    vis::Result thin = r;
+    vis::buildWrapSkin(thin, cap);
+    CHECK(thin.wrapSkinCells == r.wrapSkinCells, "thinning does not change what the wrap IS");
+    CHECK(thin.wrapSkin.size() <= cap, "the cap is respected");
+    CHECK(thin.wrapSkin.size() > cap / 2, "and it is not thinned to nothing");
+
+    // What survived is a subset of the full skin rather than new points near it.
+    std::map<std::array<int64_t, 3>, int> full;
+    for (const lod::StorePoint& p : r.wrapSkin)
+        full[{int64_t(std::llround(p.x * 1000)), int64_t(std::llround(p.y * 1000)),
+              int64_t(std::llround(p.z * 1000))}] = 1;
+    uint64_t strangers = 0;
+    for (const lod::StorePoint& p : thin.wrapSkin)
+        if (!full.count({int64_t(std::llround(p.x * 1000)), int64_t(std::llround(p.y * 1000)),
+                         int64_t(std::llround(p.z * 1000))}))
+            ++strangers;
+    CHECK(strangers == 0, "the thinned skin is a subset of the full one");
+
+    // And no wrap means no skin, rather than a skin of something else.
+    vis::Result none;
+    vis::buildWrapSkin(none, 1u << 20);
+    CHECK(none.wrapSkin.empty() && none.wrapSkinCells == 0, "no wrap, no skin");
+}
+
 int main() {
     testDefaultsAgreeWithTheLibrary();
     testVoxelHash();
@@ -1060,6 +1163,7 @@ int main() {
     testEndToEnd();
     testImageBudgetAndWhatCoarseningCosts();
     testShadingVariesWithShapeAndHeight();
+    testTheWrapSkinDescribesTheWrap();
     testKnownSceneFromFiveSetups();
     testDatumSetupWithNoTranslation();
 

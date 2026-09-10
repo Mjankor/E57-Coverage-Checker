@@ -26,6 +26,7 @@
     // the store's origin arrives or changes afterwards.
     vis::Result              _voxelResult;
     BOOL                     _haveVoxels;
+    BOOL                     _haveWrap;
 
     NSPoint                  _lastPoint;
     BOOL                     _dragging;
@@ -64,6 +65,12 @@
 - (void)setShowVoxels:(BOOL)show {
     _showVoxels = show;
     _renderer.showVoxels = show;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)setShowWrap:(BOOL)show {
+    _showWrap = show;
+    _renderer.showWrap = show;
     [self setNeedsDisplay:YES];
 }
 
@@ -107,10 +114,24 @@
     [_renderer setVoxels:shifted];
 }
 
+- (void)rebuildWrap {
+    if (!_haveWrap) { [_renderer setWrapSkin:std::vector<lod::StorePoint>{}]; return; }
+    // Rebased the same way the voxels are: the skin was built against the
+    // result's origin, and the view draws against the store's.
+    std::vector<lod::StorePoint> shifted = _voxelResult.wrapSkin;
+    const float dx = float(_voxelResult.origin[0] - _origin[0]);
+    const float dy = float(_voxelResult.origin[1] - _origin[1]);
+    const float dz = float(_voxelResult.origin[2] - _origin[2]);
+    for (lod::StorePoint& p : shifted) { p.x += dx; p.y += dy; p.z += dz; }
+    [_renderer setWrapSkin:shifted];
+}
+
 - (void)setVoxelResult:(const vis::Result &)result {
     _voxelResult = result;
     _haveVoxels  = !result.voxels.empty();
+    _haveWrap    = !result.wrapSkin.empty();
     [self rebuildVoxels];
+    [self rebuildWrap];
     [self setNeedsDisplay:YES];
     [self reportStatus];
 }
@@ -118,12 +139,15 @@
 - (void)clearVoxels {
     _voxelResult = vis::Result{};
     _haveVoxels  = NO;
+    _haveWrap    = NO;
     [_renderer setVoxels:std::vector<lod::StorePoint>{}];
+    [_renderer setWrapSkin:std::vector<lod::StorePoint>{}];
     [self setNeedsDisplay:YES];
     [self reportStatus];
 }
 
 - (BOOL)hasVoxels { return _haveVoxels; }
+- (BOOL)hasWrap { return _haveWrap; }
 
 - (void)setVoxelShading:(uint8_t)mode {
     if (!_haveVoxels) return;
@@ -177,6 +201,7 @@
     // them against the store's so everything stays registered.
     [self rebuildSetupMarkers];
     [self rebuildVoxels];
+    [self rebuildWrap];
     [_renderer setStore:&_store];
     _selectionStale = YES;
     [self frameAll];

@@ -153,6 +153,7 @@ const char *kindLabel(check::Kind k) {
     CGFloat              _sidebarWidth;
     NSButton            *_cloudToggle;
     NSButton            *_voxelToggle;
+    NSButton            *_wrapToggle;
     NSMutableArray<NSMenuItem *> *_shadingItems;
     NSWindow            *_reportWindow;
     NSTextView          *_reportText;
@@ -333,6 +334,7 @@ const char *kindLabel(check::Kind k) {
     const CGFloat bw = 128, bh = 24, margin = 12, gap = 6;
     _cloudToggle.frame = NSMakeRect(RW - margin - bw, H - margin - bh, bw, bh);
     _voxelToggle.frame = NSMakeRect(RW - margin - bw, H - margin - 2 * bh - gap, bw, bh);
+    _wrapToggle.frame  = NSMakeRect(RW - margin - bw, H - margin - 3 * bh - 2 * gap, bw, bh);
 
     [self layoutTableColumns];
 }
@@ -393,12 +395,19 @@ const char *kindLabel(check::Kind k) {
     struct { NSString *title; SEL action; NSButton * __strong *slot; } defs[] = {
         {@"Original clouds", @selector(toggleClouds:), &_cloudToggle},
         {@"Voxels",          @selector(toggleVoxels:), &_voxelToggle},
+        {@"Shrinkwrap",      @selector(toggleWrap:),   &_wrapToggle},
     };
     for (auto &d : defs) {
         NSButton *b = [[NSButton alloc] initWithFrame:NSZeroRect];
         b.title       = d.title;
         [b setButtonType:NSButtonTypePushOnPushOff];
-        b.state       = NSControlStateValueOn;
+        // The shrinkwrap starts off, and starts unavailable. Off because it is a
+        // diagnostic and a surface around the answer — left on, it would hide
+        // the thing it explains. Unavailable because there is no run yet, and a
+        // run on the box domain never produces one: see refreshWrapAvailability.
+        const BOOL isWrap = (d.slot == &_wrapToggle);
+        b.state       = isWrap ? NSControlStateValueOff : NSControlStateValueOn;
+        b.enabled     = !isWrap;
         b.font        = [NSFont systemFontOfSize:11];
         b.target      = self;
         b.action      = d.action;
@@ -427,7 +436,12 @@ const char *kindLabel(check::Kind k) {
     }
 }
 
-// The two states of a layer toggle, painted for a dark viewport.
+// The three states of a layer toggle, painted for a dark viewport.
+//
+// Disabled is one of the three, and it has to be painted too: these buttons draw
+// their own chip, so the system's usual greying-out of a disabled control never
+// happens, and a layer with nothing in it would otherwise look exactly like one
+// that is merely switched off — an invitation to keep clicking.
 - (void)styleLayerToggle:(NSButton *)b {
     const BOOL on = (b.state == NSControlStateValueOn);
     // Colours in the view's own space rather than semantic ones: the background
@@ -439,6 +453,14 @@ const char *kindLabel(check::Kind k) {
                          : [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.38];
     NSColor *text   = on ? [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:1.00]
                          : [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.82];
+    if (!b.enabled) {
+        // Still readable — it says which layer is unavailable — but plainly not
+        // a control at the moment: no fill, a rim dim enough to read as an
+        // outline, and the label at the edge of legibility rather than past it.
+        fill   = [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.03];
+        border = [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.14];
+        text   = [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.34];
+    }
     b.layer.backgroundColor = fill.CGColor;
     b.layer.borderColor     = border.CGColor;
     // An attributed title, because a borderless button's plain `title` is drawn
@@ -462,6 +484,25 @@ const char *kindLabel(check::Kind k) {
     NSButton *b = (NSButton *)sender;
     _cloudView.showVoxels = (b.state == NSControlStateValueOn);
     [self styleLayerToggle:b];
+}
+
+- (void)toggleWrap:(id)sender {
+    NSButton *b = (NSButton *)sender;
+    _cloudView.showWrap = (b.state == NSControlStateValueOn);
+    [self styleLayerToggle:b];
+}
+
+// Whether there is a wrap to show, reflected in both controls that show it.
+// Turned off as well as disabled when there is none: the switch should not be
+// left sitting in the on position over an empty layer.
+- (void)refreshWrapAvailability {
+    const BOOL have = [_cloudView hasWrap];
+    _wrapToggle.enabled = have;
+    if (!have) {
+        _wrapToggle.state = NSControlStateValueOff;
+        _cloudView.showWrap = NO;
+    }
+    [self styleLayerToggle:_wrapToggle];
 }
 
 - (void)buildMenu {
@@ -525,6 +566,8 @@ const char *kindLabel(check::Kind k) {
     [viewMenu addItemWithTitle:@"Original Clouds"
                         action:@selector(toggleCloudsMenu:) keyEquivalent:@"1"];
     [viewMenu addItemWithTitle:@"Voxels" action:@selector(toggleVoxelsMenu:) keyEquivalent:@"2"];
+    [viewMenu addItemWithTitle:@"Shrinkwrap Skin"
+                        action:@selector(toggleWrapMenu:) keyEquivalent:@"3"];
     [viewMenu addItem:[NSMenuItem separatorItem]];
     // Shading. Here rather than in the run sheet because it is a way of looking
     // at the answer, not a parameter of computing it: the outward normals are
@@ -633,6 +676,14 @@ const char *kindLabel(check::Kind k) {
     _cloudView.showVoxels = on;
     _voxelToggle.state = on ? NSControlStateValueOn : NSControlStateValueOff;
     [self styleLayerToggle:_voxelToggle];
+}
+
+- (void)toggleWrapMenu:(id)sender {
+    (void)sender;
+    const BOOL on = !_cloudView.showWrap;
+    _cloudView.showWrap = on;
+    _wrapToggle.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    [self styleLayerToggle:_wrapToggle];
 }
 
 // The scan report, in the app. Everything `e57cov info` prints — the raster,
@@ -825,13 +876,16 @@ const char *kindLabel(check::Kind k) {
 - (void)clearVoxels:(id)sender {
     (void)sender;
     [_cloudView clearVoxels];
+    [self refreshWrapAvailability];
     _status.stringValue = @"Voxels cleared.";
 }
 
-// A switch with nothing to switch to should not look available. This is the
-// only item that can be in that position, so everything else validates through.
+// A switch with nothing to switch to should not look available. Two items can be
+// in that position — the GPU carve with no device, and the wrap on a run that
+// used the box domain — so everything else validates through.
 - (BOOL)validateMenuItem:(NSMenuItem *)item {
     if (item.action == @selector(toggleGpu:)) return [CarveGpu shared] != nil;
+    if (item.action == @selector(toggleWrapMenu:)) return [_cloudView hasWrap];
     return YES;
 }
 
@@ -1285,6 +1339,20 @@ const char *kindLabel(check::Kind k) {
         // coarse cells clear less space — so the unobserved volume on this line is
         // overstated by however much. That is a different answer, not a blurrier
         // one, and it has to be on the line the number is on.
+        // What the wrap was built from, and that it can be looked at.
+        //
+        // The occupancy count is here because it is the one number that catches
+        // the wrap being built from less than the survey measured — which is a
+        // mistake this has already made, by sampling the raster at a stride.
+        // Under-marking shrinks the domain, and a smaller domain quietly removes
+        // questions instead of answering them, so it never looks like an error on
+        // its own. Against the cell size and the site it is a number a reader can
+        // sanity-check; against the skin on screen it is a number they can see.
+        if (result->domain.kind == carve::Domain::Kind::Wrap && !result->wrapGrid.empty())
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   wrap: %llu cells at %.2f m, from %llu holding returns (⌘3)",
+                    (unsigned long long)result->wrapGrid.domainCells, result->wrapGrid.cell,
+                    (unsigned long long)result->wrapGrid.occupiedCells];
         if (result->domain.kind == carve::Domain::Kind::Wrap && result->wrapGrid.interiorOnly &&
             !result->wrapGrid.sealLeaked)
             warn = [warn stringByAppendingFormat:
@@ -1387,6 +1455,10 @@ const char *kindLabel(check::Kind k) {
             me->_voxelToggle.state = NSControlStateValueOn;
             [me styleLayerToggle:me->_voxelToggle];
             me->_cloudView.showVoxels = YES;
+            // A run on the box domain builds no wrap, so there is nothing for
+            // the switch to show. Disabled rather than left to click and do
+            // nothing visible, which reads as a broken wrap.
+            [me refreshWrapAvailability];
             me->_status.stringValue = line;
             me->_progress.stringValue = @"";
             me->_busy = NO;

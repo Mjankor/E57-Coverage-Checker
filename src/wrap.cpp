@@ -47,12 +47,12 @@ constexpr uint8_t kBarrier  = 1u << 4;   // sealed: what the flood cannot cross
 // a portal rather than a knob on how much to remove, and erring wide costs a
 // lobe of outside air near a genuine opening and nothing else.
 //
-// What makes the raw occupancy watertight in
-// the first place is digital topology rather than morphology: a 6-connected
-// flood is blocked by a 26-connected barrier, and a surface sampled more finely
-// than one cell marks a 26-connected set, which markScan's stride guarantees at
-// the furthest range the image reaches. The seal is for holes in the SURVEY, not
-// holes in the sampling.
+// What makes the raw occupancy watertight in the first place is digital topology
+// rather than morphology: a 6-connected flood is blocked by a 26-connected
+// barrier, and a surface marked at every cell it passes through gives one. That
+// is why markScan samples the raster exactly rather than at a stride — the seal
+// is for holes in the SURVEY, and it should not be quietly covering for holes in
+// the sampling as well.
 //
 // A dilated barrier on its own then has the failure the whole switch exists to
 // avoid: the flood stops a seal's width short of the wall, so a skin of
@@ -273,6 +273,18 @@ void growOutside(Grid& g, const std::vector<double>& d2) {
 
 } // namespace
 
+bool Grid::cellInDomain(int64_t x, int64_t y, int64_t z) const {
+    if (x < 0 || y < 0 || z < 0 || x >= int64_t(dim[0]) || y >= int64_t(dim[1]) ||
+        z >= int64_t(dim[2])) return false;
+    return (inDomain[index(uint32_t(x), uint32_t(y), uint32_t(z))] & kInDomain) != 0;
+}
+
+bool Grid::cellOccupied(int64_t x, int64_t y, int64_t z) const {
+    if (x < 0 || y < 0 || z < 0 || x >= int64_t(dim[0]) || y >= int64_t(dim[1]) ||
+        z >= int64_t(dim[2])) return false;
+    return (inDomain[index(uint32_t(x), uint32_t(y), uint32_t(z))] & kOccupied) != 0;
+}
+
 bool Grid::contains(double wx, double wy, double wz) const {
     if (inDomain.empty() || !(cell > 0)) return true;
     const double w[3] = {wx, wy, wz};
@@ -376,21 +388,27 @@ bool size(const double lo[3], const double hi[3], const Options& opt, Grid& grid
 void markScan(const MarkSource& src, Grid& grid) {
     if (grid.empty() || src.rows == 0 || src.cols == 0 || !src.pointAt) return;
 
-    // The stride. One angular step moves a ray by `angularStep * furthest` at the
-    // far end of the scan, so this many steps fit inside a cell — and sampling
-    // that often cannot leave a gap in the wrap at any range the image reaches.
-    // Rounded down, and never below one.
-    uint32_t stride = 1;
-    const double spread = src.angularStep * src.furthest;
-    if (spread > 1e-9) {
-        const double s = grid.cell / spread;
-        if (s > 1.0) stride = uint32_t(std::min(s, 4096.0));
-    }
-
-    for (uint32_t r = 0; r < src.rows; r += stride) {
-        for (uint32_t c = 0; c < src.cols; c += stride) {
+    // EVERY cell, no stride. That is a correction, and the reason is worth
+    // keeping because the mistake is an easy one to make twice.
+    //
+    // This used to sample one raster cell in `n`, with n chosen so that adjacent
+    // sampled rays stay closer together than a grid cell at the furthest range
+    // the image reaches. That reasoning is only true for a surface square to the
+    // ray. At grazing incidence — which is most of the ground, and every wall
+    // seen nearly edge on — consecutive rays land further apart by a factor of
+    // one over the sine of the incidence angle, without bound. On a real scan a
+    // stride of six missed FIFTY-SIX PER CENT of the occupied cells: 16,127
+    // marked where marking every cell finds 37,012.
+    //
+    // Under-marking shrinks the wrap, and a smaller domain removes questions
+    // rather than answering them differently — the dangerous direction. So the
+    // sampling is exact, and the cost was moved instead: see the direction
+    // tables the caller builds, which take the trigonometry out of the inner
+    // loop and leave about twenty flops a cell.
+    for (uint32_t r = 0; r < src.rows; ++r) {
+        for (uint32_t c = 0; c < src.cols; ++c) {
             double w[3];
-            if (!src.pointAt(src.user, r, c, w)) continue;
+            if (!src.pointAt(src.user, src.imageForStatus, r, c, w)) continue;
             int64_t i[3];
             bool in = true;
             for (int k = 0; k < 3; ++k) {
@@ -398,11 +416,18 @@ void markScan(const MarkSource& src, Grid& grid) {
                 if (i[k] < 0 || i[k] >= int64_t(grid.dim[k])) { in = false; break; }
             }
             if (!in) continue;
-            // An OR into a byte: order-independent, so this is safe to run for
-            // several scans at once and gives the same grid however many threads
-            // did it.
-            grid.inDomain[grid.index(uint32_t(i[0]), uint32_t(i[1]), uint32_t(i[2]))]
-                |= kOccupied;
+            // An ATOMIC or into the byte, so several scans can mark at once.
+            //
+            // A plain |= would not do, however harmless it looks. Two threads
+            // reading the same byte, setting their bit and writing it back lose
+            // one of the two, and what is lost is an occupied cell — which
+            // shrinks the wrap, and a smaller domain removes questions rather
+            // than answering them differently. Relaxed ordering is enough: the
+            // bits are independent and nothing is published through them, so
+            // only the read-modify-write needs to be indivisible.
+            uint8_t* cellByte =
+                &grid.inDomain[grid.index(uint32_t(i[0]), uint32_t(i[1]), uint32_t(i[2]))];
+            __atomic_or_fetch(cellByte, kOccupied, __ATOMIC_RELAXED);
         }
     }
 }

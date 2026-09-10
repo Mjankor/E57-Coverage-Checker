@@ -152,6 +152,8 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
     id<MTLBuffer>              _setupBuffer;
     id<MTLBuffer>              _voxelBuffer;
     size_t                     _voxelCount;
+    id<MTLBuffer>              _wrapBuffer;
+    size_t                     _wrapCount;
     m3::Vec3                   _pivot;
 }
 
@@ -213,6 +215,7 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
     r->_voxelPointScale = 1.6f;
     r->_showPoints      = YES;
     r->_showVoxels      = YES;
+    r->_showWrap        = NO;
     r->_showSetups    = YES;
     r->_showCrosshair = YES;
     r->_showPivot     = YES;
@@ -223,6 +226,7 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
 - (BOOL)zeroCopy { return _wholeStore != nil; }
 - (uint64_t)cachedBytes { return _cacheBytes; }
 - (size_t)voxelCount { return _voxelCount; }
+- (size_t)wrapCount { return _wrapCount; }
 
 - (void)setVoxels:(const std::vector<lod::StorePoint> &)voxels {
     _voxelBuffer = nil;
@@ -235,6 +239,17 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
     // A failed allocation is not fatal: the count stays zero and nothing is
     // drawn, which is better than a half-populated buffer read as geometry.
     if (_voxelBuffer) _voxelCount = voxels.size();
+}
+
+- (void)setWrapSkin:(const std::vector<lod::StorePoint> &)skin {
+    _wrapBuffer = nil;
+    _wrapCount  = 0;
+    if (skin.empty()) return;
+    const size_t bytes = skin.size() * sizeof(lod::StorePoint);
+    _wrapBuffer = [_device newBufferWithBytes:skin.data()
+                                       length:bytes
+                                      options:MTLResourceStorageModeShared];
+    if (_wrapBuffer) _wrapCount = skin.size();
 }
 
 - (void)setStore:(const store::Reader *)reader {
@@ -372,6 +387,24 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
             }
             [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:count];
         }
+    }
+
+    if (_showWrap && _wrapBuffer && _wrapCount) {
+        // Drawn before the voxels and the cloud both, and depth-tested with
+        // them: the wrap is a surface enclosing the answer, so it belongs behind
+        // whatever it encloses rather than painted over it. Its cells are half a
+        // metre where a voxel is five centimetres, so they are drawn larger — at
+        // the voxels' size a wrap cell is a speck and the surface disappears.
+        [enc setRenderPipelineState:_pointPipeline];
+        Uniforms u{};
+        u.viewProj         = vp;
+        u.pointSize        = _pointSize * _voxelPointScale * 2.0f;
+        u.attenuationScale = atten;
+        u.useVertexColour  = 1u;
+        u.tint             = simd_make_float4(1, 1, 1, 1);
+        [enc setVertexBuffer:_wrapBuffer offset:0 atIndex:0];
+        [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+        [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:_wrapCount];
     }
 
     if (_showVoxels && _voxelBuffer && _voxelCount) {

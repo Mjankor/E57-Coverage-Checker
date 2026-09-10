@@ -34,6 +34,11 @@
 // separate pipelines would only mean two things to keep in step.
 - (void)setVoxels:(const std::vector<lod::StorePoint> &)voxels;
 
+// The shrinkwrap's own surface — see vis::buildWrapSkin. A third layer rather
+// than a colour on the voxels, because it answers a different question: the
+// voxels are the answer, and this is the shape the answer was asked over.
+- (void)setWrapSkin:(const std::vector<lod::StorePoint> &)skin;
+
 // Setup positions in the store's local frame, drawn as markers. Available from
 // headers alone, so these are shown while the store is still being built.
 - (void)setSetupMarkers:(const std::vector<simd_float3> &)markers;
@@ -49,6 +54,7 @@
 @property (nonatomic) float voxelPointScale;
 @property (nonatomic) BOOL  showPoints;
 @property (nonatomic) BOOL  showVoxels;
+@property (nonatomic) BOOL  showWrap;
 @property (nonatomic) BOOL  showSetups;
 @property (nonatomic) BOOL  showCrosshair;
 @property (nonatomic) BOOL  showPivot;
@@ -59,5 +65,6 @@
 // Bytes currently held in per-node buffers; zero on the zero-copy path.
 @property (nonatomic, readonly) uint64_t cachedBytes;
 @property (nonatomic, readonly) size_t   voxelCount;
+@property (nonatomic, readonly) size_t   wrapCount;
 
 @end

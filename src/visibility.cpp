@@ -264,40 +264,63 @@ void markSetup(const rimg::RangeImage& im, wrap::Grid& grid) {
     if (grid.empty() || !im.map.valid || im.rows == 0 || im.cols == 0) return;
     if (im.map.elByRow.size() != im.rows || im.map.azByCol.size() != im.cols) return;
 
+    // The direction tables, so the inner loop has no trigonometry in it.
+    //
+    // Every cell of the raster is marked — see wrap::markScan for why sampling a
+    // fraction of them opened holes over the ground — and a cosine and a sine
+    // per cell over thirteen million of them, a thousand times over, is not a
+    // cost worth paying for numbers that repeat every row and every column. The
+    // whole transform then folds into one matrix: instrument frame out through
+    // the tilt, then the pose, is a rotation and a translation, and both are
+    // constant over the scan.
     struct Ctx {
-        const rimg::RangeImage* im;
-        viewer::Rigid fwd;
-    } ctx{&im, im.hasPose ? viewer::rigidFromPose(im.pose) : viewer::Rigid{}};
+        std::vector<double> ce, se, ca, sa;
+        double M[9];
+        double t[3];
+    } ctx;
+    ctx.ce.resize(im.rows); ctx.se.resize(im.rows);
+    ctx.ca.resize(im.cols); ctx.sa.resize(im.cols);
+    for (uint32_t r = 0; r < im.rows; ++r) {
+        ctx.ce[r] = std::cos(im.map.elByRow[r]);
+        ctx.se[r] = std::sin(im.map.elByRow[r]);
+    }
+    for (uint32_t c = 0; c < im.cols; ++c) {
+        ctx.ca[c] = std::cos(im.map.azByCol[c]);
+        ctx.sa[c] = std::sin(im.map.azByCol[c]);
+    }
+    const viewer::Rigid fwd = im.hasPose ? viewer::rigidFromPose(im.pose) : viewer::Rigid{};
+    // M = pose * tilt^T. fromInstrument is the tilt transposed, so composing the
+    // two here is the same arithmetic the self-test's probes do one at a time.
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            double v = 0;
+            for (int k = 0; k < 3; ++k) v += fwd.R[3 * i + k] * im.tilt[3 * j + k];
+            ctx.M[3 * i + j] = v;
+        }
+        ctx.t[i] = fwd.t[i];
+    }
 
     wrap::MarkSource src;
     src.rows = im.rows;
     src.cols = im.cols;
     src.user = &ctx;
-    // The widest step in either axis, so the stride is safe for both.
-    const double elStep = (im.rows > 1)
-        ? std::fabs(im.map.elSpanRad) / double(im.rows - 1) : 0.0;
-    const double azStep = (im.cols > 1)
-        ? std::fabs(im.map.azSpanRad) / double(im.cols - 1) : 0.0;
-    src.angularStep = std::max(elStep, azStep);
-    src.furthest    = std::max(1.0, im.diag.furthestReturn);
-    src.pointAt = [](const void* user, uint32_t r, uint32_t c, double out[3]) {
+    src.imageForStatus = &im;
+    src.pointAt = [](const void* user, const void* image, uint32_t r, uint32_t c,
+                     double out[3]) {
         const Ctx& k = *static_cast<const Ctx*>(user);
-        const rimg::RangeImage& img = *k.im;
+        const rimg::RangeImage& img = *static_cast<const rimg::RangeImage*>(image);
         // Only measured surface marks the wrap. A no-return ray says where the
         // survey saw THROUGH, which is the opposite of where it found something,
         // and marking it would wrap the sky.
         if (img.statusAt(r, c) != rimg::Status::Hit) return false;
         const double rho = img.rangeAt(r, c);
         if (!(rho > 0.0)) return false;
-        const double el = img.map.elByRow[r], az = img.map.azByCol[c];
-        const double ce = std::cos(el);
-        double q[3] = {rho * ce * std::cos(az), rho * ce * std::sin(az), rho * std::sin(el)};
-        // The tables are angles in the instrument's frame, so the direction comes
-        // back out of that frame before the pose puts it in the world.
-        img.fromInstrument(q[0], q[1], q[2]);
+        const double q[3] = {rho * k.ce[r] * k.ca[c],
+                             rho * k.ce[r] * k.sa[c],
+                             rho * k.se[r]};
         for (int i = 0; i < 3; ++i)
-            out[i] = k.fwd.R[3 * i + 0] * q[0] + k.fwd.R[3 * i + 1] * q[1] +
-                     k.fwd.R[3 * i + 2] * q[2] + k.fwd.t[i];
+            out[i] = k.M[3 * i + 0] * q[0] + k.M[3 * i + 1] * q[1] +
+                     k.M[3 * i + 2] * q[2] + k.t[i];
         return true;
     };
     wrap::markScan(src, grid);
@@ -316,6 +339,86 @@ uint64_t imageCellsPerScan(const Options& opt, uint64_t scanCount) {
     cells = std::max<uint64_t>(cells, opt.minImageCells);
     // rimg::Options::maxCells is 32 bits, and no raster approaches it.
     return std::min<uint64_t>(cells, 0xFFFFFFFFull);
+}
+
+// The wrap as a drawable surface: the boundary of the domain, and the cells that
+// hold returns.
+//
+// Both, because they answer the two different questions someone asks when the
+// wrap looks wrong. The boundary shows the shape the question is being asked
+// over — whether it hugs the building, whether it has swallowed the sky, whether
+// the interior rule took the right side. The occupied cells show what the shape
+// was built FROM, which separates "the wrap is wrong" from "the returns went
+// somewhere unexpected" — and that distinction has already cost this project
+// several days, in a different part of the pipeline.
+//
+// A boundary cell is one in the domain with a face neighbour that is not. Faces
+// only, matching the frontier rule the voxels use, so the two surfaces are the
+// same kind of thing and can be compared by eye.
+void buildWrapSkin(Result& r, uint64_t cap) {
+    r.wrapSkin.clear();
+    r.wrapSkinCells = 0;
+    const wrap::Grid& g = r.wrapGrid;
+    if (g.empty()) return;
+
+    // Two passes: count, then fill at a stride that fits the cap. A stride
+    // rather than the voxels' hash decimation because this is a surface being
+    // read as a shape, and a hash keeps a random scatter where a stride keeps a
+    // lattice — which still reads as a surface when it is thinned.
+    for (int pass = 0; pass < 2; ++pass) {
+        uint64_t seen = 0;
+        const uint64_t stride = (pass == 0 || r.wrapSkinCells <= cap || cap == 0)
+                              ? 1
+                              : (r.wrapSkinCells + cap - 1) / cap;
+        for (int64_t z = 0; z < int64_t(g.dim[2]); ++z)
+            for (int64_t y = 0; y < int64_t(g.dim[1]); ++y)
+                for (int64_t x = 0; x < int64_t(g.dim[0]); ++x) {
+                    const bool occ = g.cellOccupied(x, y, z);
+                    uint8_t faces = 0;
+                    if (g.cellInDomain(x, y, z)) {
+                        for (int i = 0; i < 6; ++i)
+                            if (!g.cellInDomain(x + kFaceDirs[i][0], y + kFaceDirs[i][1],
+                                                z + kFaceDirs[i][2]))
+                                faces |= uint8_t(1u << i);
+                    }
+                    if (!occ && !faces) continue;
+                    if (pass == 0) { ++r.wrapSkinCells; continue; }
+                    if (stride > 1 && (seen++ % stride) != 0) continue;
+
+                    double c[3];
+                    g.cellCentre(x, y, z, c);
+                    lod::StorePoint p{};
+                    p.x = float(c[0] - r.origin[0]);
+                    p.y = float(c[1] - r.origin[1]);
+                    p.z = float(c[2] - r.origin[2]);
+                    // The boundary is lit by its own outward normal, the same way
+                    // the frontier is, so a fold in it reads as a fold. The
+                    // occupied cells are flat, because they are evidence rather
+                    // than a surface and should not be mistaken for one.
+                    if (occ) {
+                        p.r = 250; p.g = 190; p.b = 70;        // returns: warm
+                    } else {
+                        double n[3] = {0, 0, 0};
+                        for (int i = 0; i < 6; ++i) {
+                            if (!(faces & (1u << i))) continue;
+                            for (int k = 0; k < 3; ++k) n[k] += kFaceDirs[i][k];
+                        }
+                        const double len = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+                        double lit = kAmbient + 0.5 * (1.0 - kAmbient);
+                        if (len > 1e-9) {
+                            double d = 0;
+                            for (int k = 0; k < 3; ++k) d += (n[k] / len) * kLight[k];
+                            lit = kAmbient + (1.0 - kAmbient) * std::max(0.0, d);
+                        }
+                        p.r = uint8_t(70  * lit);              // boundary: cool
+                        p.g = uint8_t(200 * lit);
+                        p.b = uint8_t(215 * lit);
+                    }
+                    p.a = 255;
+                    r.wrapSkin.push_back(p);
+                }
+        if (r.wrapSkinCells == 0) return;
+    }
 }
 
 void recolour(Result& r, uint8_t shading) {
@@ -629,14 +732,39 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                 // the note says why.
                 out.wrapNote = werr;
             } else {
-                uint64_t marked = 0;
-                for (const carve::SetupView& s : setups) {
-                    markSetup(*s.image, out.wrapGrid);
-                    if (!tick("wrapping the site", ++marked, setups.size())) {
-                        out.cancelled = true;
-                        err = "cancelled";
-                        return false;
+                // Marked across setups at once. Every cell of every raster is
+                // visited, so this is the one stage that scales with the corpus
+                // the way the image build does — and it shares nothing but the
+                // grid, into which marking is an atomic OR.
+                {
+                    unsigned nm = opt.threads ? opt.threads
+                                              : std::thread::hardware_concurrency();
+                    if (nm == 0) nm = 1;
+                    nm = unsigned(std::min<uint64_t>(nm, std::max<size_t>(1, setups.size())));
+                    std::atomic<uint64_t> next{0}, done{0};
+                    std::atomic<bool>     stop{false};
+                    std::mutex            lock;
+                    auto marker = [&]() {
+                        for (;;) {
+                            if (stop.load(std::memory_order_relaxed)) break;
+                            const uint64_t j = next.fetch_add(1, std::memory_order_relaxed);
+                            if (j >= setups.size()) break;
+                            markSetup(*setups[size_t(j)].image, out.wrapGrid);
+                            const uint64_t d = done.fetch_add(1, std::memory_order_relaxed) + 1;
+                            std::lock_guard<std::mutex> lk(lock);
+                            if (!tick("wrapping the site", d, setups.size()))
+                                stop.store(true, std::memory_order_relaxed);
+                        }
+                    };
+                    if (nm == 1) {
+                        marker();
+                    } else {
+                        std::vector<std::thread> pool;
+                        pool.reserve(nm);
+                        for (unsigned i = 0; i < nm; ++i) pool.emplace_back(marker);
+                        for (std::thread& t : pool) t.join();
                     }
+                    if (stop.load()) { out.cancelled = true; err = "cancelled"; return false; }
                 }
                 // The instrument positions, so the wrap can check that an
                 // interior-only flood stayed outside the building it was
@@ -939,6 +1067,10 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     }
 
     while (col.cap && col.out.size() > col.cap) col.halve();
+
+    // The wrap, as something to look at — see buildWrapSkin. Built last, so it
+    // is against the same origin the voxels ended up on.
+    buildWrapSkin(out, opt.displayCap);
 
     out.voxels = std::move(col.out);
     out.voxelFaces = std::move(col.faceOf);

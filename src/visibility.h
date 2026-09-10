@@ -282,6 +282,16 @@ struct Result {
     wrap::Grid  wrapGrid;
     // Why there is no wrap, when one was asked for and could not be had.
     std::string wrapNote;
+    // The wrap, as something to look at. See buildWrapSkin: the boundary of the
+    // domain, plus the cells that hold returns, in one drawable set against the
+    // same `origin` as the voxels.
+    //
+    // A picture rather than a statistic, and it exists because the wrap decides
+    // what the whole answer covers while being invisible in that answer: a wrap
+    // that has gone wrong looks, in the voxels, exactly like a survey that
+    // missed different space.
+    std::vector<lod::StorePoint> wrapSkin;
+    uint64_t wrapSkinCells = 0;      // before the display cap
     double   origin[3] = {0, 0, 0};
     double   voxelSize = 0;
     lod::Aabb bounds;
@@ -328,6 +338,10 @@ uint64_t imageCellsPerScan(const Options& opt, uint64_t scanCount);
 // finished carve, instead of asking for the site to be carved again to change a
 // colour.
 void recolour(Result& r, uint8_t shading);
+
+// Builds Result::wrapSkin from Result::wrapGrid. Called by run(); exposed so a
+// caller holding a result can rebuild it, and so it can be tested.
+void buildWrapSkin(Result& r, uint64_t cap);
 
 // Exposed for testing: the frontier rule and the sampling decision.
 bool touchesVisible(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z);

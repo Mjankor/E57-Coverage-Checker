@@ -169,16 +169,28 @@ struct Grid {
     // three answers carve::Domain::testBox needs, in the order carve::Overlap
     // declares them.
     int testBox(const double blo[3], const double bhi[3]) const;
+
+    // Cell-level readers, so a caller can draw the wrap without knowing how the
+    // bits are packed. Out-of-range indices read false rather than out of the
+    // array: a cell beyond the grid is beyond the question, which is the same
+    // answer contains() gives for a position beyond it.
+    bool cellInDomain(int64_t x, int64_t y, int64_t z) const;
+    bool cellOccupied(int64_t x, int64_t y, int64_t z) const;
+    void cellCentre(int64_t x, int64_t y, int64_t z, double out[3]) const {
+        out[0] = (double(x + lo[0]) + 0.5) * cell;
+        out[1] = (double(y + lo[1]) + 0.5) * cell;
+        out[2] = (double(z + lo[2]) + 0.5) * cell;
+    }
 };
 
 // Marks every cell a scan's returns fall in.
 //
 // Reads the range image rather than the points: the points are decoded, posed
 // and gone by the time the site's extent is known, and the image is the same
-// information already in hand. Cells are sampled with a stride chosen so that
-// adjacent sampled rays stay closer together than one grid cell at the furthest
-// range the image reaches — so the sampling cannot open a hole in the wrap,
-// whatever the raster's resolution.
+// information already in hand. EVERY cell holding a return is marked — see
+// markScan for why sampling a fraction of them, however carefully the fraction
+// was chosen, opened holes in the wrap over exactly the surfaces that matter
+// most.
 //
 // Safe to call concurrently on the same grid from different scans: marking is an
 // OR into a byte, so the result does not depend on which scan got there first or
@@ -192,15 +204,14 @@ struct MarkSource {
     // transform from a raster cell to a point belongs to range_image and the
     // pose belongs to frame.
     uint32_t rows = 0, cols = 0;
-    // Returns false when the cell holds no return.
-    bool (*pointAt)(const void* user, uint32_t row, uint32_t col, double out[3]) = nullptr;
+    // Returns false when the cell holds no return. `image` is whatever the
+    // caller put in `imageForStatus`, passed through untouched — it is separate
+    // from `user` only so a caller can keep its precomputed tables in one and
+    // the thing it is reading statuses from in the other.
+    bool (*pointAt)(const void* user, const void* image, uint32_t row, uint32_t col,
+                    double out[3]) = nullptr;
     const void* user = nullptr;
-    // The widest angular step in the raster, radians, and how far it reaches.
-    // Together they set the stride: at `furthest` metres, one step of
-    // `angularStep` moves a ray by their product, and the stride is how many
-    // steps fit inside one grid cell.
-    double angularStep = 0.0;
-    double furthest = 0.0;
+    const void* imageForStatus = nullptr;
 };
 
 // Sizes the grid to a world box, in metres, padded so its boundary is clear of

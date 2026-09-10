@@ -54,6 +54,7 @@
 - (void)setVoxelShading:(uint8_t)mode;
 - (void)clearVoxels;
 - (BOOL)hasVoxels;
+- (BOOL)hasWrap;
 - (size_t)voxelCount;
 
 // Frames the voxels rather than the whole site, which is usually what you want
@@ -67,5 +68,9 @@
 @property (nonatomic) size_t pointBudget;
 @property (nonatomic) BOOL   showClouds;
 @property (nonatomic) BOOL   showVoxels;
+// The shrinkwrap's own surface — the shape the answer was asked over. Off by
+// default: it is a diagnostic, and it encloses the voxels, so leaving it on
+// would hide the thing it is there to explain.
+@property (nonatomic) BOOL   showWrap;
 
 @end
