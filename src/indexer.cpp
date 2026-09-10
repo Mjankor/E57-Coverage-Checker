@@ -896,37 +896,67 @@ bool build(const Survey& s, const std::string& storePath, const BuildOptions& op
     const std::vector<uint32_t> cells = spiller.cells();
     stats.chunks = cells.size();
 
-    for (size_t ci = 0; ci < cells.size(); ++ci) {
-        if (progress && !progress("building chunks", ci, cells.size())) {
-            err = "cancelled"; return false;
-        }
-        const uint32_t cell = cells[ci];
+    // Built in parallel, appended serially.
+    //
+    // Reading a spill file and building its subtree shares nothing with any other
+    // chunk. Appending the result does: node indices come out of the writer in
+    // append order, so the appends run in cell order on this thread and the store
+    // is identical to what the serial build produced.
+    //
+    // In BATCHES of `ct` rather than all at once, because a finished subtree holds
+    // its whole payload in memory and the point of this build is that memory does
+    // not grow with the corpus. Peak is a batch, not a build. See
+    // BuildOptions::maxResidentPoints.
+    unsigned ct = opt.chunkThreads ? opt.chunkThreads : std::thread::hardware_concurrency();
+    if (ct == 0) ct = 1;
+    {
+        const uint64_t perChunk = std::max<uint64_t>(1, opt.targetPointsPerChunk);
+        const uint64_t byMemory = std::max<uint64_t>(1, opt.maxResidentPoints / perChunk);
+        const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+        ct = unsigned(std::min<uint64_t>({ct, byMemory, cores, std::max<size_t>(1, cells.size())}));
+    }
 
-        // Walk the cell path to find the parent node in the top tree and the
-        // octant the chunk hangs from.
-        lod::Aabb cellBounds = root;
-        uint32_t parent = 0;
-        int lastOctant = 0;
-        bool reachable = true;
+    // One chunk's finished work, waiting to be appended.
+    struct Built {
+        lod::Tree                                  sub;
+        std::vector<std::vector<lod::StorePoint>>  payload;
+        uint32_t                                   parent = 0;
+        int                                        lastOctant = 0;
+        uint64_t                                   dropped = 0;
+        bool                                       ok = false;
+        std::string                                err;
+    };
+
+    // The cell path gives the parent node in the top tree and the octant the chunk
+    // hangs from. Read-only against topTree, so it is safe to do on any thread.
+    auto locate = [&](uint32_t cell, lod::Aabb& cellBounds, uint32_t& parent,
+                      int& lastOctant) {
+        cellBounds = root;
+        parent = 0;
+        lastOctant = 0;
         for (uint8_t l = 0; l < stats.chunkLevel; ++l) {
             const int octant = int((cell >> (3 * (stats.chunkLevel - 1 - l))) & 7);
             cellBounds = cellBounds.child(octant);
-            if (l + 1 == stats.chunkLevel) { lastOctant = octant; break; }
-            if (!topTree.nodes[parent].hasChild(octant)) { reachable = false; break; }
+            if (l + 1 == stats.chunkLevel) { lastOctant = octant; return true; }
+            if (!topTree.nodes[parent].hasChild(octant)) return false;
             parent = topTree.nodes[parent].child[octant];
         }
-        if (!reachable) {
-            err = "chunk cell has no parent in the top tree — internal inconsistency";
-            return false;
-        }
+        return true;
+    };
 
+    auto buildOne = [&](size_t ci, Built& out) {
+        const uint32_t cell = cells[ci];
+        lod::Aabb cellBounds;
+        if (!locate(cell, cellBounds, out.parent, out.lastOctant)) {
+            out.err = "chunk cell has no parent in the top tree — internal inconsistency";
+            return;
+        }
         std::FILE* f = std::fopen(spiller.path(cell).c_str(), "rb");
-        if (!f) { err = "cannot reopen chunk " + spiller.path(cell); return false; }
+        if (!f) { out.err = "cannot reopen chunk " + spiller.path(cell); return; }
 
         lod::BuildOptions chunkOpt = opt.tree;
         lod::Builder cb(cellBounds, chunkOpt, stats.chunkLevel);
-        uint64_t dropped = 0;
-        cb.setOverflowSink([&](const lod::StorePoint&) { ++dropped; });
+        cb.setOverflowSink([&out](const lod::StorePoint&) { ++out.dropped; });
 
         std::vector<lod::StorePoint> buf(65536);
         for (;;) {
@@ -935,13 +965,40 @@ bool build(const Survey& s, const std::string& storePath, const BuildOptions& op
             for (size_t k = 0; k < n; ++k) cb.insert(buf[k]);
         }
         std::fclose(f);
+        out.sub = cb.finish(out.payload);
+        out.ok = true;
+    };
 
-        std::vector<std::vector<lod::StorePoint>> payload;
-        const lod::Tree sub = cb.finish(payload);
-        uint32_t subRoot = 0;
-        if (!writer.appendTree(sub, payload, subRoot, err)) return false;
-        if (!writer.linkChild(parent, lastOctant, subRoot, err)) return false;
-        stats.dropped += dropped;
+    std::vector<Built> batch(ct);
+    for (size_t base = 0; base < cells.size(); base += ct) {
+        const size_t n = std::min<size_t>(ct, cells.size() - base);
+        for (size_t k = 0; k < n; ++k) batch[k] = Built{};
+
+        if (n == 1 || ct == 1) {
+            buildOne(base, batch[0]);
+        } else {
+            std::vector<std::thread> pool;
+            pool.reserve(n);
+            for (size_t k = 0; k < n; ++k)
+                pool.emplace_back([&, k]() { buildOne(base + k, batch[k]); });
+            for (std::thread& t : pool) t.join();
+        }
+
+        for (size_t k = 0; k < n; ++k) {
+            Built& b = batch[k];
+            if (!b.ok) { err = b.err.empty() ? "chunk build failed" : b.err; return false; }
+            uint32_t subRoot = 0;
+            if (!writer.appendTree(b.sub, b.payload, subRoot, err)) return false;
+            if (!writer.linkChild(b.parent, b.lastOctant, subRoot, err)) return false;
+            stats.dropped += b.dropped;
+            // Freed as it is consumed, so the batch does not stay resident while
+            // the rest of it is appended.
+            b.payload.clear();
+            b.payload.shrink_to_fit();
+            if (progress && !progress("building chunks", base + k + 1, cells.size())) {
+                err = "cancelled"; return false;
+            }
+        }
     }
 
     if (!writer.finish(err)) return false;

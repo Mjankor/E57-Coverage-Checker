@@ -259,6 +259,100 @@ static void testSurveyDoesNotDependOnThreadCount() {
     CHECK(s.scans.size() == 12, "an absurd thread count still reads the corpus");
 }
 
+// Chunks are built in parallel and the store comes out identical.
+//
+// Building a chunk is independent work and about 70 per cent of a build, so it runs
+// across cores. Appending a finished subtree is NOT independent — the writer hands
+// out node indices in append order — so the appends stay serial and in cell order.
+// If that ever stopped being true the store would still open and still look
+// plausible, with points hanging off the wrong nodes, so the check is content:
+// every stored coordinate hashed, and the hash must not move with the thread count.
+static void testChunksBuildInParallelAndTheStoreIsIdentical() {
+    std::printf("indexer: parallel chunk building, identical store\n");
+
+    // Enough points and spread to occupy several chunk cells.
+    const std::vector<std::string> paths = writeCorpus("chunkpar", 8, 9000, 50.0, 0.0, 0.0);
+    CHECK(paths.size() == 8, "corpus written");
+    indexer::SurveyOptions so;
+    so.classify = true;
+    const indexer::Survey s = indexer::survey(paths, so, nullptr);
+    CHECK(s.usableCount() == 8, "all usable");
+
+    // Every stored point, in store order, hashed.
+    auto digest = [](const std::string& path, uint64_t& points, uint32_t& nodes) {
+        std::string err;
+        store::Reader rd;
+        if (!rd.open(path, err)) return uint64_t(0);
+        const lod::Tree t = rd.tree();
+        nodes = uint32_t(t.nodes.size());
+        points = rd.header().totalPoints;
+        uint64_t h = 1469598103934665603ull;
+        for (size_t i = 0; i < t.nodes.size(); ++i) {
+            const lod::StorePoint* pts = rd.points(i);
+            if (!pts) continue;
+            for (uint32_t j = 0; j < t.nodes[i].pointCount; ++j) {
+                const float f[3] = {pts[j].x, pts[j].y, pts[j].z};
+                const uint8_t* b = reinterpret_cast<const uint8_t*>(f);
+                for (int k = 0; k < 12; ++k) { h ^= b[k]; h *= 1099511628211ull; }
+                h ^= pts[j].scanId; h *= 1099511628211ull;
+            }
+        }
+        return h;
+    };
+
+    uint64_t reference = 0, refPoints = 0;
+    uint32_t refNodes = 0;
+    uint32_t chunksSeen = 0;
+    for (unsigned ct : {1u, 2u, 3u, 4u, 8u}) {
+        const std::string sp = tmpDir() + "/e57cov_chunkpar_" + std::to_string(ct) + ".lod";
+        std::remove(sp.c_str());
+        indexer::BuildOptions bo;
+        bo.chunkThreads = ct;
+        // A small chunk target so there are several chunks to spread, and a
+        // resident budget that does not then throttle the threads back to one.
+        bo.targetPointsPerChunk = 8000;
+        bo.maxResidentPoints    = 8000ull * 16;
+        indexer::BuildStats st;
+        std::string err;
+        CHECK(indexer::build(s, sp, bo, st, nullptr, err),
+              err.empty() ? "builds" : err.c_str());
+        uint64_t points = 0;
+        uint32_t nodes = 0;
+        const uint64_t h = digest(sp, points, nodes);
+        if (reference == 0) {
+            reference = h; refPoints = points; refNodes = nodes; chunksSeen = st.chunks;
+            CHECK(st.chunks > 1, "the corpus really does split into several chunks");
+            CHECK(points == 8 * 9000, "and every point reached the store");
+        } else {
+            CHECK(h == reference, "the same store content at any chunk thread count");
+            CHECK(points == refPoints, "the same point count");
+            CHECK(nodes == refNodes, "and the same node count, so the same tree shape");
+            CHECK(st.chunks == chunksSeen, "over the same chunks");
+        }
+        std::remove(sp.c_str());
+    }
+
+    // The resident budget throttles the thread count rather than being ignored:
+    // one chunk's worth of budget means one chunk at a time, whatever was asked.
+    {
+        const std::string sp = tmpDir() + "/e57cov_chunkpar_budget.lod";
+        std::remove(sp.c_str());
+        indexer::BuildOptions bo;
+        bo.chunkThreads = 8;
+        bo.targetPointsPerChunk = 8000;
+        bo.maxResidentPoints    = 8000;          // room for exactly one chunk
+        indexer::BuildStats st;
+        std::string err;
+        CHECK(indexer::build(s, sp, bo, st, nullptr, err),
+              err.empty() ? "builds under a one-chunk budget" : err.c_str());
+        uint64_t points = 0;
+        uint32_t nodes = 0;
+        CHECK(digest(sp, points, nodes) == reference,
+              "and still produces the same store");
+        std::remove(sp.c_str());
+    }
+}
+
 // The extent pass reads every point, so no point is silently dropped.
 //
 // build() has to choose an octree root before it can insert anything, and when no
@@ -894,6 +988,7 @@ int main() {
     testSurveyIsHeaderOnly();
     testSurveyDoesNotDependOnThreadCount();
     testTheExtentPassMissesNothing();
+    testChunksBuildInParallelAndTheStoreIsIdentical();
     testTheHeuristicLabelsAndNothingMore();
     testTheCheckCacheIsIndistinguishableFromChecking();
     testBuildRoundTrip();

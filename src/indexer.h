@@ -210,6 +210,31 @@ struct BuildOptions {
     uint64_t targetPointsPerChunk = 20000000;
     // 0 picks a level from the corpus size.
     uint8_t  chunkLevel = 0;
+
+    // Chunks built at once. 0 derives it — see maxResidentPoints.
+    //
+    // Building a chunk is independent work: its own spill file, its own subtree,
+    // sharing nothing. It is also about 70 per cent of a build, so this is the
+    // stage worth spreading. Appending a finished subtree to the store is NOT
+    // independent — node indices depend on append order — so chunks are built in
+    // parallel and appended serially in cell order, which is the same order the
+    // serial build used. The store comes out byte-identical whatever this is set
+    // to; there is a test.
+    unsigned chunkThreads = 0;
+
+    // Ceiling on points held in memory at once while chunks are built, which is
+    // what bounds this stage's footprint.
+    //
+    // The whole build exists to keep memory flat regardless of corpus size, and
+    // building several chunks at once spends some of that: peak is roughly
+    // chunkThreads x targetPointsPerChunk points, at 20 bytes each. So the thread
+    // count is derived from this budget rather than from the core count alone, and
+    // a larger targetPointsPerChunk buys fewer threads rather than more memory.
+    //
+    // 80 M points is about 1.6 GB of StorePoint — four 20 M-point chunks, which on
+    // a machine with any real amount of RAM is nothing, and on a small one the
+    // derivation drops to one chunk and the old behaviour.
+    uint64_t maxResidentPoints = 80000000;
     // 0 means every point. Set it to cap a store's size on disk.
     uint64_t maxPointsPerScan = 0;
 };
