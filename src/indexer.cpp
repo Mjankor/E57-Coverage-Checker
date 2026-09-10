@@ -140,10 +140,21 @@ using PointFn = std::function<void(const lod::StorePoint&)>;
 
 // Decodes one scan straight to StorePoints in the file frame, without ever
 // holding the scan in memory.
+//
+// `frameApplyPose` is the survey's frame decision, passed in rather than worked
+// out here. It used to call viewer::decideFrame itself, which samples the points
+// and therefore costs a whole decode pass — and build() calls this twice per scan,
+// so that was two passes spent re-learning what the survey already knew. See
+// ScanRef::frameApplyPose.
+//
+// `positionsOnly` skips the colour plan. A caller that just wants coordinates —
+// build()'s extent pass — has no use for colour, and working it out is not free:
+// an intensity-bearing scan costs another decode pass to find the intensity range,
+// because E57 leaves that scale to the producer.
 bool streamScan(e57::Reader& r, size_t idx, uint16_t scanId,
                 const double origin[3], uint64_t maxPoints,
-                size_t paletteIndex, const PointFn& sink,
-                uint64_t& readCount, std::string& err) {
+                size_t paletteIndex, bool frameApplyPose, bool positionsOnly,
+                const PointFn& sink, uint64_t& readCount, std::string& err) {
     const e57::Scan& s = r.scan(idx);
     const bool cartesian = s.field("cartesianX") && s.field("cartesianY") && s.field("cartesianZ");
     const bool spherical = s.field("sphericalRange") && s.field("sphericalAzimuth") &&
@@ -162,7 +173,11 @@ bool streamScan(e57::Reader& r, size_t idx, uint16_t scanId,
 
     ColourPlan plan;
     size_t colIdx = SIZE_MAX, intIdx = SIZE_MAX;
-    if (s.field("colorRed") && s.field("colorGreen") && s.field("colorBlue")) {
+    if (positionsOnly) {
+        // Nothing will read the colour, so do not pay for it — least of all the
+        // intensity-range pass, which decodes the scan again.
+        paletteFor(paletteIndex, plan.fallback);
+    } else if (s.field("colorRed") && s.field("colorGreen") && s.field("colorBlue")) {
         plan.rgb = true;
         colIdx = want.size();
         want.push_back("colorRed"); want.push_back("colorGreen"); want.push_back("colorBlue");
@@ -173,10 +188,12 @@ bool streamScan(e57::Reader& r, size_t idx, uint16_t scanId,
     }
     if (!plan.rgb && !plan.intensity) paletteFor(paletteIndex, plan.fallback);
 
-    const viewer::FrameDecision fd = viewer::decideFrame(r, idx);
     const viewer::Rigid rigid = viewer::rigidFromPose(s.pose);
+    // Spherical storage is scanner-centric by definition, so the pose always
+    // applies and there was never a decision to make. For cartesian storage the
+    // survey made it.
     const bool applyPose = spherical ? (s.hasPose && !viewer::isIdentityPose(s.pose))
-                                     : (fd.applyPose() && s.hasPose);
+                                     : (frameApplyPose && s.hasPose);
 
     const uint64_t stride = (maxPoints && s.recordCount > maxPoints)
                           ? (s.recordCount + maxPoints - 1) / maxPoints : 1;
@@ -309,10 +326,14 @@ std::string directoryOf(const std::string& path) {
 // Text rather than a binary blob because this is a cache of verdicts about files
 // on disk: when one looks wrong the first thing anybody wants is to read it.
 constexpr const char* kCacheMagic = "e57cov-survey-cache";
-// 2: ScanRef gained looksMerged. Bumped rather than tolerated, because a version
-// 1 entry read as version 2 would come back with the flag silently false — and a
-// cache that quietly differs from a fresh check is the one thing it must not be.
-constexpr int         kCacheVersion = 2;
+// 2: ScanRef gained looksMerged.
+// 3: and frameApplyPose.
+// Bumped rather than tolerated each time, because an older entry read as a newer
+// one comes back with the new field silently false — and a cache that quietly
+// differs from a fresh check is the one thing it must not be. frameApplyPose
+// especially: false where it should be true means a scan's points are not posed,
+// which puts a whole setup in the wrong place.
+constexpr int         kCacheVersion = 3;
 
 void writeStr(std::string& o, const std::string& s) {
     o += std::to_string(s.size());
@@ -370,9 +391,10 @@ bool SurveyCache::load(const std::string& path) {
             ScanRef r;
             if (!readStr(in, r.path) || !readStr(in, r.name) || !readStr(in, r.guid) ||
                 !readStr(in, r.status)) { byPath.clear(); return false; }
-            int kind = 0, usable = 0, hasPose = 0, hasExtent = 0, looksMerged = 0;
+            int kind = 0, usable = 0, hasPose = 0, hasExtent = 0, looksMerged = 0,
+                frameApplyPose = 0;
             if (!(in >> r.scanIndex >> r.recordCount >> kind >> usable >> hasPose >>
-                  hasExtent >> looksMerged)) { byPath.clear(); return false; }
+                  hasExtent >> looksMerged >> frameApplyPose)) { byPath.clear(); return false; }
             for (int k = 0; k < 4; ++k) if (!(in >> r.pose.q[k])) { byPath.clear(); return false; }
             for (int k = 0; k < 3; ++k) if (!(in >> r.pose.t[k])) { byPath.clear(); return false; }
             for (int k = 0; k < 3; ++k) if (!(in >> r.setup[k])) { byPath.clear(); return false; }
@@ -385,6 +407,7 @@ bool SurveyCache::load(const std::string& path) {
             r.hasPose     = (hasPose != 0);
             r.hasExtent   = (hasExtent != 0);
             r.looksMerged = (looksMerged != 0);
+            r.frameApplyPose = (frameApplyPose != 0);
             e.scans.push_back(std::move(r));
         }
         byPath[key] = std::move(e);
@@ -415,10 +438,11 @@ bool SurveyCache::save(const std::string& path) const {
             writeStr(o, r.status);
             char buf[512];
             std::snprintf(buf, sizeof(buf),
-                          "%zu %llu %d %d %d %d %d %.17g %.17g %.17g %.17g %.17g %.17g %.17g "
-                          "%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g\n",
+                          "%zu %llu %d %d %d %d %d %d %.17g %.17g %.17g %.17g %.17g %.17g "
+                          "%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g\n",
                           r.scanIndex, (unsigned long long)r.recordCount, int(r.kind),
                           int(r.usable), int(r.hasPose), int(r.hasExtent), int(r.looksMerged),
+                          int(r.frameApplyPose),
                           r.pose.q[0], r.pose.q[1], r.pose.q[2], r.pose.q[3],
                           r.pose.t[0], r.pose.t[1], r.pose.t[2],
                           r.setup[0], r.setup[1], r.setup[2],
@@ -547,6 +571,8 @@ void checkOneFile(const std::string& path, const SurveyOptions& opt, FileResult&
         ref.kind        = res.kind;
         ref.status      = res.summary;
         ref.looksMerged = res.looksMerged;
+        // Kept so build() does not decode the scan again to re-learn it.
+        ref.frameApplyPose = fd.applyPose();
         // Can it be drawn? That is the whole question — see ScanRef::usable. A
         // scan with no position fields has nothing to put in the store; every
         // other scan goes in, whatever the merged-cloud heuristic thinks of it.
@@ -777,6 +803,7 @@ bool build(const Survey& s, const std::string& storePath, const BuildOptions& op
             const double zero[3] = {0, 0, 0};
             uint64_t got = 0;
             streamScan(r, usable[i]->scanIndex, 0, zero, 0, i,
+                       usable[i]->frameApplyPose, /*positionsOnly=*/true,
                        [&](const lod::StorePoint& p) {
                            lo[0] = std::min(lo[0], double(p.x)); hi[0] = std::max(hi[0], double(p.x));
                            lo[1] = std::min(lo[1], double(p.y)); hi[1] = std::max(hi[1], double(p.y));
@@ -850,6 +877,7 @@ bool build(const Survey& s, const std::string& storePath, const BuildOptions& op
 
         uint64_t got = 0;
         streamScan(r, usable[i]->scanIndex, uint16_t(i), origin, opt.maxPointsPerScan, i,
+                   usable[i]->frameApplyPose, /*positionsOnly=*/false,
                    [&](const lod::StorePoint& p) {
                        if (!top.insert(p)) ++outsideRoot;
                    }, got, ferr);

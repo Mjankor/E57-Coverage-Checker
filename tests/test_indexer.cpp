@@ -340,6 +340,71 @@ static void testTheExtentPassMissesNothing() {
 
     std::remove(storePath.c_str());
     std::remove(path.c_str());
+
+    // And the same with intensity present, which is the case build()'s extent pass
+    // skips the colour work for. Getting that wrong would mean an extent measured
+    // from a differently-filtered set of points than the one indexed, so the check
+    // is that every point still lands inside the root.
+    {
+        const std::string ip = tmpDir() + "/e57cov_intensity_extent.e57";
+        fixture::Scan sc;
+        sc.name = "With intensity";
+        sc.hasPose = true;
+        sc.q[0] = 1.0;
+        sc.t[0] = 11.0; sc.t[1] = -7.0; sc.t[2] = 1.6;
+        sc.fields = {
+            {"cartesianX", e57::FieldType::FloatDouble},
+            {"cartesianY", e57::FieldType::FloatDouble},
+            {"cartesianZ", e57::FieldType::FloatDouble},
+            {"intensity",  e57::FieldType::FloatDouble},
+        };
+        sc.data.assign(4, {});
+        Lcg rng;
+        for (int i = 0; i < 30000; ++i) {
+            const double az = rng.next() * 6.28318530718;
+            const double el = (rng.next() - 0.5) * 1.2;
+            const double r  = 9.0 + 3.0 * std::sin(2.0 * az) + 2.0 * std::cos(3.0 * el);
+            const double ce = std::cos(el);
+            sc.data[0].push_back(r * ce * std::cos(az));
+            sc.data[1].push_back(r * ce * std::sin(az));
+            sc.data[2].push_back(r * std::sin(el));
+            // Raw counts, not 0..1 — the case the intensity range exists for.
+            sc.data[3].push_back(800.0 + 4000.0 * rng.next());
+        }
+        // 1024 records a packet, not the 2048 used elsewhere: that is a count of
+        // RECORDS, and four double fields at 2048 records overflows E57's 64 KB
+        // packet limit, which shows up as a decode failure and no points at all.
+        if (fixture::write(ip, {sc}, 1024)) {
+            const indexer::Survey is = indexer::survey({ip}, so, nullptr);
+            CHECK(is.usableCount() == 1, "the intensity scan is usable");
+            const std::string isp = tmpDir() + "/e57cov_intensity_extent.lod";
+            std::remove(isp.c_str());
+            indexer::BuildStats ist;
+            std::string ierr;
+            CHECK(indexer::build(is, isp, indexer::BuildOptions{}, ist, nullptr, ierr),
+                  ierr.empty() ? "it builds" : ierr.c_str());
+            CHECK(ist.pointsRead == 30000, "every point read");
+            CHECK(ist.outsideRoot == 0, "none outside the root");
+            CHECK(ist.pointsStored == ist.pointsRead, "and all stored");
+            store::Reader ird;
+            if (ird.open(isp, ierr)) {
+                // Colour still came from intensity on the indexing pass, so the
+                // points are not all the flat fallback grey.
+                const lod::Tree t = ird.tree();
+                std::set<uint32_t> shades;
+                for (size_t i = 0; i < t.nodes.size() && shades.size() < 5; ++i) {
+                    const lod::StorePoint* pts = ird.points(i);
+                    if (!pts) continue;
+                    for (uint32_t j = 0; j < t.nodes[i].pointCount; ++j)
+                        shades.insert((uint32_t(pts[j].r) << 16) | (uint32_t(pts[j].g) << 8) |
+                                      pts[j].b);
+                }
+                CHECK(shades.size() > 1, "intensity still became colour on the indexing pass");
+            }
+            std::remove(isp.c_str());
+            std::remove(ip.c_str());
+        }
+    }
 }
 
 // A cloud the range-spread heuristic dislikes is still indexed and still drawn.

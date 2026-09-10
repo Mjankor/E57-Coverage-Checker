@@ -84,6 +84,20 @@ struct ScanRef {
     // becomes store::kScanLooksMerged — and acted on by nothing.
     bool        looksMerged = false;
 
+    // Whether the scan's pose must be applied to its points, as the survey
+    // decided it — viewer::FrameDecision::applyPose().
+    //
+    // Carried here so build() does not decide it again. Deciding it needs a sample
+    // of the points, so every caller that re-derives it pays a full decode pass;
+    // build called streamScan twice and streamScan decided it each time, which was
+    // two passes per scan to re-learn something the survey had already worked out
+    // from a sample it had in hand.
+    //
+    // A header-only survey sets this from the pose alone (identity or not), which
+    // is what it can know without reading points. That is the same answer
+    // decideFrame gives for an identity pose and its documented default otherwise.
+    bool        frameApplyPose = false;
+
     // The setup position in the file's coordinate system. Available from
     // headers alone, which is what makes the fast open possible.
     double setup[3] = {0, 0, 0};
