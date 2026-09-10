@@ -1036,6 +1036,10 @@ const char *kindLabel(check::Kind k) {
         if (!cached) {
             // The build needs the full structured check, which decodes a sample
             // per scan; the fast survey deliberately skipped it.
+            //
+            // Threads left at the default, which is the hardware's count: files
+            // are checked in parallel and the answer does not depend on how many
+            // at once. See indexer::SurveyOptions::threads.
             indexer::SurveyOptions full;
             full.classify = true;
             indexer::Survey checked =

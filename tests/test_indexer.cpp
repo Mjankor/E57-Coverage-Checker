@@ -175,6 +175,86 @@ static void testSurveyIsHeaderOnly() {
     CHECK(missing.scans.empty(), "and contributes no scans");
 }
 
+// The survey reads files in parallel and must answer the same either way.
+//
+// This is the stage the corpus size lands on — one file's check shares nothing
+// with another's, so it runs across cores — and the result drives which scans get
+// indexed at all. An order that depended on scheduling would mean a scan list,
+// and therefore a point store, that differed between runs of the same corpus.
+//
+// Checked by comparing the whole survey rather than a summary of it: the scan
+// order, every verdict, every extent, the site bounds and the error list. The
+// bounds are the part most likely to drift, being a reduction over floats
+// accumulated in whatever order the files finished.
+static void testSurveyDoesNotDependOnThreadCount() {
+    std::printf("indexer: the survey reads in parallel and says the same thing\n");
+
+    // Enough files that the work actually gets spread, and deliberately uneven
+    // in size so the threads finish out of order.
+    std::vector<std::string> paths = writeCorpus("parsurvey", 9, 2000, 30.0, 0.0, 0.0);
+    const std::vector<std::string> more =
+        writeCorpus("parsurvey_big", 3, 12000, 50.0, 500000.0, 6200000.0);
+    paths.insert(paths.end(), more.begin(), more.end());
+    // And one that cannot be opened, so the error list is part of the comparison.
+    paths.push_back(tmpDir() + "/e57cov_parsurvey_absent.e57");
+    CHECK(paths.size() == 13, "corpus written");
+
+    // Everything the survey decided, flattened, so a difference anywhere shows.
+    auto flatten = [](const indexer::Survey& s) {
+        std::string o;
+        char buf[512];
+        std::snprintf(buf, sizeof(buf), "%zu|%zu|%d|%d|%.9f,%.9f,%.9f|%.9f,%.9f,%.9f\n",
+                      s.filesRead, s.scans.size(), int(s.extentComplete), int(s.hasBounds),
+                      s.lo[0], s.lo[1], s.lo[2], s.hi[0], s.hi[1], s.hi[2]);
+        o += buf;
+        for (const auto& sc : s.scans) {
+            std::snprintf(buf, sizeof(buf), "%s#%zu|%s|%d|%d|%d|%llu|%s|%.9f,%.9f,%.9f\n",
+                          sc.path.c_str(), sc.scanIndex, sc.name.c_str(), int(sc.kind),
+                          int(sc.usable), int(sc.hasExtent),
+                          (unsigned long long)sc.recordCount, sc.status.c_str(),
+                          sc.setup[0], sc.setup[1], sc.setup[2]);
+            o += buf;
+        }
+        for (const auto& e : s.errors) { o += "E|"; o += e; o += "\n"; }
+        return o;
+    };
+
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool classify = (pass == 1);
+        std::string reference;
+        for (unsigned n : {1u, 2u, 3u, 4u, 8u, 13u}) {
+            indexer::SurveyOptions so;
+            so.classify = classify;
+            so.threads  = n;
+            const std::string got = flatten(indexer::survey(paths, so, nullptr));
+            if (reference.empty()) {
+                reference = got;
+                CHECK(!reference.empty(), "the survey produced something to compare");
+            } else {
+                CHECK(got == reference,
+                      classify ? "same full survey at any thread count"
+                               : "same header survey at any thread count");
+            }
+        }
+        // The serial answer is the one being preserved, so it is worth saying
+        // out loud that it found what it was supposed to.
+        indexer::SurveyOptions so;
+        so.classify = classify;
+        so.threads  = 1;
+        const indexer::Survey s = indexer::survey(paths, so, nullptr);
+        CHECK(s.filesRead == 12, "twelve files opened");
+        CHECK(s.scans.size() == 12, "one scan each");
+        CHECK(s.errors.size() == 1, "and the missing one is reported once");
+    }
+
+    // A thread count above the core count is capped rather than obeyed: asking
+    // for more threads than there are files cannot be allowed to spawn them.
+    indexer::SurveyOptions huge;
+    huge.threads = 4096;
+    const indexer::Survey s = indexer::survey(paths, huge, nullptr);
+    CHECK(s.scans.size() == 12, "an absurd thread count still reads the corpus");
+}
+
 static void testBuildRoundTrip() {
     std::printf("indexer: build a store from a corpus\n");
     const std::vector<std::string> paths = writeCorpus("build", 20, 4000, 60.0, 500000.0, 6200000.0);
@@ -354,6 +434,7 @@ int main() {
     testChunkLevel();
     testCellIndex();
     testSurveyIsHeaderOnly();
+    testSurveyDoesNotDependOnThreadCount();
     testBuildRoundTrip();
     testBuildRefusesImpossibleInput();
     testBuildCancels();

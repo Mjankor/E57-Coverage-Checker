@@ -97,6 +97,20 @@ struct SurveyOptions {
     // Run the geometric merged-cloud test. Decodes a sample per scan, so it is
     // far slower than a header read — off for the fast open, on for the build.
     bool classify = false;
+
+    // Files checked at once. 0 takes the hardware's count.
+    //
+    // Checking a file shares nothing with checking another — its own reader, its
+    // own sample, its own verdict — so this scales with cores until the disk runs
+    // out of bandwidth. Measured on eight copies of a 154 MB scan, warm: 1.49 s
+    // on one thread, 0.43 s on four. It is capped at the core count rather than
+    // obeyed blindly, because eight threads on four cores measured slower than
+    // four.
+    //
+    // The answer does not depend on it. Per-file results land in a slot per file
+    // and are merged in path order afterwards, so the scan list, the bounds and
+    // the error list come out identical at any thread count — there is a test.
+    unsigned threads = 0;
 };
 
 Survey survey(const std::vector<std::string>& paths, const SurveyOptions& opt,

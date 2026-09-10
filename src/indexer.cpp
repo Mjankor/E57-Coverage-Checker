@@ -1,5 +1,8 @@
 #include "indexer.h"
 
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -290,93 +293,183 @@ std::string directoryOf(const std::string& path) {
     return slash == std::string::npos ? std::string(".") : path.substr(0, slash);
 }
 
-} // namespace
-
 // ---------------------------------------------------------------------------
 // survey
+
+// What checking ONE file produces. Kept per file so the work can run on several
+// at once and still be merged in path order: the scan list, the bounds and the
+// error list then read the same whatever the threads did, which matters because
+// this list drives which scans get indexed.
+struct FileResult {
+    bool                 opened = false;
+    std::string          error;           // when it could not be opened
+    std::vector<ScanRef> scans;
+    bool                 hasBounds = false;
+    double               lo[3] = {0, 0, 0};
+    double               hi[3] = {0, 0, 0};
+    bool                 extentComplete = true;
+};
+
+// The same expansion as expandBounds, against a file's own accumulator.
+void expandFileBounds(FileResult& f, const double p[3]) {
+    if (!f.hasBounds) {
+        for (int i = 0; i < 3; ++i) { f.lo[i] = f.hi[i] = p[i]; }
+        f.hasBounds = true;
+        return;
+    }
+    for (int i = 0; i < 3; ++i) {
+        f.lo[i] = std::min(f.lo[i], p[i]);
+        f.hi[i] = std::max(f.hi[i], p[i]);
+    }
+}
+
+void checkOneFile(const std::string& path, const SurveyOptions& opt, FileResult& out) {
+    e57::Reader r;
+    std::string err;
+    if (!r.open(path, err)) {
+        out.error = path + ": " + err;
+        return;
+    }
+    out.opened = true;
+
+    for (size_t i = 0; i < r.scanCount(); ++i) {
+        const e57::Scan& sc = r.scan(i);
+        ScanRef ref;
+        ref.path        = path;
+        ref.scanIndex   = i;
+        ref.name        = sc.name.empty() ? ("scan " + std::to_string(i)) : sc.name;
+        ref.guid        = sc.guid;
+        ref.pose        = sc.pose;
+        ref.hasPose     = sc.hasPose;
+        ref.recordCount = sc.recordCount;
+
+        // ONE decode pass for both decisions that need points.
+        //
+        // The frame decision and the merged-cloud test ask different questions
+        // of the same sample, and they used to take three passes between them —
+        // one here, one inside check::classify, and one more because classify
+        // called decideFrame itself. Measured on a 5.65 M point scan, that was
+        // 0.205 s a scan against 0.09 s for one pass, which over a thousand
+        // scans is three minutes against one.
+        //
+        // The sample is the finer of the two that were being taken
+        // (check::Thresholds::sampleTarget, 200k, against decideFrame's 20k).
+        // More points cannot hurt the frame decision: it is a median and a
+        // least-squares fit, so a larger sample of the same distribution gives
+        // the same answer more precisely.
+        check::Result res;
+        viewer::FrameDecision fd;
+        if (opt.classify) {
+            std::vector<double> xyz;
+            std::string serr;
+            const check::Thresholds th;
+            if (r.sampleXYZ(i, th.sampleTarget, xyz, serr)) {
+                fd  = viewer::decideFrameFromSample(sc, xyz);
+                res = check::classifyFromSample(sc, xyz, fd, th);
+            } else {
+                // No cartesian points to sample — spherical storage, or a
+                // decode that failed. Both are answered from metadata, and
+                // spherical storage is scanner-centric by definition.
+                res = check::classifyMetadata(sc);
+                fd  = viewer::decideFrameFromSample(sc, {});
+            }
+        } else {
+            // A header-only survey must not decode points, so the frame
+            // decision here is the cheap one: trust the standard.
+            res = check::classifyMetadata(sc);
+            fd.convention = (sc.hasPose && !viewer::isIdentityPose(sc.pose))
+                          ? viewer::FrameConvention::ScannerLocal
+                          : viewer::FrameConvention::IdentityPose;
+        }
+        ref.kind   = res.kind;
+        ref.status = res.summary;
+        // Only a positive merged-cloud finding excludes a scan. Ambiguity
+        // means the evidence was inconclusive, not that the scan is bad.
+        ref.usable = (res.kind != check::Kind::Unified);
+
+        for (int k = 0; k < 3; ++k) ref.setup[k] = sc.pose.t[k];
+        expandFileBounds(out, ref.setup);
+
+        if (declaredExtentInFileFrame(sc, fd, ref.lo, ref.hi)) {
+            ref.hasExtent = true;
+            expandFileBounds(out, ref.lo);
+            expandFileBounds(out, ref.hi);
+        } else if (ref.usable) {
+            out.extentComplete = false;
+        }
+        out.scans.push_back(std::move(ref));
+    }
+}
+
+} // namespace
 
 Survey survey(const std::vector<std::string>& paths, const SurveyOptions& opt,
               const ProgressFn& progress) {
     Survey out;
-    for (size_t fi = 0; fi < paths.size(); ++fi) {
-        if (progress && !progress("reading headers", fi, paths.size())) break;
-
-        e57::Reader r;
-        std::string err;
-        if (!r.open(paths[fi], err)) {
-            out.errors.push_back(paths[fi] + ": " + err);
-            continue;
-        }
-        ++out.filesRead;
-
-        for (size_t i = 0; i < r.scanCount(); ++i) {
-            const e57::Scan& sc = r.scan(i);
-            ScanRef ref;
-            ref.path        = paths[fi];
-            ref.scanIndex   = i;
-            ref.name        = sc.name.empty() ? ("scan " + std::to_string(i)) : sc.name;
-            ref.guid        = sc.guid;
-            ref.pose        = sc.pose;
-            ref.hasPose     = sc.hasPose;
-            ref.recordCount = sc.recordCount;
-
-            // ONE decode pass for both decisions that need points.
-            //
-            // The frame decision and the merged-cloud test ask different
-            // questions of the same sample, and they used to take three passes
-            // between them — one here, one inside check::classify, and one more
-            // because classify called decideFrame itself. Measured on a 5.65 M
-            // point scan, that was 0.205 s a scan against 0.093 s for one pass,
-            // which over a thousand scans is three minutes against one.
-            //
-            // The sample is the finer of the two that were being taken
-            // (check::Thresholds::sampleTarget, 200k, against decideFrame's
-            // 20k). More points cannot hurt the frame decision: it is a median
-            // and a least-squares fit, so a larger sample of the same
-            // distribution gives the same answer more precisely.
-            check::Result res;
-            viewer::FrameDecision fd;
-            if (opt.classify) {
-                std::vector<double> xyz;
-                std::string serr;
-                const check::Thresholds th;
-                if (r.sampleXYZ(i, th.sampleTarget, xyz, serr)) {
-                    fd  = viewer::decideFrameFromSample(sc, xyz);
-                    res = check::classifyFromSample(sc, xyz, fd, th);
-                } else {
-                    // No cartesian points to sample — spherical storage, or a
-                    // decode that failed. Both are answered from metadata, and
-                    // spherical storage is scanner-centric by definition.
-                    res = check::classifyMetadata(sc);
-                    fd  = viewer::decideFrameFromSample(sc, {});
-                }
-            } else {
-                // A header-only survey must not decode points, so the frame
-                // decision here is the cheap one: trust the standard.
-                res = check::classifyMetadata(sc);
-                fd.convention = (sc.hasPose && !viewer::isIdentityPose(sc.pose))
-                              ? viewer::FrameConvention::ScannerLocal
-                              : viewer::FrameConvention::IdentityPose;
-            }
-            ref.kind   = res.kind;
-            ref.status = res.summary;
-            // Only a positive merged-cloud finding excludes a scan. Ambiguity
-            // means the evidence was inconclusive, not that the scan is bad.
-            ref.usable = (res.kind != check::Kind::Unified);
-
-            for (int k = 0; k < 3; ++k) ref.setup[k] = sc.pose.t[k];
-            expandBounds(out, ref.setup);
-
-            if (declaredExtentInFileFrame(sc, fd, ref.lo, ref.hi)) {
-                ref.hasExtent = true;
-                expandBounds(out, ref.lo);
-                expandBounds(out, ref.hi);
-            } else if (ref.usable) {
-                out.extentComplete = false;
-            }
-            out.scans.push_back(std::move(ref));
-        }
+    if (paths.empty()) {
+        if (progress) progress("reading headers", 0, 0);
+        return out;
     }
+
+    // Files at once. Checking one shares nothing with checking another, so this
+    // is the stage that scales with the corpus: on eight copies of a 154 MB scan
+    // it went 1.49 s to 0.43 s across four cores. Capped at the core count
+    // because eight threads on four cores measured slower than four — the work
+    // is decode-bound, and oversubscribing it only adds contention.
+    unsigned nt = opt.threads ? opt.threads : std::thread::hardware_concurrency();
+    if (nt == 0) nt = 1;
+    const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
+    nt = std::min({nt, cores, unsigned(paths.size())});
+
+    // A slot per file, so nothing is shared but the cursor and the progress
+    // report. Merged in path order below, which is what keeps the result
+    // independent of how the threads happened to interleave.
+    std::vector<FileResult> results(paths.size());
+    std::atomic<size_t> next{0};
+    std::atomic<size_t> done{0};
+    std::atomic<bool>   stop{false};
+    std::mutex          reportLock;
+
+    auto worker = [&]() {
+        for (;;) {
+            if (stop.load(std::memory_order_relaxed)) break;
+            const size_t fi = next.fetch_add(1, std::memory_order_relaxed);
+            if (fi >= paths.size()) break;
+            checkOneFile(paths[fi], opt, results[fi]);
+            const size_t d = done.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (progress) {
+                std::lock_guard<std::mutex> lk(reportLock);
+                if (!progress("reading headers", d, paths.size()))
+                    stop.store(true, std::memory_order_relaxed);
+            }
+        }
+    };
+
+    if (nt == 1) {
+        worker();
+    } else {
+        std::vector<std::thread> pool;
+        pool.reserve(nt);
+        for (unsigned k = 0; k < nt; ++k) pool.emplace_back(worker);
+        for (std::thread& t : pool) t.join();
+    }
+
+    // Merged in path order. A cancelled run leaves the files it never reached
+    // unopened, and an unopened file with no error contributes nothing — the
+    // same as the serial version breaking out of its loop.
+    for (size_t fi = 0; fi < paths.size(); ++fi) {
+        FileResult& f = results[fi];
+        if (!f.error.empty()) { out.errors.push_back(f.error); continue; }
+        if (!f.opened) continue;
+        ++out.filesRead;
+        if (f.hasBounds) {
+            expandBounds(out, f.lo);
+            expandBounds(out, f.hi);
+        }
+        if (!f.extentComplete) out.extentComplete = false;
+        for (ScanRef& ref : f.scans) out.scans.push_back(std::move(ref));
+    }
+
     if (progress) progress("reading headers", paths.size(), paths.size());
     return out;
 }
