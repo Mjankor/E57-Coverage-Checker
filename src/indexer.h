@@ -60,12 +60,29 @@ struct ScanRef {
 
     check::Kind kind = check::Kind::Ambiguous;
     std::string status;
-    // Indexed and drawn. Ambiguous scans are included: "no gridding metadata,
-    // and too few populated direction bins to judge" is the normal verdict for
-    // a perfectly good scan from a terse writer, and dropping those would
-    // silently discard most of a corpus. Only a positive merged-cloud finding
-    // excludes a scan. The store flags ambiguity so the UI can say so.
+    // Whether this scan can be drawn at all, which is the only question the point
+    // store has to ask: it needs positions, and nothing else.
+    //
+    // False ONLY when the prototype carries no position fields — neither
+    // cartesian nor spherical — because then there is nothing to put in the
+    // store. Readable from the header, so it costs nothing.
+    //
+    // It is deliberately NOT a verdict on whether the cloud came from one setup.
+    // It used to be: a scan the range-spread heuristic called merged was excluded,
+    // and that threw away real data — every scan of the job this was built against
+    // measured over the threshold, so the store came out empty and the viewer drew
+    // nothing. Drawing points does not require knowing where they were seen from.
+    // The stage that does require it, the visibility carve, never reads this and
+    // has its own guard (rimg::Options::minRoundTripFraction). See the note at the
+    // top of scan_check.h for what the heuristic actually measures.
+    //
+    // check::Kind still travels alongside, so the UI can label a scan without
+    // anything dropping it.
     bool        usable = false;
+
+    // The range-spread heuristic came out over its threshold. Reported — it
+    // becomes store::kScanLooksMerged — and acted on by nothing.
+    bool        looksMerged = false;
 
     // The setup position in the file's coordinate system. Available from
     // headers alone, which is what makes the fast open possible.

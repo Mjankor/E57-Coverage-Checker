@@ -168,22 +168,36 @@ Result classifyFromSample(const e57::Scan& s, const std::vector<double>& xyz,
     }
 
     r.multiSurfaceFraction = double(multi) / double(tested);
+    r.looksMerged = r.multiSurfaceFraction > t.multiSurfaceFraction;
     r.evidence.push_back(fmt("%.1f%% of %.0f populated direction bins hold multiple surfaces",
                              100.0 * r.multiSurfaceFraction, double(tested)));
 
-    if (r.multiSurfaceFraction > t.multiSurfaceFraction) {
-        // Overrides metadata: a file can declare a grid and still contain a
-        // merged cloud, and the geometry is what the pipeline actually relies on.
+    // Declared metadata WINS. A scan that states an indexBounds grid, or carries
+    // a varying row and column index, has said it is one setup in the file
+    // format's own terms; this measurement rises with scene scale — 0 per cent in
+    // a small room and 29 in a yard, for the same geometry — so it does not get to
+    // call that file a merged cloud. The number is still reported, because it is
+    // worth seeing, and the header note says what it is worth.
+    if (r.kind == Kind::Structured) {
+        if (r.looksMerged)
+            r.evidence.push_back(fmt("that is over the %.0f%% the range-spread test calls "
+                                     "merged, but this scan declares a sampling grid, which "
+                                     "is the stronger evidence — see scan_check.h",
+                                     100.0 * t.multiSurfaceFraction));
+        return r;
+    }
+
+    if (r.looksMerged) {
+        // No grid declared, so this is the only evidence there is. A label, and
+        // the scan is still indexed and drawn: see indexer::ScanRef::usable.
         r.kind = Kind::Unified;
-        r.summary = fmt("looks merged — %.0f%% of directions hit multiple surfaces",
+        r.summary = fmt("no grid declared, and %.0f%% of directions hit multiple surfaces",
                         100.0 * r.multiSurfaceFraction);
         return r;
     }
 
-    if (r.kind == Kind::Ambiguous) {
-        r.kind = Kind::Structured;
-        r.summary = "single origin by geometry (no gridding metadata)";
-    }
+    r.kind = Kind::Structured;
+    r.summary = "single origin by geometry (no gridding metadata)";
     return r;
 }
 

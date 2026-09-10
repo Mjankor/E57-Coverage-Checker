@@ -77,6 +77,11 @@ enum ScanFlags : uint32_t {
     kScanPoseApplied = 1u << 1,   // pose was applied to its points
     kScanFrameWarned = 1u << 2,   // non-conformant frame handling
     kScanAmbiguous   = 1u << 3,   // no gridding metadata and geometry inconclusive
+    // The range-spread heuristic read over its threshold. A note on the scan, not
+    // the reason for anything: scans carrying this are indexed like any other. The
+    // heuristic rises with scene scale, so an ordinary outdoor setup commonly sets
+    // it — read the note at the top of scan_check.h before concluding anything.
+    kScanLooksMerged = 1u << 4,
 };
 
 // ---------------------------------------------------------------------------

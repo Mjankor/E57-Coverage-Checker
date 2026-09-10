@@ -259,6 +259,114 @@ static void testSurveyDoesNotDependOnThreadCount() {
     CHECK(s.scans.size() == 12, "an absurd thread count still reads the corpus");
 }
 
+// A cloud the range-spread heuristic dislikes is still indexed and still drawn.
+//
+// This is the regression guard for a defect that emptied the store. `usable` used
+// to mean "not called merged by the heuristic", and the heuristic rises with scene
+// scale — every scan of the job this was built against measured over the threshold
+// — so build() refused the whole corpus with "no usable scans to index" and the
+// viewer drew nothing.
+//
+// `usable` now asks the only question the point store needs answered: are there
+// positions to draw. The verdict travels alongside as a label, in the scan's
+// store flags, where the UI can show it and nothing can act on it.
+static void testTheHeuristicLabelsAndNothingMore() {
+    std::printf("indexer: a scan the heuristic dislikes is still indexed\n");
+
+    // Concentric shells 3 m apart: the same shape the classifier's own merged
+    // fixture uses, so the heuristic is certain to fire. No gridding metadata, so
+    // nothing overrules it and the label lands.
+    const std::string path = tmpDir() + "/e57cov_merged_indexed.e57";
+    {
+        fixture::Scan sc;
+        sc.name = "Shells";
+        sc.hasPose = true;
+        sc.q[0] = 1.0;
+        sc.t[0] = 4.0; sc.t[1] = -2.0; sc.t[2] = 1.6;
+        sc.fields = {
+            {"cartesianX", e57::FieldType::FloatDouble},
+            {"cartesianY", e57::FieldType::FloatDouble},
+            {"cartesianZ", e57::FieldType::FloatDouble},
+        };
+        sc.data.assign(3, {});
+        // Shell by shell rather than interleaved per direction, and that matters.
+        // build()'s extent pass samples at a fixed stride; with three shells
+        // interleaved the stride came out a multiple of three and sampled the
+        // innermost shell only, so the root was sized to a third of the cloud and
+        // 31 per cent of the points landed outside it and were dropped. A real
+        // scan's order is row-major, not interleaved by depth, so this ordering is
+        // the representative one — but the aliasing is real and is noted in the
+        // report on build().
+        for (int k = 0; k < 3; ++k) {
+            Lcg rng;                       // same directions in every shell
+            for (int i = 0; i < 40000; ++i) {
+                const double u = 2.0 * rng.next() - 1.0;
+                const double th = 2.0 * 3.14159265358979 * rng.next();
+                const double sr = std::sqrt(std::max(0.0, 1.0 - u * u));
+                const double dx = sr * std::cos(th), dy = sr * std::sin(th), dz = u;
+                const double r = 5.0 + 1.5 * dx * dy + 3.0 * double(k);
+                sc.data[0].push_back(r * dx);
+                sc.data[1].push_back(r * dy);
+                sc.data[2].push_back(r * dz);
+            }
+        }
+        CHECK(fixture::write(path, {sc}, 2048), "fixture written");
+    }
+
+    indexer::SurveyOptions so;
+    so.classify = true;
+    const indexer::Survey s = indexer::survey({path}, so, nullptr);
+    CHECK(s.scans.size() == 1, "the scan was surveyed");
+    if (s.scans.empty()) return;
+    const indexer::ScanRef& ref = s.scans[0];
+
+    CHECK(ref.looksMerged, "the heuristic fires on this cloud");
+    CHECK(ref.kind == check::Kind::Unified, "and labels it, there being no grid declared");
+    CHECK(ref.usable, "but the scan is still usable, because it has positions to draw");
+    CHECK(s.usableCount() == 1, "so the corpus has a usable scan");
+
+    // And it reaches the store, with the label on it.
+    const std::string storePath = tmpDir() + "/e57cov_merged_indexed.lod";
+    std::remove(storePath.c_str());
+    indexer::BuildOptions bo;
+    indexer::BuildStats st;
+    std::string err;
+    CHECK(indexer::build(s, storePath, bo, st, nullptr, err),
+          err.empty() ? "the store builds" : err.c_str());
+    CHECK(st.pointsRead == 120000, "every point was read");
+    CHECK(st.pointsStored == st.pointsRead, "and every point stored");
+
+    store::Reader rd;
+    CHECK(rd.open(storePath, err), err.empty() ? "store opens" : err.c_str());
+    CHECK(rd.scanCount() == 1, "the scan is in the table");
+    if (rd.scanCount() == 1) {
+        CHECK((rd.scan(0).flags & store::kScanLooksMerged) != 0,
+              "carrying the heuristic's finding as a flag");
+        CHECK((rd.scan(0).flags & store::kScanStructured) == 0,
+              "and not claiming to be positively structured");
+    }
+    CHECK(rd.header().totalPoints == st.pointsRead, "with all of its points");
+
+    // A scan with no position fields at all is the one thing that IS unusable:
+    // there is nothing to put in a point store.
+    {
+        const std::string bare = tmpDir() + "/e57cov_no_positions.e57";
+        fixture::Scan sc;
+        sc.name = "Intensity only";
+        sc.fields = {{"intensity", e57::FieldType::FloatDouble}};
+        sc.data.assign(1, {});
+        for (int i = 0; i < 1000; ++i) sc.data[0].push_back(double(i) * 0.001);
+        if (fixture::write(bare, {sc}, 2048)) {
+            const indexer::Survey b = indexer::survey({bare}, so, nullptr);
+            if (b.scans.size() == 1)
+                CHECK(!b.scans[0].usable, "a scan with no positions cannot be drawn");
+        }
+    }
+
+    std::remove(storePath.c_str());
+    std::remove(path.c_str());
+}
+
 // The per-file check cache: a hit must be indistinguishable from doing the work.
 //
 // This is the one that earns the most on a real corpus, and it is also the one
@@ -637,6 +745,7 @@ int main() {
     testCellIndex();
     testSurveyIsHeaderOnly();
     testSurveyDoesNotDependOnThreadCount();
+    testTheHeuristicLabelsAndNothingMore();
     testTheCheckCacheIsIndistinguishableFromChecking();
     testBuildRoundTrip();
     testBuildRefusesImpossibleInput();

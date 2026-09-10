@@ -238,8 +238,9 @@ static void testClassifyGeometry() {
         CHECK(res.binsTested > 200, "enough direction bins populated to decide");
         CHECK(res.multiSurfaceFraction >= 0.0 && res.multiSurfaceFraction < 0.20,
               "single setup: few directions hit multiple surfaces");
-        CHECK(res.kind == check::Kind::Structured, "single setup accepted");
-        CHECK(res.usable(), "single setup is usable");
+        CHECK(res.kind == check::Kind::Structured, "single setup read as structured");
+        CHECK(res.positivelyStructured(), "and positively so");
+        CHECK(!res.looksMerged, "nothing suggests several origins");
     }
 
     {
@@ -251,9 +252,36 @@ static void testClassifyGeometry() {
         const check::Result res = check::classify(r, 0);
         CHECK(res.multiSurfaceFraction > 0.20,
               "merged cloud: most directions hit multiple surfaces");
-        CHECK(res.kind == check::Kind::Unified, "merged cloud rejected");
-        CHECK(!res.usable(), "merged cloud is not usable");
-        CHECK(!res.summary.empty(), "rejection carries a reason for the UI");
+        CHECK(res.looksMerged, "and the heuristic says so");
+        // This fixture declares no grid, so the heuristic is the only evidence
+        // there is and the label follows it. It is a LABEL — the scan is still
+        // indexed and drawn; see testTheHeuristicLabelsAndNothingMore.
+        CHECK(res.kind == check::Kind::Unified, "with no grid declared, it is labelled merged");
+        CHECK(!res.summary.empty(), "and the label carries a reason for the UI");
+    }
+
+    // Declared metadata beats the heuristic. A scan that states a sampling grid
+    // has said it is one setup in the file format's own terms, and a measurement
+    // that rises with scene scale does not get to overrule it — this is the case
+    // that took every scan of a real job out of the store.
+    {
+        const std::string p = tmpPath("gridded_but_spread");
+        fixture::Scan sc = makeShellScan("gridded", 3, 60000);
+        sc.hasIndexBounds = true;
+        sc.rowMin = 0; sc.rowMax = 599;
+        sc.colMin = 0; sc.colMax = 999;
+        CHECK(fixture::write(p, {sc}, 1024), "fixture written");
+        e57::Reader r;
+        std::string err;
+        CHECK(r.open(p, err), err.empty() ? "opened" : err.c_str());
+        const check::Result res = check::classify(r, 0);
+        CHECK(res.looksMerged, "the heuristic still reads over its threshold");
+        CHECK(res.kind == check::Kind::Structured,
+              "but a declared grid is the stronger evidence and wins");
+        bool saysSo = false;
+        for (const auto& e : res.evidence)
+            if (e.find("declares a sampling grid") != std::string::npos) saysSo = true;
+        CHECK(saysSo, "and the disagreement is reported rather than hidden");
     }
 }
 

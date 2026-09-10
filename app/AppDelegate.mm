@@ -116,7 +116,11 @@ constexpr CGFloat kScreenInset     = 20;
 const char *kindLabel(check::Kind k) {
     switch (k) {
     case check::Kind::Structured: return "structured";
-    case check::Kind::Unified:    return "merged — not indexed";
+    // Not "not indexed" any more, because it is indexed. The label says what was
+    // observed and leaves the conclusion alone: the measurement behind it rises
+    // with scene scale, so an ordinary outdoor setup reads this way. See the note
+    // at the top of scan_check.h.
+    case check::Kind::Unified:    return "no grid declared, spread suggests several";
     case check::Kind::Ambiguous:  return "ambiguous";
     }
     return "?";

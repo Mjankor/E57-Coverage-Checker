@@ -309,7 +309,10 @@ std::string directoryOf(const std::string& path) {
 // Text rather than a binary blob because this is a cache of verdicts about files
 // on disk: when one looks wrong the first thing anybody wants is to read it.
 constexpr const char* kCacheMagic = "e57cov-survey-cache";
-constexpr int         kCacheVersion = 1;
+// 2: ScanRef gained looksMerged. Bumped rather than tolerated, because a version
+// 1 entry read as version 2 would come back with the flag silently false — and a
+// cache that quietly differs from a fresh check is the one thing it must not be.
+constexpr int         kCacheVersion = 2;
 
 void writeStr(std::string& o, const std::string& s) {
     o += std::to_string(s.size());
@@ -367,9 +370,9 @@ bool SurveyCache::load(const std::string& path) {
             ScanRef r;
             if (!readStr(in, r.path) || !readStr(in, r.name) || !readStr(in, r.guid) ||
                 !readStr(in, r.status)) { byPath.clear(); return false; }
-            int kind = 0, usable = 0, hasPose = 0, hasExtent = 0;
+            int kind = 0, usable = 0, hasPose = 0, hasExtent = 0, looksMerged = 0;
             if (!(in >> r.scanIndex >> r.recordCount >> kind >> usable >> hasPose >>
-                  hasExtent)) { byPath.clear(); return false; }
+                  hasExtent >> looksMerged)) { byPath.clear(); return false; }
             for (int k = 0; k < 4; ++k) if (!(in >> r.pose.q[k])) { byPath.clear(); return false; }
             for (int k = 0; k < 3; ++k) if (!(in >> r.pose.t[k])) { byPath.clear(); return false; }
             for (int k = 0; k < 3; ++k) if (!(in >> r.setup[k])) { byPath.clear(); return false; }
@@ -377,10 +380,11 @@ bool SurveyCache::load(const std::string& path) {
             for (int k = 0; k < 3; ++k) if (!(in >> r.hi[k])) { byPath.clear(); return false; }
             in.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
             if (kind < 0 || kind > 2) { byPath.clear(); return false; }
-            r.kind      = check::Kind(kind);
-            r.usable    = (usable != 0);
-            r.hasPose   = (hasPose != 0);
-            r.hasExtent = (hasExtent != 0);
+            r.kind        = check::Kind(kind);
+            r.usable      = (usable != 0);
+            r.hasPose     = (hasPose != 0);
+            r.hasExtent   = (hasExtent != 0);
+            r.looksMerged = (looksMerged != 0);
             e.scans.push_back(std::move(r));
         }
         byPath[key] = std::move(e);
@@ -411,10 +415,10 @@ bool SurveyCache::save(const std::string& path) const {
             writeStr(o, r.status);
             char buf[512];
             std::snprintf(buf, sizeof(buf),
-                          "%zu %llu %d %d %d %d %.17g %.17g %.17g %.17g %.17g %.17g %.17g "
+                          "%zu %llu %d %d %d %d %d %.17g %.17g %.17g %.17g %.17g %.17g %.17g "
                           "%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g\n",
                           r.scanIndex, (unsigned long long)r.recordCount, int(r.kind),
-                          int(r.usable), int(r.hasPose), int(r.hasExtent),
+                          int(r.usable), int(r.hasPose), int(r.hasExtent), int(r.looksMerged),
                           r.pose.q[0], r.pose.q[1], r.pose.q[2], r.pose.q[3],
                           r.pose.t[0], r.pose.t[1], r.pose.t[2],
                           r.setup[0], r.setup[1], r.setup[2],
@@ -540,11 +544,16 @@ void checkOneFile(const std::string& path, const SurveyOptions& opt, FileResult&
                           ? viewer::FrameConvention::ScannerLocal
                           : viewer::FrameConvention::IdentityPose;
         }
-        ref.kind   = res.kind;
-        ref.status = res.summary;
-        // Only a positive merged-cloud finding excludes a scan. Ambiguity
-        // means the evidence was inconclusive, not that the scan is bad.
-        ref.usable = (res.kind != check::Kind::Unified);
+        ref.kind        = res.kind;
+        ref.status      = res.summary;
+        ref.looksMerged = res.looksMerged;
+        // Can it be drawn? That is the whole question — see ScanRef::usable. A
+        // scan with no position fields has nothing to put in the store; every
+        // other scan goes in, whatever the merged-cloud heuristic thinks of it.
+        ref.usable = (sc.field("cartesianX") && sc.field("cartesianY") &&
+                      sc.field("cartesianZ")) ||
+                     (sc.field("sphericalRange") && sc.field("sphericalAzimuth") &&
+                      sc.field("sphericalElevation"));
 
         for (int k = 0; k < 3; ++k) ref.setup[k] = sc.pose.t[k];
         expandFileBounds(out, ref.setup);
@@ -796,6 +805,7 @@ bool build(const Survey& s, const std::string& storePath, const BuildOptions& op
         rec.sourcePoints = usable[i]->recordCount;
         rec.flags = (usable[i]->kind == check::Kind::Structured) ? store::kScanStructured
                                                                   : store::kScanAmbiguous;
+        if (usable[i]->looksMerged) rec.flags |= store::kScanLooksMerged;
         writer.addScan(rec);
     }
 
