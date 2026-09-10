@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Shader source
@@ -262,8 +263,34 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
     _setups = markers;
     _setupBuffer = nil;
     if (_setups.empty()) return;
-    _setupBuffer = [_device newBufferWithBytes:_setups.data()
-                                        length:_setups.size() * sizeof(simd_float3)
+    // Packed to three floats a marker, because that is what the shader reads.
+    //
+    // simd_float3 is SIXTEEN bytes — three floats and a pad, so the type can sit
+    // in a vector register — and markerVS declares its array as packed_float3,
+    // which is twelve. Uploading the vector's own storage therefore hands the
+    // shader a 16-byte stride to read at 12, and every marker after the first
+    // starts reading from inside its predecessor: marker 1 comes back as
+    // (pad0, x1, y1), marker 2 as (z1, pad1, x2), marker 3 as (y2, z2, pad2),
+    // and marker 4 lands correctly again on the fourth element's x — showing the
+    // fourth setup's position under the fifth setup's name. Two in the right
+    // place and three scattered, out of five, which is exactly what a survey of
+    // five setups looked like on screen. The scattered ones take their height
+    // from a neighbour's x or y, or from the pad, so they sit at heights that
+    // mean nothing: one of them well underground.
+    //
+    // Invisible from either side: the C++ compiles, the shader compiles, and
+    // the first marker is always in the right place. The pivot never showed it
+    // because a single vertex only ever reads element zero.
+    static_assert(sizeof(simd_float3) == 16,
+                  "simd_float3 is padded; the packed upload below is why");
+    std::vector<float> packed(3 * _setups.size());
+    for (size_t i = 0; i < _setups.size(); ++i) {
+        packed[3 * i + 0] = _setups[i].x;
+        packed[3 * i + 1] = _setups[i].y;
+        packed[3 * i + 2] = _setups[i].z;
+    }
+    _setupBuffer = [_device newBufferWithBytes:packed.data()
+                                        length:packed.size() * sizeof(float)
                                        options:MTLResourceStorageModeShared];
 }
 
@@ -384,8 +411,11 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
         u.attenuationScale = atten;
         u.tint             = simd_make_float4(1.0f, 0.95f, 0.3f, 1.0f);
         u.useVertexColour  = 0u;
-        const simd_float3 p = simd_make_float3(_pivot.x, _pivot.y, _pivot.z);
-        [enc setVertexBytes:&p length:sizeof(p) atIndex:0];
+        // Three bare floats, matching markerVS's packed_float3. One vertex only
+        // ever reads element zero, so simd_float3's padding never showed here —
+        // but leaving the mismatch in place is leaving the trap in place.
+        const float p[3] = {_pivot.x, _pivot.y, _pivot.z};
+        [enc setVertexBytes:p length:sizeof(p) atIndex:0];
         [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
         [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:1];
     }
