@@ -187,13 +187,23 @@ struct Collector {
         if (shade == Shade::Flat) {
             p.r = kUnknownR; p.g = kUnknownG; p.b = kUnknownB;
         } else {
-            shadeFrontier(faces, zSpan > 0 ? (centre[2] - zLo) / zSpan : 0.5,
+            // Height taken back out of the stored float rather than from
+            // `centre`, which is the same number to within a rounding. The point
+            // is that recolour has only the float to work from, and a shading
+            // that changes in the last bit when you switch mode and back is not
+            // a view of the answer, it is an edit of it.
+            const double z = origin[2] + double(p.z);
+            shadeFrontier(faces, zSpan > 0 ? (z - zLo) / zSpan : 0.5,
                           shade, p.r, p.g, p.b);
         }
         p.a = 255;
         p.scanId = 0;
         out.push_back(p);
         keys.push_back(h);
+        // The normal, kept so the shading can be changed later without carving
+        // the site again. Three arrays in lockstep from here on: every filter,
+        // every merge, every halving moves all three or none.
+        faceOf.push_back(faces);
 
         if (cap && out.size() > cap) halve();
     }
@@ -207,16 +217,21 @@ struct Collector {
         threshold = std::min(threshold, other.threshold);
         out.insert(out.end(), other.out.begin(), other.out.end());
         keys.insert(keys.end(), other.keys.begin(), other.keys.end());
+        faceOf.insert(faceOf.end(), other.faceOf.begin(), other.faceOf.end());
         other.out.clear();
         other.keys.clear();
+        other.faceOf.clear();
     }
 
     void filterToThreshold() {
         size_t w = 0;
         for (size_t i = 0; i < out.size(); ++i)
-            if (keys[i] < threshold) { out[w] = out[i]; keys[w] = keys[i]; ++w; }
+            if (keys[i] < threshold) {
+                out[w] = out[i]; keys[w] = keys[i]; faceOf[w] = faceOf[i]; ++w;
+            }
         out.resize(w);
         keys.resize(w);
+        faceOf.resize(w);
     }
 
     // Halving the threshold drops about half the kept set, and re-testing what
@@ -230,6 +245,7 @@ struct Collector {
     }
 
     std::vector<uint64_t> keys;
+    std::vector<uint8_t>  faceOf;
 };
 
 } // namespace
@@ -245,6 +261,39 @@ uint64_t imageCellsPerScan(const Options& opt, uint64_t scanCount) {
     cells = std::max<uint64_t>(cells, opt.minImageCells);
     // rimg::Options::maxCells is 32 bits, and no raster approaches it.
     return std::min<uint64_t>(cells, 0xFFFFFFFFull);
+}
+
+void recolour(Result& r, uint8_t shading) {
+    if (r.voxelFaces.size() != r.voxels.size()) return;
+    // The height range the ramp spans, recovered the same way the run chose it:
+    // the domain when it is bounded, and otherwise the drawn voxels' own extent.
+    // Taken from the result rather than remembered, so a result that has been
+    // saved and reloaded shades identically.
+    double zLo = 0, zSpan = 0;
+    if (r.domain.kind == carve::Domain::Kind::Box) {
+        zLo = r.domain.lo[2];
+        zSpan = r.domain.hi[2] - r.domain.lo[2];
+    } else if (!r.voxels.empty()) {
+        float lo = r.voxels[0].z, hi = r.voxels[0].z;
+        for (const lod::StorePoint& p : r.voxels) {
+            lo = std::min(lo, p.z);
+            hi = std::max(hi, p.z);
+        }
+        zLo = r.origin[2] + double(lo);
+        zSpan = double(hi) - double(lo);
+    }
+    const Shade mode = Shade(shading);
+    for (size_t i = 0; i < r.voxels.size(); ++i) {
+        lod::StorePoint& p = r.voxels[i];
+        if (mode == Shade::Flat) {
+            p.r = kUnknownR; p.g = kUnknownG; p.b = kUnknownB;
+            continue;
+        }
+        // The voxel's world height, back out of the origin it was rebased on.
+        const double z = r.origin[2] + double(p.z);
+        shadeFrontier(r.voxelFaces[i], zSpan > 0 ? (z - zLo) / zSpan : 0.5,
+                      mode, p.r, p.g, p.b);
+    }
 }
 
 void rebase(const Result& r, const double origin[3], std::vector<lod::StorePoint>& out) {
@@ -784,6 +833,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     while (col.cap && col.out.size() > col.cap) col.halve();
 
     out.voxels = std::move(col.out);
+    out.voxelFaces = std::move(col.faceOf);
     for (int k = 0; k < 3; ++k) out.origin[k] = origin[k];
     out.qualified = col.qualified;
     out.keptFraction = col.qualified ? double(out.voxels.size()) / double(col.qualified) : 1.0;

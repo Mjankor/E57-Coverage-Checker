@@ -47,6 +47,11 @@
 // are — otherwise opening a store after a carve would slide the voxels off the
 // geometry they describe.
 - (void)setVoxelResult:(const vis::Result &)result;
+
+// Recolours the voxels already held — see vis::recolour. The outward normals
+// came back with the result, so this is a pass over the drawn set rather than
+// another carve.
+- (void)setVoxelShading:(uint8_t)mode;
 - (void)clearVoxels;
 - (BOOL)hasVoxels;
 - (size_t)voxelCount;

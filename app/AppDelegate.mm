@@ -153,6 +153,7 @@ const char *kindLabel(check::Kind k) {
     CGFloat              _sidebarWidth;
     NSButton            *_cloudToggle;
     NSButton            *_voxelToggle;
+    NSMutableArray<NSMenuItem *> *_shadingItems;
     NSWindow            *_reportWindow;
     NSTextView          *_reportText;
 
@@ -396,29 +397,75 @@ const char *kindLabel(check::Kind k) {
     for (auto &d : defs) {
         NSButton *b = [[NSButton alloc] initWithFrame:NSZeroRect];
         b.title       = d.title;
-        b.bezelStyle  = NSBezelStyleRounded;
         [b setButtonType:NSButtonTypePushOnPushOff];
         b.state       = NSControlStateValueOn;
         b.font        = [NSFont systemFontOfSize:11];
         b.target      = self;
         b.action      = d.action;
+        // The chip is drawn here rather than by the system bezel.
+        //
+        // A stock push-on/push-off button shows its state by filling when on and
+        // showing a plain bezel when off — and the plain bezel in dark mode is a
+        // grey a shade or two off this view's background, which is a fixed
+        // (0.09, 0.10, 0.12) whatever the system appearance is. Switching a layer
+        // off therefore made its own button disappear, which is precisely the
+        // moment you need it: the thing you have just hidden is the thing you
+        // want to bring back.
+        //
+        // So both states are painted explicitly, against a background that is
+        // known and does not follow the system: filled when on, a translucent
+        // chip with a light rim when off, and legible either way.
+        b.bordered    = NO;
         // MTKView forces the window layer-backed, so a sibling drawn over it
         // needs its own layer or it renders underneath.
         b.wantsLayer  = YES;
+        b.layer.cornerRadius = 6;
+        b.layer.borderWidth  = 1;
         [_rightPane addSubview:b];
         *d.slot = b;
+        [self styleLayerToggle:b];
     }
 }
 
+// The two states of a layer toggle, painted for a dark viewport.
+- (void)styleLayerToggle:(NSButton *)b {
+    const BOOL on = (b.state == NSControlStateValueOn);
+    // Colours in the view's own space rather than semantic ones: the background
+    // they sit on is fixed, so a palette that follows the system appearance
+    // would drift away from it in one direction or the other.
+    NSColor *fill   = on ? [NSColor colorWithSRGBRed:0.22 green:0.47 blue:0.86 alpha:0.92]
+                         : [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.10];
+    NSColor *border = on ? [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.55]
+                         : [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.38];
+    NSColor *text   = on ? [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:1.00]
+                         : [NSColor colorWithSRGBRed:1.00 green:1.00 blue:1.00 alpha:0.82];
+    b.layer.backgroundColor = fill.CGColor;
+    b.layer.borderColor     = border.CGColor;
+    // An attributed title, because a borderless button's plain `title` is drawn
+    // in the system's label colour and would go dark along with the appearance.
+    NSMutableParagraphStyle *para = [[NSMutableParagraphStyle alloc] init];
+    para.alignment = NSTextAlignmentCenter;
+    b.attributedTitle = [[NSAttributedString alloc]
+        initWithString:b.title
+            attributes:@{NSForegroundColorAttributeName: text,
+                         NSFontAttributeName: [NSFont systemFontOfSize:11],
+                         NSParagraphStyleAttributeName: para}];
+}
+
 - (void)toggleClouds:(id)sender {
-    _cloudView.showClouds = (((NSButton *)sender).state == NSControlStateValueOn);
+    NSButton *b = (NSButton *)sender;
+    _cloudView.showClouds = (b.state == NSControlStateValueOn);
+    [self styleLayerToggle:b];
 }
 
 - (void)toggleVoxels:(id)sender {
-    _cloudView.showVoxels = (((NSButton *)sender).state == NSControlStateValueOn);
+    NSButton *b = (NSButton *)sender;
+    _cloudView.showVoxels = (b.state == NSControlStateValueOn);
+    [self styleLayerToggle:b];
 }
 
 - (void)buildMenu {
+    _shadingItems = [NSMutableArray array];
     NSMenu *bar = [[NSMenu alloc] init];
 
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
@@ -447,7 +494,22 @@ const char *kindLabel(check::Kind k) {
     [procMenu addItemWithTitle:@"Scan Report…" action:@selector(scanReport:) keyEquivalent:@"i"];
     [procMenu addItemWithTitle:@"Evidence Self-Test…" action:@selector(selfTest:) keyEquivalent:@"t"];
     [procMenu addItem:[NSMenuItem separatorItem]];
-    [procMenu addItemWithTitle:@"Use the GPU" action:@selector(toggleGpu:) keyEquivalent:@""];
+    // On by default. The carver is a "try" — every failure it can have comes
+    // back as a declined tile that the CPU then carves — so the worst a machine
+    // without a usable one suffers is the speed it would have had anyway. The
+    // item is left unticked and disabled when there is genuinely no device, so
+    // the menu says which case this machine is in rather than offering a switch
+    // that does nothing.
+    NSMenuItem *gpuItem =
+        [procMenu addItemWithTitle:@"Use the GPU" action:@selector(toggleGpu:)
+                     keyEquivalent:@""];
+    _useGpu = ([CarveGpu shared] != nil);
+    gpuItem.state = _useGpu ? NSControlStateValueOn : NSControlStateValueOff;
+    // Greyed out when there is no device — see validateMenuItem:, which is what
+    // actually decides. Setting `enabled` here would not survive: menus
+    // autoenable, and an item whose target implements its action is switched
+    // back on before it is drawn.
+    if (!_useGpu) gpuItem.toolTip = [CarveGpu unavailableReason];
     [procMenu addItemWithTitle:@"Verify the GPU against the CPU"
                         action:@selector(toggleVerifyGpu:) keyEquivalent:@""];
     [procMenu addItem:[NSMenuItem separatorItem]];
@@ -463,6 +525,28 @@ const char *kindLabel(check::Kind k) {
     [viewMenu addItemWithTitle:@"Original Clouds"
                         action:@selector(toggleCloudsMenu:) keyEquivalent:@"1"];
     [viewMenu addItemWithTitle:@"Voxels" action:@selector(toggleVoxelsMenu:) keyEquivalent:@"2"];
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    // Shading. Here rather than in the run sheet because it is a way of looking
+    // at the answer, not a parameter of computing it: the outward normals are
+    // kept with the result, so switching costs a recolour rather than a carve.
+    // Radio items, since the four are one choice.
+    {
+        struct { NSString *title; uint8_t mode; } modes[] = {
+            {@"Shading: Lit and Height Ramp", 3},
+            {@"Shading: Lit",                 1},
+            {@"Shading: Height Ramp",         2},
+            {@"Shading: Flat",                0},
+        };
+        for (auto &m : modes) {
+            NSMenuItem *it = [viewMenu addItemWithTitle:m.title
+                                                 action:@selector(chooseShading:)
+                                          keyEquivalent:@""];
+            it.tag   = m.mode;
+            it.state = (m.mode == _visOptions.shading) ? NSControlStateValueOn
+                                                       : NSControlStateValueOff;
+            [_shadingItems addObject:it];
+        }
+    }
     [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"Larger Points" action:@selector(biggerPoints:) keyEquivalent:@"]"];
     [viewMenu addItemWithTitle:@"Smaller Points" action:@selector(smallerPoints:) keyEquivalent:@"["];
@@ -540,6 +624,7 @@ const char *kindLabel(check::Kind k) {
     const BOOL on = !_cloudView.showClouds;
     _cloudView.showClouds = on;
     _cloudToggle.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    [self styleLayerToggle:_cloudToggle];
 }
 
 - (void)toggleVoxelsMenu:(id)sender {
@@ -547,6 +632,7 @@ const char *kindLabel(check::Kind k) {
     const BOOL on = !_cloudView.showVoxels;
     _cloudView.showVoxels = on;
     _voxelToggle.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    [self styleLayerToggle:_voxelToggle];
 }
 
 // The scan report, in the app. Everything `e57cov info` prints — the raster,
@@ -742,6 +828,13 @@ const char *kindLabel(check::Kind k) {
     _status.stringValue = @"Voxels cleared.";
 }
 
+// A switch with nothing to switch to should not look available. This is the
+// only item that can be in that position, so everything else validates through.
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    if (item.action == @selector(toggleGpu:)) return [CarveGpu shared] != nil;
+    return YES;
+}
+
 - (void)toggleGpu:(id)sender {
     _useGpu = !_useGpu;
     ((NSMenuItem *)sender).state = _useGpu ? NSControlStateValueOn : NSControlStateValueOff;
@@ -754,6 +847,18 @@ const char *kindLabel(check::Kind k) {
     }
     _status.stringValue = _useGpu ? @"Visibility filter will run on the GPU."
                                   : @"Visibility filter will run on the CPU.";
+}
+
+// One of four, so the four keep each other in step.
+- (void)chooseShading:(id)sender {
+    NSMenuItem *picked = (NSMenuItem *)sender;
+    _visOptions.shading = uint8_t(picked.tag);
+    for (NSMenuItem *it in _shadingItems)
+        it.state = (it == picked) ? NSControlStateValueOn : NSControlStateValueOff;
+    // Applies to what is already on screen. A carve is minutes and a recolour is
+    // a pass over the drawn voxels, so this is not a setting that waits for the
+    // next run to mean anything.
+    [_cloudView setVoxelShading:_visOptions.shading];
 }
 
 - (void)toggleVerifyGpu:(id)sender {
@@ -970,7 +1075,7 @@ const char *kindLabel(check::Kind k) {
     }
 
     // --- parameters -------------------------------------------------------
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 244)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 212)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -1004,29 +1109,15 @@ const char *kindLabel(check::Kind k) {
                    ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:firstHit];
 
-    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 34, 400, 20)];
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 400, 20)];
     solid.title = @"Show every unobserved voxel, not just the frontier";
     [solid setButtonType:NSButtonTypeSwitch];
     solid.font = [NSFont systemFontOfSize:11];
     solid.state = _visOptions.solid ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:solid];
-
-    // How the frontier is coloured. A flat wall of one red has no interior, and
-    // the two cues that give it one are free — see vis::Options::shading.
-    [acc addSubview:[self labelWithText:@"Shading"
-                                  frame:NSMakeRect(0, 8, 70, 20)]];
-    NSPopUpButton *shading =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(72, 5, 300, 24) pullsDown:NO];
-    [shading addItemsWithTitles:@[@"Lit and height ramp",
-                                  @"Lit by the frontier's own normal",
-                                  @"Height ramp only",
-                                  @"Flat"]];
-    // The menu reads best from richest to plainest; the option is the other way
-    // round, so map rather than reorder either.
-    const uint8_t shadeOrder[4] = {3, 1, 2, 0};
-    for (int i = 0; i < 4; ++i)
-        if (shadeOrder[i] == _visOptions.shading) [shading selectItemAtIndex:i];
-    [acc addSubview:shading];
+    // Shading is not here. It is in the View menu, because it changes how the
+    // answer is drawn rather than what the answer is, and it applies to a
+    // finished carve without running another one.
 
     NSAlert *a = [[NSAlert alloc] init];
     a.messageText = @"Run visibility filter";
@@ -1063,11 +1154,6 @@ const char *kindLabel(check::Kind k) {
     opt.domain       = (extent.state == NSControlStateValueOn)
                      ? vis::DomainMode::MeasuredExtent : vis::DomainMode::RangeSpheres;
     opt.solid        = (solid.state == NSControlStateValueOn);
-    {
-        const uint8_t order[4] = {3, 1, 2, 0};
-        const NSInteger i = shading.indexOfSelectedItem;
-        opt.shading = (i >= 0 && i < 4) ? order[i] : uint8_t(3);
-    }
     opt.earlyOut     = (firstHit.state == NSControlStateValueOn)
                      ? carve::EarlyOut::AnyEvidence : carve::EarlyOut::Saturated;
     // The carver is a "try": every failure it can have comes back as a declined
@@ -1264,6 +1350,7 @@ const char *kindLabel(check::Kind k) {
             if (!me) return;
             [me->_cloudView setVoxelResult:*result];
             me->_voxelToggle.state = NSControlStateValueOn;
+            [me styleLayerToggle:me->_voxelToggle];
             me->_cloudView.showVoxels = YES;
             me->_status.stringValue = line;
             me->_progress.stringValue = @"";

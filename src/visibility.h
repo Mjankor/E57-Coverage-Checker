@@ -145,7 +145,8 @@ struct Options {
     uint64_t imageBudgetBytes = 48ull << 30;
     uint32_t minImageCells    = 1u << 20;   // never bin below this per scan
 
-    // How the drawn voxels are coloured. 0 flat, 1 lit, 2 height ramp, 3 both.
+    // How the drawn voxels are coloured to begin with. 0 flat, 1 lit, 2 height
+    // ramp, 3 both. Changeable afterwards without re-carving — see recolour.
     //
     // Both by default. A frontier drawn in one flat colour is a silhouette with
     // no interior — you can see where the unobserved volume is and nothing about
@@ -242,6 +243,14 @@ struct Result {
     // Voxels to draw, as StorePoints so the existing point pipeline can render
     // them with no new shader. Positions are metres relative to `origin`.
     std::vector<lod::StorePoint> voxels;
+    // Which of each drawn voxel's six face neighbours were observed, in the
+    // order vis::kFaceDirs lists them — its outward normal, kept so the shading
+    // can be changed without carving the site again. One byte a voxel, six
+    // megabytes at the display cap, against a carve that takes minutes.
+    //
+    // Parallel to `voxels` and the same length: everything that filters or
+    // reorders one does the same to the other.
+    std::vector<uint8_t> voxelFaces;
     double   origin[3] = {0, 0, 0};
     double   voxelSize = 0;
     lod::Aabb bounds;
@@ -278,6 +287,16 @@ void rebase(const Result& r, const double origin[3], std::vector<lod::StorePoint
 // 2500 x 5280 raster is 13.2 M cells, and whether a thousand of them fit is a
 // question about this function and nothing else.
 uint64_t imageCellsPerScan(const Options& opt, uint64_t scanCount);
+
+// Recolours a finished result in place — see Options::shading for the modes.
+//
+// Separate from run() because shading is a way of looking at the answer, not
+// part of computing it, and the two should not share a cost. Everything it needs
+// was kept: the outward normal in `voxelFaces`, and the height range in
+// `domain`. A viewer can offer the modes as a menu and switch between them on a
+// finished carve, instead of asking for the site to be carved again to change a
+// colour.
+void recolour(Result& r, uint8_t shading);
 
 // Exposed for testing: the frontier rule and the sampling decision.
 bool touchesVisible(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z);

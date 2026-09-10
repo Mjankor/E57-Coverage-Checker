@@ -819,6 +819,39 @@ static void testShadingVariesWithShapeAndHeight() {
     int darkest = 255;
     for (const lod::StorePoint& p : both.voxels) darkest = std::min(darkest, int(p.r));
     CHECK(darkest > 60, "the darkest face is still clearly there");
+
+    // Recolouring a finished result has to land exactly where carving in that
+    // mode would have. It is the same shading function over the same normals, so
+    // anything less than exact means the outward normals did not survive the
+    // display cap in step with the voxels they belong to — which is the one way
+    // this can go wrong and the one way it would not be obvious on screen.
+    CHECK(flat.voxelFaces.size() == flat.voxels.size(),
+          "every drawn voxel kept its outward normal");
+    // Keyed by position, not by index: tiles are handed out dynamically, so two
+    // runs return the same voxels in whatever order their workers finished.
+    auto byPlace = [](const vis::Result& r) {
+        std::map<std::array<float, 3>, uint32_t> m;
+        for (const lod::StorePoint& p : r.voxels)
+            m[{p.x, p.y, p.z}] = (uint32_t(p.r) << 16) | (uint32_t(p.g) << 8) | p.b;
+        return m;
+    };
+    auto sameColours = [&](const vis::Result& a, const vis::Result& b) {
+        return byPlace(a) == byPlace(b);
+    };
+    for (uint8_t mode = 0; mode < 4; ++mode) {
+        vis::Result direct;
+        run(mode, direct);
+        vis::Result switched = flat;          // carved flat, then switched
+        vis::recolour(switched, mode);
+        CHECK(sameColours(direct, switched),
+              "switching shading afterwards matches carving with it from the start");
+    }
+    // And back again, so the modes are a view of the answer rather than a
+    // one-way edit of it.
+    vis::Result there = flat;
+    vis::recolour(there, 3);
+    vis::recolour(there, 0);
+    CHECK(sameColours(there, flat), "and switching back returns exactly where it started");
 }
 
 static void testKnownSceneFromFiveSetups() {
