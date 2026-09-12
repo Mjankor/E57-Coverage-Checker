@@ -1,6 +1,9 @@
 #import "CarveGpu.h"
 
 #import <Metal/Metal.h>
+#include <atomic>
+#include <mutex>
+#include <deque>
 
 #include <algorithm>
 #include <cmath>
@@ -244,10 +247,22 @@ kernel void carveVoxels(device uchar             *state   [[buffer(0)]],
     std::unordered_map<uint64_t, ImageBuffer> _images;
     uint64_t                   _residentBytes;
     uint64_t                   _clock;
+    // The image cache is shared by every carving thread and is the only shared
+    // mutable state left. Read-mostly — an image is uploaded once and then hit —
+    // but an eviction rewrites the map, so it is all under one lock.
+    std::mutex                 _imageLock;
 
-    id<MTLBuffer>              _stateBuffer;
-    id<MTLBuffer>              _testsBuffer;
-    uint64_t                   _stateCapacity;
+    // Per-thread scratch. These used to be one set on the singleton, which is why
+    // the carve forced itself down to a single thread whenever the GPU was in
+    // use: one state buffer cannot serve two tiles at once. A slot is claimed by
+    // a thread the first time it carves and kept for the process.
+    struct Slot {
+        id<MTLBuffer> state;
+        id<MTLBuffer> tests;
+        uint64_t      stateCapacity;
+    };
+    std::deque<Slot>           _slots;
+    std::mutex                 _slotLock;
 }
 
 static NSString *g_unavailable = @"not initialised";
@@ -297,12 +312,27 @@ static NSString *g_unavailable = @"not initialised";
 
 - (uint64_t)residentBytes { return _residentBytes; }
 
+// The calling thread's scratch, created on first use.
+//
+// A deque rather than a vector because references into it have to stay valid
+// while another thread appends — a vector would reallocate and leave a carve in
+// progress holding a dangling reference to its own buffers.
+- (Slot *)slotForThisThread {
+    static std::atomic<size_t> nextIndex{0};
+    static thread_local size_t myIndex = SIZE_MAX;
+    std::lock_guard<std::mutex> lk(_slotLock);
+    if (myIndex == SIZE_MAX) myIndex = nextIndex.fetch_add(1);
+    while (_slots.size() <= myIndex) _slots.push_back(Slot{});
+    return &_slots[myIndex];
+}
+
 // --- range image upload, with a byte-budgeted LRU ---------------------------
 
 // The cells and the mapping's reverse index travel together: they are read by the
 // same lookup, and an image resident without its index could not answer a single
 // direction. Budgeted and evicted as one unit for the same reason.
 - (ImageBuffer)buffersForImage:(const rimg::RangeImage *)image {
+    std::lock_guard<std::mutex> lk(_imageLock);
     auto it = _images.find(image->uid);
     if (it != _images.end()) {
         it->second.lastUse = ++_clock;
@@ -415,19 +445,21 @@ static NSString *g_unavailable = @"not initialised";
         });
     }
 
-    if (_stateCapacity < voxels || !_stateBuffer) {
-        _stateBuffer = [_device newBufferWithLength:voxels options:MTLResourceStorageModeShared];
-        if (!_stateBuffer) { _stateCapacity = 0; return NO; }
-        _stateCapacity = voxels;
+    Slot *slot = [self slotForThisThread];
+    if (!slot) return NO;                    // falls back to the CPU, as every failure does
+    if (slot->stateCapacity < voxels || !slot->state) {
+        slot->state = [_device newBufferWithLength:voxels options:MTLResourceStorageModeShared];
+        if (!slot->state) { slot->stateCapacity = 0; return NO; }
+        slot->stateCapacity = voxels;
     }
-    std::memset(_stateBuffer.contents, 0, voxels);
+    std::memset(slot->state.contents, 0, voxels);
 
-    if (!_testsBuffer) {
-        _testsBuffer = [_device newBufferWithLength:sizeof(uint32_t)
-                                            options:MTLResourceStorageModeShared];
-        if (!_testsBuffer) return NO;
+    if (!slot->tests) {
+        slot->tests = [_device newBufferWithLength:sizeof(uint32_t)
+                                           options:MTLResourceStorageModeShared];
+        if (!slot->tests) return NO;
     }
-    *static_cast<uint32_t *>(_testsBuffer.contents) = 0;
+    *static_cast<uint32_t *>(slot->tests.contents) = 0;
 
     GpuTile gt{};
     gt.voxelSize  = float(p.voxelSize);
@@ -514,11 +546,11 @@ static NSString *g_unavailable = @"not initialised";
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         if (!enc) return NO;
         [enc setComputePipelineState:_pipeline];
-        [enc setBuffer:_stateBuffer offset:0 atIndex:0];
+        [enc setBuffer:slot->state offset:0 atIndex:0];
         [enc setBytes:&gs length:sizeof(gs) atIndex:1];
         [enc setBytes:&gt length:sizeof(gt) atIndex:2];
         [enc setBuffer:img.buffer offset:0 atIndex:3];
-        [enc setBuffer:_testsBuffer offset:0 atIndex:4];
+        [enc setBuffer:slot->tests offset:0 atIndex:4];
         [enc setBuffer:img.rowOfEl offset:0 atIndex:5];
         [enc setBuffer:img.colOfAz offset:0 atIndex:6];
         [enc dispatchThreadgroups:grid threadsPerThreadgroup:group];
@@ -529,8 +561,8 @@ static NSString *g_unavailable = @"not initialised";
     [cb waitUntilCompleted];
     if (cb.error) return NO;
 
-    std::memcpy(out.state.data(), _stateBuffer.contents, voxels);
-    stats.setupTests += *static_cast<const uint32_t *>(_testsBuffer.contents);
+    std::memcpy(out.state.data(), slot->state.contents, voxels);
+    stats.setupTests += *static_cast<const uint32_t *>(slot->tests.contents);
     carve::tallyTile(out, stats);
     ++_tilesCarved;
     return YES;

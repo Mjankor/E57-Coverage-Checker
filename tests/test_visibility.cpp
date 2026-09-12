@@ -18,6 +18,7 @@
 #include "e57_fixture.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -435,7 +436,10 @@ static void testEndToEnd() {
     // is the part that would silently corrupt a run, and it is testable without
     // a GPU.
     {
-        struct Counter { uint64_t accepted = 0, refused = 0; };
+        // Atomic, because a carver now runs on every carving thread rather than
+        // forcing the carve down to one. A plain counter here was a race the
+        // moment that restriction was lifted.
+        struct Counter { std::atomic<uint64_t> accepted{0}, refused{0}; };
         Counter counter;
 
         vis::Options hooked = opt;
@@ -455,8 +459,8 @@ static void testEndToEnd() {
         vis::Result hr;
         CHECK(vis::run({path}, hooked, nullptr, hr, err), err.empty() ? "ran hooked" : err.c_str());
         CHECK(hr.carverTiles > 0 && hr.carverRefused > 0, "both paths were taken");
-        CHECK(hr.carverTiles == counter.accepted, "accepted tiles are counted");
-        CHECK(hr.carverRefused == counter.refused, "and so are refusals");
+        CHECK(hr.carverTiles == counter.accepted.load(), "accepted tiles are counted");
+        CHECK(hr.carverRefused == counter.refused.load(), "and so are refusals");
         CHECK(hr.carverVoxelsCompared > 0, "verification actually compared something");
         CHECK(hr.carverDisagreements == 0,
               "a carver that calls carveTile agrees with carveTile");
@@ -1356,6 +1360,75 @@ static void testKeepingOnlyTheVoxelsInsideTheWrap() {
     }
 }
 
+// A carver runs on every carving thread, and the answer does not change.
+//
+// The carve used to force itself to one thread whenever a carver was set, because
+// the GPU carver kept one state buffer on a singleton and two tiles could not
+// share it. That left the CPU idle for the whole of each blocking dispatch and the
+// device idle between them. The scratch is per-thread now and the restriction is
+// gone — so the thing to prove is that the result is the same however many threads
+// carve, since a carver that raced would produce a plausible-looking answer with
+// tiles quietly wrong.
+static void testACarverRunsOnEveryThreadAndAgrees() {
+    std::printf("a threaded carver gives the same answer as a serial one\n");
+
+    const std::string path = tmpPath("threadedcarver");
+    CHECK(fixture::write(path, {roomScan("west", -3.0, 2.0, 1.5),
+                                roomScan("east",  3.0, 2.0, 1.5)}, 512), "fixture written");
+
+    vis::Options opt;
+    opt.voxelSize  = 0.25;
+    opt.maxRange   = 8.0;
+    opt.tileVoxels = 16;          // small, so there are many tiles to spread
+    // A stand-in for the GPU: carves the tile properly, and keeps per-call scratch
+    // of its own so a race would show up as a wrong answer rather than a crash.
+    opt.carver = [](const carve::TileKey& k, const std::vector<carve::SetupView>& sv,
+                    const carve::Params& pp, carve::Tile& t, carve::Stats& st,
+                    void*) -> bool {
+        carve::carveTile(k, sv, pp, t, st);
+        return true;
+    };
+
+    auto digest = [](const vis::Result& r) {
+        std::vector<std::array<int64_t, 3>> v;
+        v.reserve(r.voxels.size());
+        for (const lod::StorePoint& p : r.voxels)
+            v.push_back({int64_t(std::llround(p.x * 1000)), int64_t(std::llround(p.y * 1000)),
+                         int64_t(std::llround(p.z * 1000))});
+        std::sort(v.begin(), v.end());
+        return v;
+    };
+
+    std::string err;
+    vis::Options one = opt;
+    one.threads = 1;
+    vis::Result serial;
+    CHECK(vis::run({path}, one, nullptr, serial, err), err.empty() ? "serial run" : err.c_str());
+    CHECK(!serial.voxels.empty(), "the serial run produced voxels");
+    const auto want = digest(serial);
+
+    for (unsigned n : {2u, 3u, 4u, 8u}) {
+        vis::Options many = opt;
+        many.threads = n;
+        vis::Result r;
+        CHECK(vis::run({path}, many, nullptr, r, err), err.empty() ? "threaded run" : err.c_str());
+        CHECK(digest(r) == want, "the same voxels at any thread count, with a carver");
+        CHECK(r.stats.unknown == serial.stats.unknown, "and the same unobserved count");
+        CHECK(r.carverTiles == serial.carverTiles, "with every tile still going to the carver");
+    }
+
+    // And the statistics the carver reports survive the threading: setup tests are
+    // accumulated per worker and summed, so they must not depend on the split.
+    {
+        vis::Options many = opt;
+        many.threads = 4;
+        vis::Result r;
+        CHECK(vis::run({path}, many, nullptr, r, err), "ran");
+        CHECK(r.stats.setupTests == serial.stats.setupTests,
+              "the work reported is the same work, however it was divided");
+    }
+}
+
 int main() {
     testDefaultsAgreeWithTheLibrary();
     testVoxelHash();
@@ -1366,6 +1439,7 @@ int main() {
     testShadingVariesWithShapeAndHeight();
     testTheWrapSkinDescribesTheWrap();
     testTheWrapSkinSharesTheVoxelsFrame();
+    testACarverRunsOnEveryThreadAndAgrees();
     testKeepingOnlyTheVoxelsInsideTheWrap();
     testKnownSceneFromFiveSetups();
     testDatumSetupWithNoTranslation();

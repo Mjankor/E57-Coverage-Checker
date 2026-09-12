@@ -895,9 +895,21 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
 
     unsigned nthreads = opt.threads ? opt.threads : std::thread::hardware_concurrency();
     if (nthreads == 0) nthreads = 1;
-    // A carver is the parallelism; a pool of threads feeding it would only
-    // contend for one device queue.
-    if (opt.carver) nthreads = 1;
+    // Threads are used WITH a carver, not instead of it.
+    //
+    // This used to drop to one thread whenever a carver was set, on the reasoning
+    // that the device is the parallelism and a pool would only contend for one
+    // queue. The reasoning was wrong twice. The carver blocks on its dispatch, so
+    // a single thread leaves the CPU idle for the whole of it and the device idle
+    // for every setup, readback and collection between dispatches — neither is
+    // busy while the other works. And a Metal command queue is built to have
+    // several command buffers in flight; one thread can only ever have one.
+    //
+    // What made it necessary was the carver's own scratch: one state buffer on a
+    // singleton cannot serve two tiles at once. That is per-thread now, so the
+    // restriction goes with it. A carver that is not thread-safe is still free to
+    // serialise internally — every failure path it has already falls back to the
+    // CPU for that tile, so the worst case is the speed this line used to force.
     nthreads = unsigned(std::min<uint64_t>(nthreads, std::max<uint64_t>(1, plannedTiles)));
 
     // The height range the ramp spans. The domain when it is bounded — that is
