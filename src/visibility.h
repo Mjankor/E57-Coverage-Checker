@@ -305,6 +305,14 @@ struct Result {
     // the largest single zone found in any scan, which is the one worth looking at
     // first — see rimg::describeNoReturnZones for the same breakdown per scan.
     uint64_t     believedCells = 0;
+    // Setups where the sky could be named — an opening at the instrument's own
+    // zenith wider than a cone about it — and setups with zones whose bordering
+    // returns were too weak to believe. See rimg::identifySky and
+    // rimg::filterDarkBorderedZones.
+    uint64_t     setupsWithSky = 0;
+    uint64_t     setupsWithDarkZones = 0;
+    uint64_t     darkCells = 0;
+    uint64_t     setupsWithoutIntensity = 0;
     uint64_t     largestZoneCells = 0;
     double       largestZoneBorderMinM = -1.0;
     double       largestZoneBorderMedianM = -1.0;

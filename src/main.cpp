@@ -133,6 +133,14 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
                     (unsigned long long)res.largestZoneCells,
                     res.largestZoneElLoDeg, res.largestZoneElHiDeg,
                     res.largestZoneBorderMinM, res.largestZoneBorderMedianM);
+    if (res.setupsWithSky || res.setupsWithDarkZones || res.setupsWithoutIntensity)
+        std::printf("            %llu named their own sky; %llu had zones bordered by returns "
+                    "too weak\n            to believe (%llu cells demoted); %llu carry no "
+                    "intensity to judge on\n",
+                    (unsigned long long)res.setupsWithSky,
+                    (unsigned long long)res.setupsWithDarkZones,
+                    (unsigned long long)res.darkCells,
+                    (unsigned long long)res.setupsWithoutIntensity);
     if (res.setupsTooClose)
         std::printf("            %llu parked inside the %.2f m minimum range of something:\n"
                     "            %llu cells demoted, nearest border %.2f m — each would have\n"

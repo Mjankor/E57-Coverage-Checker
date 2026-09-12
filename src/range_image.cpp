@@ -246,6 +246,10 @@ struct Sample {
 struct PointRec {
     float    x, y, z;
     uint32_t row, col;
+    // As the file recorded it, unscaled and uncompared. What it means differs by
+    // vendor and by instrument setting, so nothing here ever reads an absolute
+    // value: every test is against this scan's own distribution.
+    float    intensity;
 };
 
 // The rotation that makes a row a line of constant elevation again.
@@ -889,6 +893,225 @@ void filterNoReturnsTooClose(RangeImage& im, const Options& opt) {
     }
 }
 
+// Finds the sky: the unsampled region that reaches the instrument's own zenith and
+// opens wider than a cone about it.
+//
+// This is the only POSITIVE identification of sky in the file. Everything else
+// here works by elimination — a no-return that is not the instrument's cone and
+// not a surface inside its minimum range clears, because that is what a no-return
+// means. Elimination cannot tell sky from a surface too dark to answer, and the
+// two want opposite treatment, so the sky is named outright where it can be.
+//
+// WHICH WAY IS UP is not assumed and not taken from the pose. The mount sits at
+// the instrument's own -z by construction, so the sky pole is the end of the sweep
+// OPPOSITE the cone this scan identified — which is right for a scanner hanging
+// upside down, where the pose and the world would both say the wrong thing. With
+// no cone identified, the high-elevation end of the measured table is used and the
+// diagnostic says so.
+//
+// THE TEST is: start at the pole, take the connected region of no-returns, and ask
+// how far from the pole it reaches. Past `skyMinExtentDeg` it is sky. Not sky in
+// every direction — in ANY. A verandah roof, a parapet or a canopy cuts the
+// opening off on one side and leaves it running to the horizon on the other, and
+// that is still the sky.
+//
+// OBSTRUCTIONS are crossed rather than treated as edges. A branch, a cable, a
+// flagpole, the arm of a crane: each returns along a line a few cells wide with
+// open sky both sides, and a fill that stopped at it would report a dozen small
+// openings instead of one large one. So the fill steps over runs of returns up to
+// `skyBridgeDeg` wide. Wider than that is a roof, and a roof is an edge.
+//
+// What it does NOT do is clear anything on its own. Every cell it finds was
+// already going to clear; what the answer is for is the dark-border test below,
+// which has to leave the sky alone — the returns bordering a patch of sky are
+// eaves and branches and parapets seen against it, which is exactly the low
+// intensity that test looks for.
+SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& sky) {
+    SkyReport rep;
+    sky.assign(im.cells.size(), 0);
+    if (im.rows == 0 || im.cols == 0 || opt.skyMinExtentDeg <= 0.0) return rep;
+    if (im.map.elByRow.size() != im.rows) return rep;
+
+    const double kDeg = 57.29577951308232;
+    const bool firstIsLow = im.map.elByRow.front() <= im.map.elByRow.back();
+    // The sky pole is the end away from the mount. With no cone identified, the
+    // high-elevation end of this scan's own sweep.
+    const bool skyAtFirst = im.diag.blindConeRows ? !im.diag.blindConeAtFirstRow : !firstIsLow;
+    rep.poleAtFirstRow = skyAtFirst;
+    rep.fromCone       = im.diag.blindConeRows != 0;
+
+    // How far a row sits from that pole.
+    const bool poleIsLow = (skyAtFirst == firstIsLow);
+    auto fromPole = [&](uint32_t r) {
+        const double el = im.map.elByRow[r] * kDeg;
+        return poleIsLow ? (90.0 + el) : (90.0 - el);
+    };
+
+    // How many cells a bridge may span, in each direction, from the measured step.
+    const double elStepDeg = std::fabs(im.map.elByRow.size() > 1
+                                       ? (im.map.elByRow.back() - im.map.elByRow.front()) * kDeg /
+                                         double(im.rows - 1) : 0.0);
+    const double azStepDeg = 360.0 / double(im.cols);
+    const int bridgeRows = elStepDeg > 1e-9
+                         ? int(std::ceil(opt.skyBridgeDeg / elStepDeg)) : 0;
+    const int bridgeCols = azStepDeg > 1e-9
+                         ? int(std::ceil(opt.skyBridgeDeg / azStepDeg)) : 0;
+
+    const int64_t cols = int64_t(im.cols), rows = int64_t(im.rows);
+    const uint32_t poleRow = skyAtFirst ? 0u : uint32_t(im.rows - 1);
+
+    std::vector<size_t> stack;
+    for (uint32_t c = 0; c < im.cols; ++c) {
+        const size_t i = size_t(poleRow) * im.cols + c;
+        if (Status(im.cells[i].status) != Status::NoReturn || sky[i]) continue;
+        sky[i] = 1;
+        stack.push_back(i);
+    }
+    rep.reachedPole = !stack.empty();
+    if (!rep.reachedPole) return rep;
+
+    double extent = 0.0;
+    uint64_t cells = 0;
+    while (!stack.empty()) {
+        const size_t i = stack.back();
+        stack.pop_back();
+        ++cells;
+        const int64_t r = int64_t(i) / cols, c = int64_t(i) % cols;
+        extent = std::max(extent, fromPole(uint32_t(r)));
+
+        // The four directions, each allowed to step over a bounded run of returns.
+        // Never over an unsampled cell: the instrument's own cone is not a branch,
+        // and a fill that crossed it would join the two poles into one region.
+        const int64_t dr[4] = {-1, 1, 0, 0}, dc[4] = {0, 0, -1, 1};
+        for (int a = 0; a < 4; ++a) {
+            const int span = (a < 2 ? bridgeRows : bridgeCols) + 1;
+            for (int step = 1; step <= span; ++step) {
+                const int64_t nr = r + dr[a] * step;
+                if (nr < 0 || nr >= rows) break;
+                int64_t nc = c + dc[a] * step;
+                nc -= cols * (nc >= cols ? 1 : 0);         // azimuth wraps
+                nc += cols * (nc < 0 ? 1 : 0);
+                const size_t j = size_t(nr) * size_t(cols) + size_t(nc);
+                const Status st = Status(im.cells[j].status);
+                if (st == Status::OutsideFov) break;       // never cross the cone
+                if (st == Status::Hit) continue;           // a branch: step over it
+                if (!sky[j]) { sky[j] = 1; stack.push_back(j); }
+                break;                                     // reached open sky again
+            }
+        }
+    }
+
+    rep.cells     = cells;
+    rep.extentDeg = extent;
+    rep.isSky     = extent >= opt.skyMinExtentDeg;
+    if (!rep.isSky) sky.assign(im.cells.size(), 0);        // found nothing to protect
+    return rep;
+}
+
+// Demotes a zone of no-returns whose border is too dark to believe.
+//
+// A surface that returns nothing because it is black is not a ray that saw
+// nothing, and it wants the opposite treatment: believed, it clears a pencil of
+// space to the rated range straight through the surface. Nothing in the geometry
+// separates the two — an empty cell is an empty cell — but the instrument recorded
+// how strongly each of its returns came back, and a surface dark enough to swallow
+// some rays returns the rest weakly.
+//
+// So: take the returns bordering each zone and ask what share of them are among
+// the weakest this scan recorded. Past `darkBorderFraction` the zone is a surface
+// the instrument could not read, and it establishes nothing.
+//
+// EVERY NUMBER IS THIS SCAN'S OWN. Intensity in E57 means whatever the vendor and
+// the instrument settings made it mean, so "very low" is the bottom
+// `darkPercentile` of this scan's returns and nothing else — no absolute value, no
+// calibration, and no comparison between scans.
+//
+// The sky is exempt, and has to be: the returns bordering a patch of sky are
+// eaves, branches and parapets seen against it, which are exactly the weakest
+// returns in a scan. Without identifySky ahead of it this test would take the sky
+// out of every outdoor scan.
+uint64_t filterDarkBorderedZones(RangeImage& im, const std::vector<float>& intensity,
+                                 const std::vector<uint8_t>& sky, const Options& opt) {
+    im.diag.darkZones = 0;
+    im.diag.darkCells = 0;
+    im.diag.darkBorderShare = -1.0;
+    if (!(opt.darkBorderFraction > 0.0) || intensity.size() != im.cells.size()) return 0;
+    if (im.rows == 0 || im.cols == 0) return 0;
+
+    // What counts as weak, in this scan's terms.
+    std::vector<float> seen;
+    seen.reserve(im.cells.size() / 4);
+    for (size_t i = 0; i < im.cells.size(); ++i)
+        if (Status(im.cells[i].status) == Status::Hit && intensity[i] >= 0.0f)
+            seen.push_back(intensity[i]);
+    if (seen.size() < 1000) return 0;              // too few to have a distribution
+    const size_t k = size_t(double(seen.size()) * opt.darkPercentile);
+    std::nth_element(seen.begin(), seen.begin() + ptrdiff_t(k), seen.end());
+    const float weak = seen[k];
+    im.diag.darkThreshold = weak;
+
+    const int64_t cols = int64_t(im.cols), rows = int64_t(im.rows);
+    const size_t n = im.cells.size();
+    std::vector<uint64_t> visited((n + 63) / 64, 0);
+    auto mark  = [&](size_t i) { visited[i >> 6] |= 1ull << (i & 63); };
+    auto taken = [&](size_t i) { return (visited[i >> 6] >> (i & 63)) & 1ull; };
+    auto neighbours = [&](size_t i, size_t o[4]) -> int {
+        const int64_t r = int64_t(i) / cols, c = int64_t(i) % cols;
+        int k2 = 0;
+        if (r > 0)        o[k2++] = size_t((r - 1) * cols + c);
+        if (r < rows - 1) o[k2++] = size_t((r + 1) * cols + c);
+        o[k2++] = size_t(r * cols + (c == 0 ? cols - 1 : c - 1));
+        o[k2++] = size_t(r * cols + (c == cols - 1 ? 0 : c + 1));
+        return k2;
+    };
+
+    std::vector<size_t> stack, member;
+    uint64_t demoted = 0;
+    for (size_t start = 0; start < n; ++start) {
+        if (taken(start) || Status(im.cells[start].status) != Status::NoReturn) continue;
+        member.clear();
+        stack.assign(1, start);
+        mark(start);
+        uint64_t border = 0, dark = 0;
+        bool isSky = false;
+        while (!stack.empty()) {
+            const size_t i = stack.back();
+            stack.pop_back();
+            member.push_back(i);
+            if (!sky.empty() && sky[i]) isSky = true;
+            size_t nb[4];
+            const int k2 = neighbours(i, nb);
+            for (int a = 0; a < k2; ++a) {
+                const size_t j = nb[a];
+                const Status st = Status(im.cells[j].status);
+                if (st == Status::Hit) {
+                    if (intensity[j] >= 0.0f) { ++border; if (intensity[j] <= weak) ++dark; }
+                    continue;
+                }
+                if (st != Status::NoReturn || taken(j)) continue;
+                mark(j);
+                stack.push_back(j);
+            }
+        }
+        if (isSky || border == 0) continue;
+        const double share = double(dark) / double(border);
+        if (share < opt.darkBorderFraction) continue;
+        ++im.diag.darkZones;
+        if (share > im.diag.darkBorderShare) im.diag.darkBorderShare = share;
+        for (size_t i : member) {
+            im.cells[i].status  = uint8_t(Status::OutsideFov);
+            im.cells[i].rangeCm = 0;
+            ++demoted;
+        }
+    }
+    im.diag.darkCells = demoted;
+    if (demoted) {
+        im.diag.noReturns  -= std::min<uint64_t>(demoted, im.diag.noReturns);
+        im.diag.outsideFov += demoted;
+    }
+    return demoted;
+}
+
 // Finds and marks the instrument's blind cone, from this scan and nothing else.
 //
 // The cone is an unsampled band running off one end of the raster, and which end
@@ -1505,6 +1728,12 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         colIdx = want.size(); want.push_back("columnIndex");
     }
 
+    // Intensity, where the file has it. Only the dark-border test reads it, and
+    // only in this scan's own terms — see filterDarkBorderedZones.
+    size_t intIdx = SIZE_MAX;
+    if (s.field("intensity")) { intIdx = want.size(); want.push_back("intensity"); }
+    out.diag.hasIntensity = (intIdx != SIZE_MAX);
+
     // Ranges are measured in the SCANNER's frame, so points must not have the
     // pose applied. Conformant files already store them that way; the
     // non-conformant "pre-transformed" case has to be undone.
@@ -1642,7 +1871,8 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
             // point in the scan — so the raster is built after the read, not
             // during it. See estimateTilt.
             pts.push_back({float(x), float(y), float(z),
-                           uint32_t(rr) / step, uint32_t(cc) / step});
+                           uint32_t(rr) / step, uint32_t(cc) / step,
+                           intIdx == SIZE_MAX ? 0.0f : float(b.columns[intIdx][k])});
         }
         return true;
     }, rerr);
@@ -1767,6 +1997,14 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
                       out.diag.originPairs);
 
     // Now the raster, from the points, in that frame.
+    //
+    // Intensity rides along in a vector local to the build: the only thing that
+    // reads it is the dark-border test below, so it costs nothing once the image
+    // is finished. A float a cell, not a byte, because quantising needs the
+    // scan's range and the scan's range is not known until every point is in.
+    std::vector<float> cellIntensity;
+    if (out.diag.hasIntensity) cellIntensity.assign(out.cells.size(), -1.0f);
+
     for (const PointRec& p : pts) {
         double x = double(p.x), y = double(p.y), z = double(p.z);
         out.toInstrument(x, y, z);
@@ -1815,14 +2053,19 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         // several surfaces and line of sight stops at the first of them. Clearing
         // to a further return would carve through a nearer one. See
         // e57::Scan::hasReturnIndexBounds.
-        if (out.cells[i].status == uint8_t(Status::Hit)) {
+        const bool firstHere = out.cells[i].status != uint8_t(Status::Hit);
+        bool keptThis = firstHere;
+        if (!firstHere) {
             ++out.diag.cellsWithSeveralReturns;
-            if (cm < out.cells[i].rangeCm) out.cells[i].rangeCm = uint16_t(cm);
+            if (cm < out.cells[i].rangeCm) { out.cells[i].rangeCm = uint16_t(cm); keptThis = true; }
             else                           ++out.diag.returnsKeptBehindANearerOne;
         } else {
             out.cells[i].rangeCm = uint16_t(cm);
         }
         out.cells[i].status = uint8_t(Status::Hit);
+        // The intensity of whichever return the cell kept, so it describes the
+        // same surface the range does.
+        if (!cellIntensity.empty() && keptThis) cellIntensity[i] = p.intensity;
 
         Accum& ra = rowAcc[p.row];
         ra.sumEl += el; ++ra.n;
@@ -1994,6 +2237,17 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     // a surface inside the instrument's minimum range. After the cone, so a cone
     // band is already unsampled and cannot be swallowed into a zone.
     filterNoReturnsTooClose(out, opt);
+    // Then the sky, named outright, and the zones whose borders are too dark to
+    // believe. In that order: the returns bordering a patch of sky are eaves and
+    // branches seen against it, which is exactly what the dark test looks for.
+    {
+        std::vector<uint8_t> sky;
+        const SkyReport rep = identifySky(out, opt, sky);
+        out.diag.skyFound     = rep.isSky;
+        out.diag.skyCells     = rep.isSky ? rep.cells : 0;
+        out.diag.skyExtentDeg = rep.extentDeg;
+        filterDarkBorderedZones(out, cellIntensity, sky, opt);
+    }
     // And what is left believed, for the report and the status line. Here rather
     // than in the caller's aggregation loop because build() runs in parallel across
     // scans and that loop does not: 94 ms a raster is 94 seconds over a thousand

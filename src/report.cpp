@@ -286,6 +286,30 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                             }
                         }
                     }
+                    if (img.diag.skyFound) {
+                        o.add("      sky       : the opening at this instrument's own zenith "
+                                    "reaches %.0f deg\n                  across %llu cells, so "
+                                    "it is sky and clears — and is exempt from\n                "
+                                    "  the dark-border test, whose whole difficulty is that a "
+                                    "skyline\n                  is the darkest thing in an "
+                                    "outdoor scan\n",
+                                    img.diag.skyExtentDeg,
+                                    (unsigned long long)img.diag.skyCells);
+                    }
+                    if (img.diag.darkZones) {
+                        o.add("      dark      : %llu empty cells in %u zone(s) are bordered by "
+                                    "returns too weak\n                  to believe — up to "
+                                    "%.0f%% of a border among the weakest tenth of\n           "
+                                    "       this scan. A surface the instrument could not read, "
+                                    "not a ray\n                  that saw nothing, so they "
+                                    "clear nothing.\n",
+                                    (unsigned long long)img.diag.darkCells, img.diag.darkZones,
+                                    100.0 * img.diag.darkBorderShare);
+                    } else if (!img.diag.hasIntensity) {
+                        o.add("      dark      : no intensity field in this file, so a surface "
+                                    "too dark to answer\n                  cannot be told from "
+                                    "a ray that saw nothing\n");
+                    }
                     if (img.diag.tooCloseZones) {
                         o.add("      too close : %llu empty cells in %u zone(s) are the "
                                     "instrument's own\n                  minimum range: the "

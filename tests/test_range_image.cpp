@@ -357,6 +357,202 @@ static void testPyramid() {
     CHECK(tooTight < checked, "the answers really are aggregated, not per-cell");
 }
 
+// Naming the sky, and leaving alone a surface too dark to answer.
+//
+// These two go together. The sky is the only thing here that can be identified
+// POSITIVELY — everything else works by elimination, and elimination cannot tell
+// sky from black. The dark test is the one that needs it: the returns bordering a
+// patch of sky are eaves, branches and parapets seen against it, which are the
+// weakest returns in any outdoor scan, so without the sky named first that test
+// would take the sky out of every one of them.
+static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
+    std::printf("range image: the sky is named, and a dark border is not believed\n");
+
+    // A sweep from -45 to +90 degrees over 180 rows: a cone band at the bottom,
+    // a room, and however much open sky the caller asks for at the top.
+    //   `skyRows`   rows of sky running off the zenith end
+    //   `branch`    a row of returns across the middle of it, if wanted
+    //   `verandah`  half the azimuths of the sky blocked, if wanted
+    auto build = [](uint32_t skyRows, bool branch, bool verandah) {
+        rimg::RangeImage im;
+        im.rows = 180; im.cols = 240;
+        im.cells.assign(im.cellCount(), rimg::Cell{});
+        for (uint32_t r = 0; r < im.rows; ++r)
+            for (uint32_t c = 0; c < im.cols; ++c) {
+                rimg::Cell& cell = im.cells[size_t(r) * im.cols + c];
+                const bool inSky = r >= im.rows - skyRows &&
+                                   !(verandah && c < im.cols / 2) &&
+                                   !(branch && r == im.rows - skyRows / 2);
+                cell = inSky ? rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)}
+                             : rimg::Cell{uint16_t(300 + (c % 7) * 20),
+                                          uint8_t(rimg::Status::Hit)};
+            }
+        im.diag.nearestReturn = 3.0; im.diag.furthestReturn = 4.2;
+        for (const rimg::Cell& c : im.cells)
+            if (rimg::Status(c.status) == rimg::Status::NoReturn) ++im.diag.noReturns;
+        // -45 to +90, so row 179 is the zenith and a row is 0.754 degrees.
+        im.map = rimg::uniformMapping(im.rows, im.cols, -45.0 * kPi / 180.0,
+                                      (135.0 / 179.0) * kPi / 180.0, 0.0, kTau / 240.0);
+        im.map.valid = true;
+        return im;
+    };
+
+    rimg::Options opt;            // 25 degrees of opening, a 2 degree bridge
+
+    // 60 rows of sky is 45 degrees from the zenith: sky.
+    {
+        rimg::RangeImage im = build(60, false, false);
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.reachedPole, "the zenith itself holds no returns");
+        CHECK(rep.isSky, "and the opening there is wider than a cone about it");
+        CHECK(rep.extentDeg > 40.0 && rep.extentDeg < 50.0, "measuring 45 degrees across");
+        CHECK(rep.cells == 60 * im.cols, "over the whole region");
+        CHECK(!rep.poleAtFirstRow, "at the high-elevation end, this scan being upright");
+    }
+
+    // 20 rows is 15 degrees: an opening, but not the sky. A hole in a ceiling, a
+    // rooflight, a missing tile — whatever it is, it is not identified as sky and
+    // the dark test is free to judge it.
+    {
+        rimg::RangeImage im = build(20, false, false);
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.reachedPole, "the zenith holds no returns here either");
+        CHECK(!rep.isSky, "but 15 degrees is not an opening to the sky");
+        uint64_t protectedCells = 0;
+        for (uint8_t v : sky) protectedCells += v;
+        CHECK(protectedCells == 0, "and nothing is protected");
+    }
+
+    // A branch across it. One region still, because the fill steps over a run of
+    // returns a couple of degrees wide — and 45 degrees of sky with a branch in it
+    // is still 45 degrees of sky.
+    {
+        rimg::RangeImage im = build(60, true, false);
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.isSky, "a branch across the sky does not stop it being the sky");
+        CHECK(rep.extentDeg > 40.0, "and the far side of it still counts");
+        CHECK(rep.cells > 55 * im.cols, "almost every cell of the region is reached");
+    }
+
+    // A verandah over half the azimuths. The opening runs to 45 degrees on one
+    // side and stops at the zenith on the other, and that is still the sky: the
+    // test asks for the extent in ANY direction, not in every one.
+    {
+        rimg::RangeImage im = build(60, false, true);
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.isSky, "an opening cut off on one side is still the sky");
+        CHECK(rep.cells > 25 * im.cols && rep.cells < 40 * im.cols,
+              "and only the open half of it is the region");
+    }
+
+    // Which way is up comes from the instrument, not from the world: with the cone
+    // identified at the HIGH end — a scan whose frame was rewritten, or an
+    // instrument hanging — the sky pole is the low end.
+    {
+        rimg::RangeImage im = build(60, false, false);
+        im.diag.blindConeRows = 10;
+        im.diag.blindConeAtFirstRow = false;         // the mount is at the top
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.fromCone, "the pole was taken from the cone");
+        CHECK(rep.poleAtFirstRow, "which puts the sky at the other end");
+        CHECK(!rep.reachedPole, "and there is no sky there in this raster");
+    }
+
+    // --- and the dark border ------------------------------------------------
+    //
+    // One zone, bordered by returns of which a third are among the weakest in the
+    // scan. That is a surface the instrument could not read, not a ray that saw
+    // nothing, and believing it would clear 45 m straight through it.
+    {
+        rimg::RangeImage im = build(0, false, false);        // no sky: a closed room
+        // A patch of no-returns in the middle of a wall.
+        for (uint32_t r = 80; r < 100; ++r)
+            for (uint32_t c = 100; c < 130; ++c)
+                im.cells[size_t(r) * im.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+        std::vector<float> inten(im.cells.size(), -1.0f);
+        for (size_t i = 0; i < im.cells.size(); ++i)
+            if (rimg::Status(im.cells[i].status) == rimg::Status::Hit)
+                inten[i] = 0.5f;                             // an ordinary surface
+        // The patch's own surroundings: dark, because the patch is the middle of
+        // something black and its edge is the same material.
+        auto darken = [&](uint32_t r, uint32_t c) {
+            const size_t i = size_t(r) * im.cols + c;
+            if (rimg::Status(im.cells[i].status) == rimg::Status::Hit) inten[i] = 0.01f;
+        };
+        for (uint32_t c = 99; c <= 130; ++c) { darken(79, c); darken(100, c); }
+        for (uint32_t r = 79; r <= 100; ++r) { darken(r, 99); darken(r, 130); }
+
+        const std::vector<uint8_t> noSky;
+        rimg::RangeImage dark = im;
+        const uint64_t n = rimg::filterDarkBorderedZones(dark, inten, noSky, opt);
+        CHECK(n == 20 * 30, "the whole patch is demoted, to the cell");
+        CHECK(dark.diag.darkZones == 1, "as one zone");
+        CHECK(dark.statusAt(90, 115) == rimg::Status::OutsideFov, "and it clears nothing");
+        CHECK(dark.diag.darkBorderShare > 0.9,
+              "with the share of its border that was weak, reported");
+
+        // The same patch bordered by ordinary material is left alone: a ray that
+        // saw nothing, off a surface the instrument reads perfectly well.
+        std::vector<float> plain(im.cells.size(), -1.0f);
+        for (size_t i = 0; i < im.cells.size(); ++i)
+            if (rimg::Status(im.cells[i].status) == rimg::Status::Hit)
+                plain[i] = 0.5f + 0.001f * float(i % 100);
+        rimg::RangeImage ok = im;
+        CHECK(rimg::filterDarkBorderedZones(ok, plain, noSky, opt) == 0,
+              "an ordinary border is believed");
+        CHECK(ok.statusAt(90, 115) == rimg::Status::NoReturn, "and still clears");
+    }
+
+    // The sky is exempt, and that is the whole reason identifySky runs first. Here
+    // the sky is bordered by the darkest returns in the scan — a parapet and bare
+    // branches seen against it — and it still clears.
+    {
+        rimg::RangeImage im = build(60, false, false);
+        std::vector<float> inten(im.cells.size(), -1.0f);
+        for (size_t i = 0; i < im.cells.size(); ++i)
+            if (rimg::Status(im.cells[i].status) == rimg::Status::Hit)
+                inten[i] = 0.5f;
+        for (uint32_t c = 0; c < im.cols; ++c)                 // the skyline itself
+            inten[size_t(im.rows - 61) * im.cols + c] = 0.005f;
+
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.isSky, "the sky is named");
+        rimg::RangeImage withSky = im;
+        CHECK(rimg::filterDarkBorderedZones(withSky, inten, sky, opt) == 0,
+              "and a dark skyline does not take it away");
+        CHECK(withSky.statusAt(im.rows - 1, 0) == rimg::Status::NoReturn, "it still clears");
+
+        // Without the sky named, the same scan loses it — which is what the
+        // exemption is for, stated as a measurement rather than as a worry.
+        rimg::RangeImage noSky = im;
+        const std::vector<uint8_t> none;
+        CHECK(rimg::filterDarkBorderedZones(noSky, inten, none, opt) > 0,
+              "unprotected, the dark test would take the sky out of an outdoor scan");
+    }
+
+    // No intensity field in the file, no test: it does nothing rather than
+    // guessing from an empty vector.
+    {
+        rimg::RangeImage im = build(0, false, false);
+        for (uint32_t r = 80; r < 100; ++r)
+            for (uint32_t c = 100; c < 130; ++c)
+                im.cells[size_t(r) * im.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+        const std::vector<float> none;
+        const std::vector<uint8_t> noSky;
+        CHECK(rimg::filterDarkBorderedZones(im, none, noSky, opt) == 0,
+              "a file with no intensity is not second-guessed");
+        CHECK(im.statusAt(90, 115) == rimg::Status::NoReturn, "and nothing changes");
+    }
+}
+
 // A surface inside the instrument's MINIMUM range returns nothing, and that
 // no-return means the opposite of every other one.
 //
@@ -1793,6 +1989,7 @@ int main() {
     testGridPath();
     testPyramid();
     testNoReturnsInsideTheMinimumRange();
+    testTheSkyIsNamedAndTheDarkIsNotBelieved();
     testBlindConeFoundGeometrically();
     testDoubleCoveredMirrorIsRefused();
     testOrdinaryRasterRoundTrips();

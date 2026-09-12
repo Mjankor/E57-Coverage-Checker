@@ -137,6 +137,37 @@ struct Options {
     // dropped return gets.
     double   tooCloseFactor = 4.0 / 3.0;
 
+    // --- sky, named outright ------------------------------------------------
+    //
+    // How far from the instrument's own zenith an unsampled region has to reach
+    // before it is the sky. Twenty-five degrees: an opening that wide about the
+    // pole is not a hole in a surface at any plausible distance, and the test only
+    // needs it in ONE direction — a verandah, a parapet or a canopy cuts the
+    // opening off on one side and it is still the sky on the other. 0 switches the
+    // identification off, which leaves the dark-border test with nothing to
+    // exempt and takes the sky out of every outdoor scan, so do not.
+    double   skyMinExtentDeg = 25.0;
+    // How wide a run of returns the sky fill may step over. A branch, a cable, a
+    // flagpole: each returns along a line a couple of degrees wide with open sky
+    // both sides, and a fill that stopped at one would report a dozen small
+    // openings where there is one large one. Wider than this is a roof, and a roof
+    // is an edge.
+    double   skyBridgeDeg = 2.0;
+
+    // --- a surface too dark to answer ---------------------------------------
+    //
+    // What share of the returns bordering a zone has to be among the weakest in
+    // the scan before the zone is read as a surface the instrument could not
+    // measure rather than as a ray that saw nothing. A quarter: a zone bordered by
+    // ordinary material sits near the scan's own rate, and one bordered by
+    // something black does not.
+    double   darkBorderFraction = 0.25;
+    // Which returns count as weak: the bottom tenth of THIS scan's intensities.
+    // A fraction of the scan's own distribution rather than a value, because
+    // intensity in E57 means whatever the vendor and the instrument settings made
+    // it mean and is not comparable between files, let alone between instruments.
+    double   darkPercentile = 0.10;
+
     // Treat the unsampled cone about the instrument's rotation axis as a
     // direction the scanner never looked, rather than as a no-return.
     //
@@ -366,6 +397,20 @@ struct Diagnostics {
     // to measure — see filterNoReturnsTooClose.
     uint64_t tooCloseNoReturns = 0;
     uint32_t tooCloseZones     = 0;
+    // The file carried an intensity field, so the dark-border test had something
+    // to read. Without it that test does nothing and says so.
+    bool     hasIntensity = false;
+    // Zones demoted because the returns bordering them are too weak to believe —
+    // see filterDarkBorderedZones — and the worst share found.
+    uint32_t darkZones = 0;
+    uint64_t darkCells = 0;
+    double   darkBorderShare = -1.0;
+    float    darkThreshold   = 0.0f;   // this scan's own weak-return level
+    // The sky, where this scan could name it: the region reaching its own zenith
+    // and opening past Options::skyMinExtentDeg. See identifySky.
+    bool     skyFound = false;
+    uint64_t skyCells = 0;
+    double   skyExtentDeg = 0.0;
     // The median bordering range of the nearest such zone, in metres, which is the
     // evidence the decision was made on. -1 where no zone was found.
     double   tooCloseBorderRange = -1.0;
@@ -662,6 +707,16 @@ void buildPyramid(RangeImage& im);
 ConeVerdict summariseBlindCones(const std::vector<RangeImage*>& images,
                                 const Options& opt);
 
+// What the sky came out as for one scan. See identifySky.
+struct SkyReport {
+    bool     reachedPole = false;   // the pole itself holds no returns
+    bool     isSky = false;         // and the region there opens past skyMinExtentDeg
+    bool     poleAtFirstRow = false;
+    bool     fromCone = false;      // the pole was taken as the end away from the cone
+    uint64_t cells = 0;
+    double   extentDeg = 0.0;       // how far from the pole the region reaches
+};
+
 // One zone of no-returns that survived the build and is therefore believed: every
 // cell of it clears a pencil of space to the rated range. See describeNoReturnZones.
 struct NoReturnZone {
@@ -682,6 +737,14 @@ std::vector<NoReturnZone> describeNoReturnZones(const RangeImage& im, const Opti
 
 // Exposed for testing.
 void filterNoReturnsTooClose(RangeImage& im, const Options& opt);
+// Names the sky — the unsampled region reaching the instrument's own zenith and
+// opening wider than a cone about it. Fills `sky` with one byte a cell, which is
+// what keeps the dark-border test off it.
+SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& sky);
+// Demotes zones whose bordering returns are too weak to believe. Returns the cells
+// demoted. `intensity` is one value a cell, negative where there is no return.
+uint64_t filterDarkBorderedZones(RangeImage& im, const std::vector<float>& intensity,
+                                 const std::vector<uint8_t>& sky, const Options& opt);
 void markBlindCone(RangeImage& im, const Options& opt);
 
 const char* statusName(Status s);

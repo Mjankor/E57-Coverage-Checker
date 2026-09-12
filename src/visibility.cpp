@@ -693,6 +693,12 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             out.largestZoneElLoDeg       = img->diag.largestZoneElLoDeg;
             out.largestZoneElHiDeg       = img->diag.largestZoneElHiDeg;
         }
+        if (img->diag.skyFound) ++out.setupsWithSky;
+        if (!img->diag.hasIntensity) ++out.setupsWithoutIntensity;
+        if (img->diag.darkZones) {
+            ++out.setupsWithDarkZones;
+            out.darkCells += img->diag.darkCells;
+        }
         if (img->diag.tooCloseZones) {
             ++out.setupsTooClose;
             out.tooCloseCells += img->diag.tooCloseNoReturns;

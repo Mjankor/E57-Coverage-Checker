@@ -1637,6 +1637,21 @@ const char *kindLabel(check::Kind k) {
                     (unsigned long long)result->largestZoneCells,
                     result->largestZoneElLoDeg, result->largestZoneElHiDeg,
                     result->largestZoneBorderMinM, result->largestZoneBorderMedianM];
+        // The sky named outright, and the zones too dark to believe. Both are new
+        // classifications of an empty cell, so both belong on the line that says
+        // what this answer rests on.
+        if (result->setupsWithSky || result->setupsWithDarkZones)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   %llu setup(s) named their own sky; %llu had %llu cells bordered "
+                     "by returns too weak to believe",
+                    (unsigned long long)result->setupsWithSky,
+                    (unsigned long long)result->setupsWithDarkZones,
+                    (unsigned long long)result->darkCells];
+        if (result->setupsWithoutIntensity)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   %llu setup(s) carry no intensity, so a surface too dark to answer "
+                     "cannot be told from a ray that saw nothing",
+                    (unsigned long long)result->setupsWithoutIntensity];
         if (result->setupsTooClose)
             warn = [warn stringByAppendingFormat:
                     @"   ·   %llu setup(s) parked inside the %.2f m minimum range of "
