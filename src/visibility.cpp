@@ -742,9 +742,27 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         }
         if (have) {
             p.domain.kind = carve::Domain::Kind::Box;
+            // A NEGATIVE margin shrinks the box, which is the point of allowing
+            // one: on an indoor job the extent hugs the building and a positive
+            // margin pushes the question a couple of metres past every wall,
+            // where nothing was ever going to be seen. Pulling it inside the
+            // walls instead removes that blanket at the source rather than
+            // filtering it afterwards.
+            //
+            // Clamped so it cannot invert. A margin more negative than half the
+            // site leaves nothing to ask about, and an inverted box would carve
+            // an empty answer and report it as full coverage — the wrong way to
+            // be wrong. It collapses to a degenerate box at the centre instead,
+            // which reads as "you asked about nothing".
             for (int k = 0; k < 3; ++k) {
-                p.domain.lo[k] = lo[k] - opt.domainMargin;
-                p.domain.hi[k] = hi[k] + opt.domainMargin;
+                const double half = 0.5 * (hi[k] - lo[k]);
+                const double m = std::max(opt.domainMargin, -half);
+                p.domain.lo[k] = lo[k] - m;
+                p.domain.hi[k] = hi[k] + m;
+                if (p.domain.hi[k] < p.domain.lo[k]) {
+                    const double mid = 0.5 * (lo[k] + hi[k]);
+                    p.domain.lo[k] = p.domain.hi[k] = mid;
+                }
             }
             out.domainVolume = (p.domain.hi[0] - p.domain.lo[0]) *
                                (p.domain.hi[1] - p.domain.lo[1]) *
@@ -757,10 +775,21 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         // it can decide which of them the survey reached.
         if (have && opt.domain == DomainMode::Shrinkwrap) {
             wrap::Options wo;
-            wo.buffer       = opt.domainMargin;
+            // A negative margin on a wrap means the same thing it means on a box
+            // — leave out the space past the walls — and for a wrap that is
+            // exactly what interiorOnly already does. The wrap's own buffer has
+            // to stay positive: it is a dilation radius, and the domain is the
+            // space within it of a return, which is not a quantity that can be
+            // negative. So the magnitude sets the buffer and the sign asks for
+            // the outside to be dropped.
+            //
+            // Which is why a negative margin makes the "scanned entirely
+            // indoors" tick box unnecessary rather than redundant: it is the same
+            // request, made in the units the rest of the sheet already uses.
+            wo.buffer       = std::fabs(opt.domainMargin);
             wo.cell         = opt.wrapCell;
             wo.maxCells     = opt.wrapMaxCells;
-            wo.interiorOnly = opt.wrapInteriorOnly;
+            wo.interiorOnly = opt.wrapInteriorOnly || opt.domainMargin < 0.0;
             std::string werr;
             if (!wrap::size(lo, hi, wo, out.wrapGrid, werr)) {
                 // A wrap that cannot be sized is not a reason to refuse the run:

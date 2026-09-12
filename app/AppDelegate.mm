@@ -1307,7 +1307,8 @@ const char *kindLabel(check::Kind k) {
         // The shrinkwrap's buffer and the box's margin are the same number meaning
         // the same thing — how far past the last return the question still applies
         // — so the label names both rather than making it look like two settings.
-        {@"Buffer / margin past the last return (m)",
+        // Negative is allowed and useful: it pulls the question inside the walls.
+        {@"Buffer / margin past the last return (m, may be −)",
                                 [NSString stringWithFormat:@"%.1f", _visOptions.domainMargin]},
         // The cap on voxels DRAWN, not on voxels found. Over it the frontier is
         // sampled, which is the one setting whose effect looks like a bug: a
@@ -1342,7 +1343,8 @@ const char *kindLabel(check::Kind k) {
     [acc addSubview:region];
 
     NSButton *interior = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
-    interior.title = @"Scanned entirely indoors (leave the space outside the walls out)";
+    interior.title = @"Scanned entirely indoors (leave the space outside the walls out) "
+                     @"— or give the margin above a minus sign";
     [interior setButtonType:NSButtonTypeSwitch];
     interior.font = [NSFont systemFontOfSize:11];
     interior.state = _visOptions.wrapInteriorOnly ? NSControlStateValueOn
@@ -1404,9 +1406,14 @@ const char *kindLabel(check::Kind k) {
     const long   tile   = fields[2].integerValue;
     const double margin = fields[3].doubleValue;
     const double drawnM = fields[4].doubleValue;
-    if (!(voxel > 0.0) || !(range > 0.0) || tile <= 0 || tile > 4096 || margin < 0.0) {
+    // The margin may be NEGATIVE — see vis::Options::domainMargin. On an indoor
+    // job that is how the space past the walls is left out of the question in the
+    // first place, rather than filtered out of the answer afterwards.
+    if (!(voxel > 0.0) || !(range > 0.0) || tile <= 0 || tile > 4096 ||
+        !std::isfinite(margin)) {
         _status.stringValue =
-            @"Voxel size and range must be positive, tile size 1–4096, margin not negative.";
+            @"Voxel size and range must be positive and tile size 1–4096. The margin "
+             "may be negative, which pulls the question inside the walls.";
         return;
     }
     opt.voxelSize    = voxel;

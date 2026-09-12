@@ -106,6 +106,23 @@ struct Options {
     // void just behind a surface is still asked about, without reaching into the
     // open air the scan was never about. It is a physical depth, not a tolerance,
     // so it is in metres rather than derived from the voxel size.
+    // How far past the last return the question still applies, in metres. The
+    // box's margin and the shrinkwrap's buffer, which are one thing.
+    //
+    // MAY BE NEGATIVE, and the two regions honour that differently because the
+    // shapes differ:
+    //
+    //   Box. The box shrinks. On an indoor job the extent hugs the building, so a
+    //   positive margin asks about a couple of metres past every wall where
+    //   nothing could ever be seen; a negative one pulls the question inside the
+    //   walls and that space is never asked about. Clamped at half the site on
+    //   each axis so the box cannot invert — an inverted box would carve nothing
+    //   and report perfect coverage.
+    //
+    //   Shrinkwrap. The buffer is a dilation radius and cannot be negative, so
+    //   the magnitude is used and the sign is read as a request to drop the
+    //   space outside the surveyed shell — which is wrapInteriorOnly. Same
+    //   meaning, expressed in the units the rest of the run sheet uses.
     double   domainMargin = 2.0;
 
     // Passed through to rimg::Options. OFF (radius 0), matching rimg's own

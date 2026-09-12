@@ -1429,6 +1429,93 @@ static void testACarverRunsOnEveryThreadAndAgrees() {
     }
 }
 
+// A negative margin pulls the question inside the walls.
+//
+// On an indoor job the surveyed extent hugs the building, so a positive margin
+// asks about a couple of metres past every wall — space nothing was ever going to
+// see, which comes back as a blanket of unobserved voxels wrapped round the
+// outside. A negative margin removes it at the source instead of filtering it out
+// of the answer afterwards.
+//
+// The two regions honour the sign differently, because the shapes differ, and both
+// are checked here: a box shrinks, and a wrap takes the magnitude as its buffer
+// and the sign as a request to drop the outside.
+static void testANegativeMarginAsksAboutLess() {
+    std::printf("a negative margin shrinks the question\n");
+
+    const std::string path = tmpPath("negmargin");
+    CHECK(fixture::write(path, {roomScan("west", -3.0, 2.0, 1.5),
+                                roomScan("east",  3.0, 2.0, 1.5)}, 512), "fixture written");
+    vis::Options base;
+    base.voxelSize  = 0.25;
+    base.maxRange   = 8.0;
+    base.tileVoxels = 32;
+
+    std::string err;
+
+    // The box. Bigger margin, bigger question; negative, smaller.
+    double volumes[3] = {0, 0, 0};
+    const double margins[3] = {2.0, 0.0, -1.0};
+    for (int i = 0; i < 3; ++i) {
+        vis::Options o = base;
+        o.domain = vis::DomainMode::MeasuredExtent;
+        o.domainMargin = margins[i];
+        vis::Result r;
+        CHECK(vis::run({path}, o, nullptr, r, err), err.empty() ? "ran" : err.c_str());
+        volumes[i] = r.domainVolume;
+    }
+    CHECK(volumes[0] > volumes[1], "a positive margin asks about more than none");
+    CHECK(volumes[1] > volumes[2], "and a negative one asks about less");
+    CHECK(volumes[2] > 0.0, "but still about something");
+
+    // A margin more negative than the site cannot invert the box. An inverted box
+    // would carve nothing and report it as complete coverage, which is the wrong
+    // direction to be wrong in.
+    {
+        vis::Options o = base;
+        o.domain = vis::DomainMode::MeasuredExtent;
+        o.domainMargin = -1000.0;
+        vis::Result r;
+        CHECK(vis::run({path}, o, nullptr, r, err), err.empty() ? "ran" : err.c_str());
+        CHECK(r.domainVolume >= 0.0, "the domain never has negative volume");
+        CHECK(r.stats.unknown == 0 || r.domainVolume > 0.0,
+              "nothing is reported unobserved in a domain that holds nothing");
+    }
+
+    // The wrap. A negative margin means what interiorOnly means, so the two agree.
+    {
+        vis::Options neg = base;
+        neg.domain = vis::DomainMode::Shrinkwrap;
+        neg.wrapCell = 0.25;
+        neg.domainMargin = -2.0;
+        vis::Result rneg;
+        CHECK(vis::run({path}, neg, nullptr, rneg, err), err.empty() ? "ran" : err.c_str());
+
+        vis::Options tick = base;
+        tick.domain = vis::DomainMode::Shrinkwrap;
+        tick.wrapCell = 0.25;
+        tick.domainMargin = 2.0;
+        tick.wrapInteriorOnly = true;
+        vis::Result rtick;
+        CHECK(vis::run({path}, tick, nullptr, rtick, err), err.empty() ? "ran" : err.c_str());
+
+        CHECK(rneg.wrapGrid.interiorOnly, "a negative margin asks for interior only");
+        CHECK(rneg.wrapGrid.buffer == 2.0, "with the magnitude as the buffer");
+        CHECK(rneg.wrapGrid.domainCells == rtick.wrapGrid.domainCells,
+              "so it is the same wrap the tick box produces");
+        CHECK(rneg.stats.unknown == rtick.stats.unknown, "and the same answer");
+
+        // And it really does drop something relative to the same buffer kept both
+        // sides of every surface.
+        vis::Options both = tick;
+        both.wrapInteriorOnly = false;
+        vis::Result rboth;
+        CHECK(vis::run({path}, both, nullptr, rboth, err), "ran");
+        CHECK(rneg.wrapGrid.domainCells < rboth.wrapGrid.domainCells,
+              "the outside really is left out");
+    }
+}
+
 int main() {
     testDefaultsAgreeWithTheLibrary();
     testVoxelHash();
@@ -1440,6 +1527,7 @@ int main() {
     testTheWrapSkinDescribesTheWrap();
     testTheWrapSkinSharesTheVoxelsFrame();
     testACarverRunsOnEveryThreadAndAgrees();
+    testANegativeMarginAsksAboutLess();
     testKeepingOnlyTheVoxelsInsideTheWrap();
     testKnownSceneFromFiveSetups();
     testDatumSetupWithNoTranslation();
