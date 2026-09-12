@@ -727,6 +727,8 @@ const char *kindLabel(check::Kind k) {
     ro.maxRange         = _visOptions.maxRange;
     ro.blindCone        = _visOptions.blindCone;
     ro.minRange         = _visOptions.minRange;
+    ro.skyMinExtentDeg    = _visOptions.skyMinExtentDeg;
+    ro.darkBorderFraction = _visOptions.darkBorderFraction;
 
     auto paths = std::make_shared<std::vector<std::string>>(_paths);
     __weak AppDelegate *weakSelf = self;
@@ -788,6 +790,8 @@ const char *kindLabel(check::Kind k) {
     ro.maxRange         = _visOptions.maxRange;
     ro.blindCone        = _visOptions.blindCone;
     ro.minRange         = _visOptions.minRange;
+    ro.skyMinExtentDeg    = _visOptions.skyMinExtentDeg;
+    ro.darkBorderFraction = _visOptions.darkBorderFraction;
 
     auto paths = std::make_shared<std::vector<std::string>>(_paths);
     __weak AppDelegate *weakSelf = self;
@@ -1294,15 +1298,19 @@ const char *kindLabel(check::Kind k) {
     // adding a control by eyeballing a y is how the region popup ended up drawn
     // over the fourth parameter row.
     //
-    //   270 242 214 186 158 130   six label/value rows, 28 apart
-    //    99                        the region popup, 24 tall, clearing 130 by seven
-    //    74  52  30   8            four tick boxes, 22 apart
+    //   326 298 270 242 214 186 158 130   eight label/value rows, 28 apart
+    //    99                                the region popup, 24 tall, clearing 130 by seven
+    //    74  52  30   8                    four tick boxes, 22 apart
+    //
+    // The stack grows UPWARDS when a row is added — the popup and the ticks keep
+    // the y they have always had, so a new parameter cannot shift them onto each
+    // other.
     //
     // 620 wide, with the labels given 380 of it. The labels say what a setting
     // means rather than naming it, so they are sentences, and at 220 they were
     // being clipped mid-word — "Buffer / margin past the last return (m," — which
     // is worse than a short label would have been.
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 620, 298)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 620, 354)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -1328,10 +1336,29 @@ const char *kindLabel(check::Kind k) {
         // the tool cannot read from the file.
         {@"Instrument minimum range (m, 0 to ignore)",
                                 [NSString stringWithFormat:@"%.2f", _visOptions.minRange]},
+        // How far the opening at a scan's own zenith has to reach before it is
+        // called sky and cleared. Measured from the pole outwards, and it only has
+        // to get there in ONE direction: a verandah cutting one side off at ten
+        // degrees does not disqualify the rest. Lower clears more of a roofless or
+        // open-sided scene; higher is conservative and leaves it unobserved.
+        // %g rather than a fixed width, here and below: these two exist to be tried
+        // against data, and a field that showed 22.5 as "23" would write 23 back the
+        // next time Run was pressed.
+        {@"Sky opening at the zenith, at least (deg, 0 = never)",
+                                [NSString stringWithFormat:@"%g",
+                                 _visOptions.skyMinExtentDeg]},
+        // What share of the returns bordering an empty patch has to be near the
+        // bottom of THIS scan's own intensity spread before the patch is
+        // disbelieved — a surface too dark to answer reads as empty space, and
+        // clearing it carves through it. Sky is exempt, so raising this does not
+        // cost the sky. 0 switches the test off; 1 disbelieves almost nothing.
+        {@"Dark border share that stops a clear (0–1)",
+                                [NSString stringWithFormat:@"%g",
+                                 _visOptions.darkBorderFraction]},
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
-    for (int i = 0; i < 6; ++i) {
-        const CGFloat y = 270 - i * 28;
+    for (int i = 0; i < 8; ++i) {
+        const CGFloat y = 326 - i * 28;
         [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 380, 20)]];
         NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(390, y - 3, 90, 22)];
         [acc addSubview:f];
@@ -1405,6 +1432,13 @@ const char *kindLabel(check::Kind k) {
         @"The instrument minimum range matters more than it looks: a surface closer than "
         @"that returns nothing, and an empty cell that is really a wall at arm's length "
         @"would otherwise clear space straight through it, out to the maximum range.\n\n"
+        @"The last two settings decide what else an empty cell is allowed to mean. The "
+        @"sky opening is how far the gap at a scan's own zenith has to reach before it "
+        @"counts as open air and clears — in one direction only, so branches and a "
+        @"verandah down one side do not disqualify it. The dark border share stops a "
+        @"clear where the returns around the gap are near the bottom of that scan's own "
+        @"intensity spread, which is what a surface too dark to answer looks like; the "
+        @"sky is exempt from it. Set the share to 0 to switch that test off.\n\n"
         @"Every unobserved voxel is drawn. Untick that below to draw only the frontier "
         @"— where coverage stops — which is far cheaper and looks the same from outside, "
         @"except where a region's own boundary was never observed either: the blind cone "
@@ -1424,6 +1458,8 @@ const char *kindLabel(check::Kind k) {
     const double margin = fields[3].doubleValue;
     const double drawnM = fields[4].doubleValue;
     const double minRng = fields[5].doubleValue;
+    const double skyDeg = fields[6].doubleValue;
+    const double darkSh = fields[7].doubleValue;
     // The margin may be NEGATIVE — see vis::Options::domainMargin. On an indoor
     // job that is how the space past the walls is left out of the question in the
     // first place, rather than filtered out of the answer afterwards.
@@ -1435,11 +1471,27 @@ const char *kindLabel(check::Kind k) {
              "may be negative, which pulls the question inside the walls.";
         return;
     }
+    // The sky opening is an angle on a sphere and the dark share is a fraction, so
+    // both have hard ends, and an out-of-range value is rejected rather than
+    // clamped: a silently corrected number is a run reporting on a question the
+    // operator did not ask. Zero is in range at both ends and means the same thing
+    // in both places — the test never fires — because that is what rimg already
+    // does with it, and a number the library treats as off should not be refused
+    // here.
+    if (!(skyDeg >= 0.0) || skyDeg >= 180.0 || !(darkSh >= 0.0) || darkSh > 1.0) {
+        _status.stringValue =
+            @"The sky opening must be between 0 and 180 degrees and the dark border "
+             "share between 0 and 1. Zero switches either test off: no opening is "
+             "then named as sky, and no border is too dark to believe.";
+        return;
+    }
     opt.voxelSize    = voxel;
     opt.maxRange     = range;
     opt.tileVoxels   = uint32_t(tile);
     opt.domainMargin = margin;
     opt.minRange     = minRng;
+    opt.skyMinExtentDeg    = skyDeg;
+    opt.darkBorderFraction = darkSh;
     if (drawnM > 0.0)
         opt.displayCap = uint64_t(std::min(drawnM, 512.0) * 1048576.0);
     {
@@ -1639,14 +1691,17 @@ const char *kindLabel(check::Kind k) {
                     result->largestZoneBorderMinM, result->largestZoneBorderMedianM];
         // The sky named outright, and the zones too dark to believe. Both are new
         // classifications of an empty cell, so both belong on the line that says
-        // what this answer rests on.
+        // what this answer rests on — with the two thresholds that produced them,
+        // because these are the settings being tried and a count means nothing
+        // without the number it was counted against.
         if (result->setupsWithSky || result->setupsWithDarkZones)
             warn = [warn stringByAppendingFormat:
-                    @"   ·   %llu setup(s) named their own sky; %llu had %llu cells bordered "
-                     "by returns too weak to believe",
-                    (unsigned long long)result->setupsWithSky,
+                    @"   ·   %llu setup(s) named their own sky (opening ≥ %g°); %llu had "
+                     "%llu cells bordered by returns too weak to believe (≥ %g%% dark)",
+                    (unsigned long long)result->setupsWithSky, opt.skyMinExtentDeg,
                     (unsigned long long)result->setupsWithDarkZones,
-                    (unsigned long long)result->darkCells];
+                    (unsigned long long)result->darkCells,
+                    100.0 * opt.darkBorderFraction];
         if (result->setupsWithoutIntensity)
             warn = [warn stringByAppendingFormat:
                     @"   ·   %llu setup(s) carry no intensity, so a surface too dark to answer "

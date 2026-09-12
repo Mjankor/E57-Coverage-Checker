@@ -27,7 +27,9 @@ struct Options {
     // Passed through to the range image build, so the report describes the same
     // images a carve would use rather than a differently-configured set.
     rimg::BlindCone blindCone = rimg::BlindCone::Auto;
-    double   minRange         = rimg::Options{}.minRange;
+    double   minRange           = rimg::Options{}.minRange;
+    double   skyMinExtentDeg    = rimg::Options{}.skyMinExtentDeg;
+    double   darkBorderFraction = rimg::Options{}.darkBorderFraction;
 };
 
 // Appends the report for one file to `out`. Returns the number of problems

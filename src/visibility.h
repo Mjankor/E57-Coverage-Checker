@@ -158,6 +158,19 @@ struct Options {
     // rimg::filterNoReturnsTooClose. 0 switches the test off.
     double   minRange = rimg::Options{}.minRange;
 
+    // How wide the opening at a scan's own zenith has to be before it is called
+    // sky, in degrees, passed through to rimg::Options. Surfaced on the run sheet
+    // beside the minimum range because both are judgements about what an empty
+    // cell means, and both want trying against real data: this one decides how
+    // much of a roofless or open-sided scene clears. See rimg::identifySky.
+    double   skyMinExtentDeg = rimg::Options{}.skyMinExtentDeg;
+
+    // What share of a no-return zone's bordering returns has to be near the
+    // bottom of this scan's own intensity distribution before the zone is
+    // disbelieved, passed through to rimg::Options. 0 switches the test off and 1
+    // demotes almost nothing. See rimg::filterDarkBorderedZones.
+    double   darkBorderFraction = rimg::Options{}.darkBorderFraction;
+
     // Which end of each raster holds the instrument's blind cone. Auto finds it
     // from the geometry and copes with a scanner mounted upside down.
     rimg::BlindCone blindCone = rimg::BlindCone::Auto;

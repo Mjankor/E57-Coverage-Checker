@@ -230,6 +230,8 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                 ro.maxRange         = opt.maxRange;
                 ro.blindCone        = opt.blindCone;
                 ro.minRange         = opt.minRange;
+                ro.skyMinExtentDeg    = opt.skyMinExtentDeg;
+                ro.darkBorderFraction = opt.darkBorderFraction;
                 std::string rerr;
                 if (rimg::build(r, i, ro, img, rerr)) {
                     o.add("      grid      : %u x %u = %.2f M cells, %.1f%% filled\n",
@@ -1180,6 +1182,8 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
     ro.maxRange         = opt.maxRange;
     ro.blindCone        = opt.blindCone;
     ro.minRange         = opt.minRange;
+    ro.skyMinExtentDeg    = opt.skyMinExtentDeg;
+    ro.darkBorderFraction = opt.darkBorderFraction;
 
     std::vector<std::unique_ptr<e57::Reader>> readers;
     std::vector<std::unique_ptr<rimg::RangeImage>> images;

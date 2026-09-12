@@ -551,6 +551,38 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
               "a file with no intensity is not second-guessed");
         CHECK(im.statusAt(90, 115) == rimg::Status::NoReturn, "and nothing changes");
     }
+
+    // Both thresholds are on the run sheet, and zero on either is offered there as
+    // off. Asserted, because that is a promise the dialog makes on this code's
+    // behalf: the operator sets zero and expects the test to stop firing, not to
+    // fire on everything.
+    {
+        rimg::Options off = opt;
+        off.skyMinExtentDeg = 0.0;
+        rimg::RangeImage im = build(60, false, false);
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, off, sky);
+        CHECK(!rep.isSky, "no opening is named as sky at zero degrees");
+        uint64_t protectedCells = 0;
+        for (uint8_t v : sky) protectedCells += v;
+        CHECK(rep.cells == 0 && protectedCells == 0, "and nothing is protected by it");
+
+        off = opt;
+        off.darkBorderFraction = 0.0;
+        rimg::RangeImage room = build(0, false, false);
+        for (uint32_t r = 80; r < 100; ++r)
+            for (uint32_t c = 100; c < 130; ++c)
+                room.cells[size_t(r) * room.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+        std::vector<float> inten(room.cells.size(), -1.0f);
+        for (size_t i = 0; i < room.cells.size(); ++i)
+            if (rimg::Status(room.cells[i].status) == rimg::Status::Hit)
+                inten[i] = 0.01f;                    // every border return is weak
+        const std::vector<uint8_t> noSky;
+        CHECK(rimg::filterDarkBorderedZones(room, inten, noSky, off) == 0,
+              "and at zero share nothing is too dark to believe, however dark it is");
+        CHECK(room.statusAt(90, 115) == rimg::Status::NoReturn, "so the patch still clears");
+    }
 }
 
 // A surface inside the instrument's MINIMUM range returns nothing, and that

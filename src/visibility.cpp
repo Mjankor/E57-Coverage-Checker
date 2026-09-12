@@ -559,6 +559,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     ro.maxCells = uint32_t(perImage);
     ro.blindCone        = opt.blindCone;
     ro.minRange         = opt.minRange;
+    ro.skyMinExtentDeg    = opt.skyMinExtentDeg;
+    ro.darkBorderFraction = opt.darkBorderFraction;
 
     // --- range images -----------------------------------------------------
     std::vector<std::unique_ptr<rimg::RangeImage>> images;
