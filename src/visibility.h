@@ -133,15 +133,6 @@ struct Options {
     //   meaning, expressed in the units the rest of the run sheet uses.
     double   domainMargin = 2.0;
 
-    // Passed through to rimg::Options. OFF (radius 0), matching rimg's own
-    // default: a ray either returned or it did not, and one that did not is not
-    // second-guessed from the shape of the empty region around it. These two
-    // defaults have to agree — they disagreed once, and the effect was that the
-    // library said the filter was off while every run through the CLI and the
-    // app had it on.
-    uint32_t skyRadius   = 0;
-    double   skyFraction = 0.75;
-
     // The instrument's rated MINIMUM range, in metres, passed through to
     // rimg::Options. A surface inside it returns nothing, and believing that
     // no-return clears a pencil of space straight through the surface — see

@@ -114,29 +114,6 @@ struct Options {
     // its neighbour, and binning down puts several source cells into one.
     double   minRoundTripFraction = 0.90;
 
-    // OFF by default, and deliberately so.
-    //
-    // The rule this instrument actually follows is simple: a ray either returned
-    // or it did not, and one that did not returned nothing because there was
-    // nothing within range along it. That holds whether it went to the sky, out
-    // of a window, or into a dark surface that reflected too little to register.
-    // The carve clears along it either way. Second-guessing that from the shape
-    // of the empty region — treating a scattered empty cell as a dropped return
-    // rather than as a measurement — substitutes a guess about the instrument
-    // for what the instrument reported.
-    //
-    // The machinery is kept because the guess is sometimes wanted: a scan of
-    // dark or wet surfaces does drop returns, and each one then clears a pencil
-    // of space to maxRange. On a fixture with a scattered 5% of returns removed,
-    // believing them all took the drawn frontier from 42,192 voxels to
-    // 4,035,105. Set a radius to switch it on; leave it at 0 for what the file
-    // says.
-    //
-    // The one exception, and it is not a guess: the blind cone under the tripod,
-    // handled separately below. Those directions were never sampled at all.
-    uint32_t noReturnRadius   = 0;
-    double   noReturnFraction = 0.75;
-
     // The instrument's rated MINIMUM range, in metres. Inside it a surface is too
     // close to measure and the cell comes back empty — which is the one other case
     // where an empty cell does not mean "nothing was there", and it means the
@@ -382,7 +359,6 @@ struct Diagnostics {
     // worth knowing about the instrument and the surfaces, not just about this
     // run: every one of them would otherwise have cleared space to maxRange.
     // No-returns demoted to OutsideFov, and why.
-    uint64_t isolatedNoReturns = 0;   // by the optional neighbourhood filter
     uint64_t blindConeCells    = 0;   // the instrument's own blind cone
     // Cells in zones found to be inside the instrument's minimum range, and how
     // many such zones there were. Every one of these would otherwise have cleared
@@ -696,7 +672,6 @@ std::vector<NoReturnZone> describeNoReturnZones(const RangeImage& im, const Opti
                                                 size_t maxZones);
 
 // Exposed for testing.
-void filterIsolatedNoReturns(RangeImage& im, const Options& opt);
 void filterNoReturnsTooClose(RangeImage& im, const Options& opt);
 void markBlindCone(RangeImage& im, const Options& opt);
 

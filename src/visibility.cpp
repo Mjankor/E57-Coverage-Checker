@@ -557,8 +557,6 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     rimg::Options ro;
     ro.maxRange = opt.maxRange;
     ro.maxCells = uint32_t(perImage);
-    ro.noReturnRadius   = opt.skyRadius;
-    ro.noReturnFraction = opt.skyFraction;
     ro.blindCone        = opt.blindCone;
     ro.minRange         = opt.minRange;
 
@@ -568,7 +566,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     images.reserve(size_t(scanCount));
     setups.reserve(size_t(scanCount));
 
-    uint64_t isolated = 0, believedSky = 0;
+    uint64_t believedSky = 0;
 
     // Built in parallel across scans. Range images are independent — one scan's
     // raster, tilt, mapping and round trip involve no other scan — so this is
@@ -685,7 +683,6 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     }
 
     for (auto& img : images) {
-        isolated    += img->diag.isolatedNoReturns;
         believedSky += img->diag.noReturns;
         if (img->diag.tooCloseZones) {
             ++out.setupsTooClose;
@@ -1257,11 +1254,6 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     if (out.setupsInverted) {
         note += fmt("%llu setup(s) were mounted inverted (blind cone pointing up); ",
                     (unsigned long long)out.setupsInverted);
-    }
-    if (isolated) {
-        note += fmt("%llu empty cells looked like dropped returns rather than sky and "
-                    "cleared nothing (%llu were believed); ",
-                    (unsigned long long)isolated, (unsigned long long)believedSky);
     }
     if (out.classified) {
         note += fmt("%llu enclosed void(s), %.1f m^3, largest %.1f m^3; the other %.0f m^3 "

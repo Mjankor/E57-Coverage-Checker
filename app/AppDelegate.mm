@@ -726,8 +726,6 @@ const char *kindLabel(check::Kind k) {
     report::Options ro;
     ro.maxRange         = _visOptions.maxRange;
     ro.blindCone        = _visOptions.blindCone;
-    ro.noReturnRadius   = _visOptions.skyRadius;
-    ro.noReturnFraction = _visOptions.skyFraction;
 
     auto paths = std::make_shared<std::vector<std::string>>(_paths);
     __weak AppDelegate *weakSelf = self;
@@ -788,8 +786,6 @@ const char *kindLabel(check::Kind k) {
     report::Options ro;
     ro.maxRange         = _visOptions.maxRange;
     ro.blindCone        = _visOptions.blindCone;
-    ro.noReturnRadius   = _visOptions.skyRadius;
-    ro.noReturnFraction = _visOptions.skyFraction;
 
     auto paths = std::make_shared<std::vector<std::string>>(_paths);
     __weak AppDelegate *weakSelf = self;

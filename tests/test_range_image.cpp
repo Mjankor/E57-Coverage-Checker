@@ -134,11 +134,11 @@ static void testGridPath() {
           "every cell is a hit, a no-return, or an unsampled direction");
     // A ray either returned or it did not. An empty cell is a ray that came back
     // with nothing, and it clears along its path whatever it passed through —
-    // sky, a window, or a surface too dark to register. The only cells not
-    // believed are the unsampled band under the tripod, and this fixture's
-    // empty band is at the sky end.
-    CHECK(img.diag.isolatedNoReturns == 0,
-          "no cell is second-guessed: the neighbourhood filter is off by default");
+    // sky, a window, or a surface too dark to register. The only empty cells not
+    // believed are the two the instrument itself accounts for: the unsampled cone
+    // about its own nadir, and a surface inside its minimum range.
+    CHECK(img.diag.blindConeCells + img.diag.tooCloseNoReturns == img.diag.outsideFov,
+          "nothing else is second-guessed");
     CHECK_NEAR(img.diag.fillFraction, double(records) / double(kRows * kCols), 1e-9,
                "fill fraction reported correctly");
 
@@ -604,96 +604,6 @@ static void testNoReturnsInsideTheMinimumRange() {
     }
 }
 
-// The distinction the whole no-return path rests on: a large connected region of
-// empty cells is sky and clears space; an empty cell surrounded by returns is a
-// dropped return and clears nothing. Nothing in the file tells them apart, so
-// this is the only thing that does.
-static void testSkyVersusDroppedReturns() {
-    std::printf("range image: the optional drop filter, when asked for\n");
-
-    rimg::RangeImage im;
-    im.rows = 120; im.cols = 240;
-    im.cells.assign(im.cellCount(), rimg::Cell{});
-    auto at = [&](uint32_t r, uint32_t c) -> rimg::Cell& {
-        return im.cells[size_t(r) * im.cols + c];
-    };
-    // Everything a hit at 10 m...
-    for (uint32_t r = 0; r < im.rows; ++r)
-        for (uint32_t c = 0; c < im.cols; ++c)
-            at(r, c) = rimg::Cell{1000, uint8_t(rimg::Status::Hit)};
-    // ...except a band of genuine sky across the top twenty rows...
-    for (uint32_t r = 0; r < 20; ++r)
-        for (uint32_t c = 0; c < im.cols; ++c)
-            at(r, c) = rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
-    // ...a sky region straddling the azimuth seam, which wraps...
-    for (uint32_t r = 40; r < 60; ++r)
-        for (uint32_t c = 0; c < im.cols; ++c)
-            if (c < 8 || c >= im.cols - 8)
-                at(r, c) = rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
-    // ...and scattered single drops in the middle of the returns.
-    Lcg rng;
-    uint32_t drops = 0;
-    for (uint32_t r = 80; r < 110; ++r)
-        for (uint32_t c = 20; c < 200; ++c)
-            if (rng.next() < 0.05) {
-                at(r, c) = rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
-                ++drops;
-            }
-    CHECK(drops > 100, "the fixture scattered some drops");
-
-    // The filter is off by default now — a ray either returned or it did not.
-    // It is switched on here because the machinery is still wanted for scans
-    // that genuinely drop, and it still has to work when asked for.
-    rimg::Options opt;
-    opt.noReturnRadius   = 2;
-    opt.noReturnFraction = 0.75;
-    rimg::filterIsolatedNoReturns(im, opt);
-
-    // The sky band survives, apart from a couple of rows of erosion at its
-    // silhouette edge — the price of the rule, and paid in the safe direction.
-    uint32_t skyKept = 0, skyLost = 0;
-    for (uint32_t r = 0; r < 18; ++r)
-        for (uint32_t c = 0; c < im.cols; ++c)
-            (im.statusAt(r, c) == rimg::Status::NoReturn ? skyKept : skyLost)++;
-    CHECK(skyLost == 0, "the interior of a sky region is believed");
-    CHECK(skyKept == 18 * im.cols, "all of it");
-
-    // The wrapping region is one region, not two thin ones. Without wrapping
-    // the azimuth seam, its two halves would each look isolated and be lost.
-    uint32_t seamKept = 0;
-    for (uint32_t r = 45; r < 55; ++r) {
-        if (im.statusAt(r, 0) == rimg::Status::NoReturn) ++seamKept;
-        if (im.statusAt(r, im.cols - 1) == rimg::Status::NoReturn) ++seamKept;
-    }
-    CHECK(seamKept == 20, "a sky region crossing the azimuth seam is one region");
-
-    // Every scattered drop is demoted. This is the one that matters: each of
-    // these would otherwise clear 45 m of space through solid geometry.
-    uint32_t survivingDrops = 0;
-    for (uint32_t r = 80; r < 110; ++r)
-        for (uint32_t c = 20; c < 200; ++c)
-            if (im.statusAt(r, c) == rimg::Status::NoReturn) ++survivingDrops;
-    CHECK(survivingDrops == 0, "no scattered drop is believed to have seen sky");
-    CHECK(im.diag.isolatedNoReturns >= drops, "and they are counted");
-
-    // A demoted cell says nothing rather than saying something short.
-    bool rangeCleared = true;
-    for (uint32_t r = 80; r < 110; ++r)
-        for (uint32_t c = 20; c < 200; ++c)
-            if (im.statusAt(r, c) == rimg::Status::OutsideFov && im.rangeAt(r, c) != 0.0)
-                rangeCleared = false;
-    CHECK(rangeCleared, "a demoted cell carries no range for anyone to mistake for a measurement");
-
-    // Switching the filter off restores the old behaviour exactly, so a corpus
-    // that genuinely has no drops can be run without the erosion.
-    rimg::RangeImage plain;
-    plain.rows = 20; plain.cols = 20;
-    plain.cells.assign(400, rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)});
-    rimg::Options off;      // the default
-    rimg::filterIsolatedNoReturns(plain, off);
-    CHECK(off.noReturnRadius == 0, "and radius 0 is the default");
-    CHECK(plain.diag.isolatedNoReturns == 0, "radius 0 switches the filter off");
-}
 
 // The failure the round-trip check exists to catch, and the one the residual
 // alone cannot.
@@ -1836,7 +1746,6 @@ int main() {
     testGridPath();
     testPyramid();
     testNoReturnsInsideTheMinimumRange();
-    testSkyVersusDroppedReturns();
     testBlindConeFoundGeometrically();
     testDoubleCoveredMirrorIsRefused();
     testOrdinaryRasterRoundTrips();

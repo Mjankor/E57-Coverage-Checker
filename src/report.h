@@ -27,8 +27,6 @@ struct Options {
     // Passed through to the range image build, so the report describes the same
     // images a carve would use rather than a differently-configured set.
     rimg::BlindCone blindCone = rimg::BlindCone::Auto;
-    uint32_t noReturnRadius   = 0;
-    double   noReturnFraction = 0.75;
     double   minRange         = rimg::Options{}.minRange;
 };
 

@@ -229,8 +229,6 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                 rimg::Options ro;
                 ro.maxRange         = opt.maxRange;
                 ro.blindCone        = opt.blindCone;
-                ro.noReturnRadius   = opt.noReturnRadius;
-                ro.noReturnFraction = opt.noReturnFraction;
                 ro.minRange         = opt.minRange;
                 std::string rerr;
                 if (rimg::build(r, i, ro, img, rerr)) {
@@ -299,16 +297,6 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                     (unsigned long long)img.diag.tooCloseNoReturns,
                                     img.diag.tooCloseZones, img.diag.tooCloseBorderRange,
                                     ro.minRange, ro.maxRange);
-                    }
-                    if (img.diag.isolatedNoReturns) {
-                        const double pct = 100.0 * double(img.diag.isolatedNoReturns) /
-                                           double(img.diag.isolatedNoReturns + img.diag.noReturns);
-                        o.add("      drops     : %llu empty cells (%.1f%% of them) had too "
-                                    "few empty\n                  neighbours to be sky and clear "
-                                    "nothing. Believed, each\n                  would have cleared "
-                                    "a line to %.0f m through solid geometry.\n",
-                                    (unsigned long long)img.diag.isolatedNoReturns, pct,
-                                    ro.maxRange);
                     }
                     o.add("      range     : returns from %.2f m to %.2f m; "
                                 "no-returns clear to %.0f m\n",
@@ -1167,8 +1155,6 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
     rimg::Options ro;
     ro.maxRange         = opt.maxRange;
     ro.blindCone        = opt.blindCone;
-    ro.noReturnRadius   = opt.noReturnRadius;
-    ro.noReturnFraction = opt.noReturnFraction;
     ro.minRange         = opt.minRange;
 
     std::vector<std::unique_ptr<e57::Reader>> readers;

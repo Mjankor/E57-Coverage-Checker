@@ -56,8 +56,6 @@ int info(const std::vector<std::string>& paths, bool verifyCrc, double maxRange,
     ro.verifyCrc        = verifyCrc;
     ro.maxRange         = maxRange;
     ro.blindCone        = co.blindCone;
-    ro.noReturnRadius   = co.skyRadius;
-    ro.noReturnFraction = co.skyFraction;
     ro.minRange         = co.minRange;
     std::string text;
     const int failures = report::scanReport(paths, ro, text);
@@ -234,8 +232,6 @@ int probePoint(const std::vector<std::string>& paths, const vis::Options& opt,
     rimg::Options ro;
     ro.maxRange         = opt.maxRange;
     ro.blindCone        = opt.blindCone;
-    ro.noReturnRadius   = opt.skyRadius;
-    ro.noReturnFraction = opt.skyFraction;
     ro.minRange         = opt.minRange;
 
     for (const std::string& path : paths) {
@@ -387,14 +383,6 @@ void usage() {
         "          'any' stops at the first bit: still exact for the unknown set,\n"
         "          but visible and occupied become lower bounds. 'none' asks every\n"
         "          setup, matching the reference's work exactly.\n"
-        "  --sky-radius <cells>   --sky-fraction <0..1>\n"
-        "          (carve) How much company an empty cell needs before it is\n"
-        "          believed to have seen sky rather than dropped a return.\n"
-        "          Default radius 2 (a 5x5 window) and 0.75 of it. Nothing in an\n"
-        "          E57 distinguishes the two, and believing a dropped return\n"
-        "          clears a pencil of space to --max-range through solid\n"
-        "          geometry. Raise the fraction if a scan drops heavily; set the\n"
-        "          radius to 0 to believe every empty cell, as before.\n"
         "  --classify\n"
         "          (carve) Keep only unobserved space you cannot reach from\n"
         "          outside without crossing observed space. Off by default: it\n"
@@ -516,17 +504,6 @@ int main(int argc, char** argv) {
             if (co.minRange < 0.0) { std::printf("--min-range cannot be negative\n"); return 2; }
             continue;
         }
-        if (std::strcmp(argv[i], "--sky-radius") == 0 && i + 1 < argc) {
-            co.skyRadius = uint32_t(std::strtoul(argv[++i], nullptr, 10));
-            continue;
-        }
-        if (std::strcmp(argv[i], "--sky-fraction") == 0 && i + 1 < argc) {
-            co.skyFraction = std::strtod(argv[++i], nullptr);
-            if (co.skyFraction < 0.0 || co.skyFraction > 1.0) {
-                std::printf("--sky-fraction must be in 0..1\n"); return 2;
-            }
-            continue;
-        }
         if (std::strcmp(argv[i], "--early-out") == 0 && i + 1 < argc) {
             const std::string v = argv[++i];
             if      (v == "none")      co.earlyOut = carve::EarlyOut::None;
@@ -601,8 +578,6 @@ int main(int argc, char** argv) {
         report::Options ro;
         ro.maxRange         = co.maxRange;
         ro.blindCone        = co.blindCone;
-        ro.noReturnRadius   = co.skyRadius;
-        ro.noReturnFraction = co.skyFraction;
         ro.minRange         = co.minRange;
         std::string text;
         const int failures = report::selfTest(paths, ro, text);
