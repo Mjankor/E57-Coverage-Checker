@@ -43,19 +43,39 @@ uint8_t chooseChunkLevel(uint64_t totalPoints, uint64_t targetPointsPerChunk) {
 
 uint32_t cellIndexOf(const lod::Aabb& root, uint8_t level,
                      float x, float y, float z, lod::Aabb* outBounds) {
-    lod::Aabb b = root;
+    // The bounds are carried in six floats rather than an Aabb, and each
+    // midpoint is computed once.
+    //
+    // This runs per point on the way into the spill, so it is one of the few
+    // things in the build measured per point rather than per scan: 0.30 s of the
+    // 1.44 s indexing pass on 13.6 M points. It used to call centre() for the
+    // three midpoints and then child() — which computes the same three again and
+    // returns a struct by value — so six midpoints and a copy per level where
+    // three and no copy will do.
+    //
+    // The arithmetic is deliberately IDENTICAL, `0.5f * (lo + hi)` in the same
+    // order, not an equivalent closed form. Repeated halving of a float does not
+    // land where lo + size * k / 2^level does, so a point near a cell boundary
+    // would land in a different chunk than the one whose bounds were derived by
+    // descending — and a point outside the chunk it was filed under is dropped by
+    // that chunk's builder rather than stored. There is a test that walks the two
+    // against each other.
+    float lo[3] = {root.lo[0], root.lo[1], root.lo[2]};
+    float hi[3] = {root.hi[0], root.hi[1], root.hi[2]};
+    const float p[3] = {x, y, z};
     uint32_t path = 0;
     for (uint8_t l = 0; l < level; ++l) {
-        float mid[3];
-        b.centre(mid);
         int octant = 0;
-        if (x >= mid[0]) octant |= 1;
-        if (y >= mid[1]) octant |= 2;
-        if (z >= mid[2]) octant |= 4;
+        for (int i = 0; i < 3; ++i) {
+            const float mid = 0.5f * (lo[i] + hi[i]);
+            if (p[i] >= mid) { octant |= (1 << i); lo[i] = mid; }
+            else             { hi[i] = mid; }
+        }
         path = (path << 3) | uint32_t(octant);
-        b = b.child(octant);
     }
-    if (outBounds) *outBounds = b;
+    if (outBounds) {
+        for (int i = 0; i < 3; ++i) { outBounds->lo[i] = lo[i]; outBounds->hi[i] = hi[i]; }
+    }
     return path;
 }
 

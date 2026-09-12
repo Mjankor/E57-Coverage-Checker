@@ -145,6 +145,98 @@ static void testCellIndex() {
     CHECK(inside, "every point lies inside the cell it maps to");
 }
 
+// cellIndexOf agrees, bit for bit, with the descent it replaced.
+//
+// It runs per point on the way into the spill, so it was worth making cheaper —
+// one midpoint per axis per level instead of two and a struct copy. What it must
+// NOT do is land anywhere different. A point filed under a chunk whose bounds were
+// derived by a different arithmetic path is outside that chunk when its builder
+// gets it, and a point outside its chunk is dropped rather than stored: a silent
+// hole in the store, at cell boundaries, where nobody looks.
+//
+// So the old descent is kept here verbatim and the two are walked against each
+// other — on random points, and on the boundaries themselves, which is where any
+// difference would live.
+static uint32_t cellIndexByDescent(const lod::Aabb& root, uint8_t level,
+                                   float x, float y, float z, lod::Aabb* outBounds) {
+    lod::Aabb b = root;
+    uint32_t path = 0;
+    for (uint8_t l = 0; l < level; ++l) {
+        float mid[3];
+        b.centre(mid);
+        int octant = 0;
+        if (x >= mid[0]) octant |= 1;
+        if (y >= mid[1]) octant |= 2;
+        if (z >= mid[2]) octant |= 4;
+        path = (path << 3) | uint32_t(octant);
+        b = b.child(octant);
+    }
+    if (outBounds) *outBounds = b;
+    return path;
+}
+
+static void testCellIndexMatchesTheDescentExactly() {
+    std::printf("indexer: cell addressing is unchanged, bit for bit\n");
+
+    // Roots whose sizes are deliberately not powers of two, so the midpoints
+    // round rather than landing exactly.
+    const lod::Aabb roots[] = {
+        {{-8.0f, -8.0f, -8.0f}, {8.0f, 8.0f, 8.0f}},
+        {{-100.3f, 7.77f, -0.125f}, {312.7f, 420.21f, 311.45f}},
+        {{500123.37f, 6200456.11f, -3.5f}, {500523.37f, 6200856.11f, 396.5f}},
+    };
+
+    Lcg rng;
+    uint64_t compared = 0, differed = 0, boundsDiffered = 0;
+    for (const lod::Aabb& root : roots) {
+        for (uint8_t level = 1; level <= 6; ++level) {
+            for (int i = 0; i < 20000; ++i) {
+                float p[3];
+                for (int k = 0; k < 3; ++k) {
+                    const double t = rng.next();
+                    p[k] = float(double(root.lo[k]) + t * (double(root.hi[k]) - double(root.lo[k])));
+                }
+                lod::Aabb ba{}, bb{};
+                const uint32_t a = cellIndexByDescent(root, level, p[0], p[1], p[2], &ba);
+                const uint32_t b = indexer::cellIndexOf(root, level, p[0], p[1], p[2], &bb);
+                ++compared;
+                if (a != b) ++differed;
+                for (int k = 0; k < 3; ++k)
+                    if (ba.lo[k] != bb.lo[k] || ba.hi[k] != bb.hi[k]) { ++boundsDiffered; break; }
+            }
+            // And exactly on the midpoints, which is where the two could part.
+            for (int i = 0; i < 2000; ++i) {
+                lod::Aabb walk = root;
+                for (uint8_t l = 0; l < level; ++l) {
+                    float mid[3];
+                    walk.centre(mid);
+                    const int oct = i % 8;
+                    if (l + 1 == level) {
+                        // Probe the corner and the centre of this cell, and the
+                        // values either side of the midpoint in float steps.
+                        const float probes[3] = {mid[0], std::nextafter(mid[0], -1e30f),
+                                                 std::nextafter(mid[0], 1e30f)};
+                        for (float px : probes) {
+                            lod::Aabb ba{}, bb{};
+                            const uint32_t a = cellIndexByDescent(root, level, px, mid[1], mid[2], &ba);
+                            const uint32_t b = indexer::cellIndexOf(root, level, px, mid[1], mid[2], &bb);
+                            ++compared;
+                            if (a != b) ++differed;
+                            for (int k = 0; k < 3; ++k)
+                                if (ba.lo[k] != bb.lo[k] || ba.hi[k] != bb.hi[k]) { ++boundsDiffered; break; }
+                        }
+                    }
+                    walk = walk.child(oct);
+                }
+            }
+        }
+    }
+    std::printf("      (%llu points compared)\n", (unsigned long long)compared);
+    CHECK(compared > 400000, "enough points to mean something");
+    CHECK(differed == 0, "every cell index is identical to the descent's");
+    CHECK(boundsDiffered == 0, "and so is every cell bound");
+}
+
 static void testSurveyIsHeaderOnly() {
     std::printf("indexer: survey reads headers only\n");
     const std::vector<std::string> paths = writeCorpus("survey", 12, 3000, 40.0, 500000.0, 6200000.0);
@@ -1033,6 +1125,7 @@ int main() {
     std::printf("E57 Coverage Checker — indexer tests\n\n");
     testChunkLevel();
     testCellIndex();
+    testCellIndexMatchesTheDescentExactly();
     testSurveyIsHeaderOnly();
     testSurveyDoesNotDependOnThreadCount();
     testTheBuildRefusesWhenTheDiskIsTooSmall();
