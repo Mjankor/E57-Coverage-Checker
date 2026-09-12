@@ -11,19 +11,25 @@
 //
 //   Volume. A site 40 m across at 5 cm is order 10^8 voxels in range, and most
 //   of them are unknown simply because they are outside the building. Drawing
-//   that is neither possible nor useful. What is worth looking at is the
-//   frontier: unknown voxels with a face neighbour that was OBSERVED — seen
-//   through, or measured on. That is where coverage stops: the mouth of a
-//   shadow, the far edge of the range spheres, and the back of the ceiling a
-//   beam stopped on. Since an opaque blob hides its own interior anyway, the
-//   frontier then looks the same as the solid volume from outside it while
-//   costing area instead of volume. `solid` turns the reduction off.
+//   that is neither possible nor useful, so there is a display cap and a
+//   reduction: the frontier, meaning unknown voxels with a face neighbour that
+//   was OBSERVED — seen through, or measured on. That is where coverage stops:
+//   the mouth of a shadow, the far edge of the range spheres, the back of the
+//   ceiling a beam stopped on.
 //
-//   "Observed" rather than "visible" is a correction, and the reason is the
-//   ceiling: the slab of unobserved space above one is bounded by measured
-//   surface below and by itself everywhere else, so asking for a neighbour seen
-//   THROUGH left the whole slab undrawable and an indoor survey showed nothing
-//   above its own roof.
+//   The reduction is OFF by default now, and the reason is worth keeping. It
+//   rests on a solid body looking the same as its own surface from outside, and
+//   that fails wherever the body's boundary was never observed either. The blind
+//   cone under a single setup is exactly that: the floor inside the cone is never
+//   measured, so the unobserved space beneath it touches nothing observed, gets
+//   dropped, and from below the cone reads as a hole carved through the answer.
+//   Nothing was carved — the volume is counted as unobserved throughout — but a
+//   reduction that can hide a whole unobserved region is not a safe default.
+//
+//   "Observed" rather than "visible" is a correction in the same direction: the
+//   slab of unobserved space above a ceiling is bounded by measured surface below
+//   and by itself everywhere else, so asking for a neighbour seen THROUGH left
+//   the whole slab undrawable and an indoor survey showed nothing above its roof.
 //
 //   Count. Even a frontier can exceed what is sensible to upload, so there is
 //   a cap. It is applied by hashing each voxel's position on the global lattice
@@ -82,9 +88,22 @@ struct Options {
     // sample, and `Result::partial` says so.
     uint64_t maxTiles   = 0;
 
-    // Keep only unknown voxels that touch OBSERVED space — seen through or
-    // measured on. See the header note.
-    bool     solid      = false;
+    // Draw every unobserved voxel, not only the ones touching observed space.
+    //
+    // ON by default, and that is a correction. The frontier reduction is a claim
+    // about what a solid body looks like from outside, and the claim does not hold
+    // where the body's boundary was never observed either. The blind cone under a
+    // single setup is the case: the patch of floor inside it is never measured, so
+    // the unobserved space below that patch touches nothing observed, is dropped,
+    // and the cone reads from beneath as a hole carved through the middle of the
+    // answer. It is not carved — every voxel of it is unobserved and counted as
+    // such. Reducing it away is the reduction being wrong about what is safe to
+    // hide, so the reduction is no longer the default.
+    //
+    // Set it false to get the frontier back: it is still much the cheaper thing to
+    // draw, and on a site where every surface is measured from several setups the
+    // two look the same from outside.
+    bool     solid      = true;
 
     // See carve::EarlyOut. Saturated is exact; AnyEvidence is exact for the
     // unknown set only and has to be asked for.

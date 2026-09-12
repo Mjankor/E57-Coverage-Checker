@@ -449,9 +449,15 @@ void usage() {
         "          to the nearest return in it, so less space is cleared and the\n"
         "          unobserved volume comes out overstated. The report says when\n"
         "          this happened, and by how much.\n"
-        "  --solid (carve) Keep every unknown voxel rather than only those on the\n"
-        "          frontier with observed space. Far more voxels, same answer:\n"
-        "          an opaque volume hides its own interior anyway.\n");
+        "  --solid   --frontier\n"
+        "          (carve) Whether to keep every unknown voxel or only those on\n"
+        "          the frontier with observed space. Solid is the default, and\n"
+        "          the same answer either way — the reduction only changes what\n"
+        "          is drawn. Use --frontier for far fewer voxels; from outside it\n"
+        "          looks the same, except where a region's own boundary was never\n"
+        "          observed either. The blind cone under a lone setup is that\n"
+        "          case: the floor inside it is never measured, so the space\n"
+        "          below reduces away and the cone reads as a hole from beneath.\n");
 }
 
 } // namespace
@@ -495,7 +501,8 @@ int main(int argc, char** argv) {
             co.maxTiles = std::strtoull(argv[++i], nullptr, 10);
             continue;
         }
-        if (std::strcmp(argv[i], "--solid") == 0) { co.solid = true; continue; }
+        if (std::strcmp(argv[i], "--solid") == 0)    { co.solid = true;  continue; }
+        if (std::strcmp(argv[i], "--frontier") == 0) { co.solid = false; continue; }
         if (std::strcmp(argv[i], "--classify") == 0) { co.classifyVoids = true; continue; }
         if (std::strcmp(argv[i], "--blind-cone") == 0 && i + 1 < argc) {
             const std::string v = argv[++i];

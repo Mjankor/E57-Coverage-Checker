@@ -273,6 +273,10 @@ static void testEndToEnd() {
     opt.voxelSize  = 0.25;
     opt.maxRange   = 8.0;
     opt.tileVoxels = 32;
+    // Asked for explicitly: the reduction is no longer the default, because it can
+    // hide a whole unobserved region whose boundary was never observed either —
+    // see vis::Options::solid.
+    opt.solid      = false;
 
     vis::Result frontier;
     std::string err;

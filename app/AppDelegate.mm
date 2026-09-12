@@ -1372,8 +1372,8 @@ const char *kindLabel(check::Kind k) {
     [acc addSubview:firstHit];
 
     NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 620, 20)];
-    solid.title = @"Show every unobserved voxel, not just the frontier "
-                  @"(a solid body otherwise draws as a shell)";
+    solid.title = @"Show every unobserved voxel — untick to draw only the frontier, "
+                  @"where coverage stops";
     [solid setButtonType:NSButtonTypeSwitch];
     solid.font = [NSFont systemFontOfSize:11];
     solid.state = _visOptions.solid ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1405,11 +1405,10 @@ const char *kindLabel(check::Kind k) {
         @"The instrument minimum range matters more than it looks: a surface closer than "
         @"that returns nothing, and an empty cell that is really a wall at arm's length "
         @"would otherwise clear space straight through it, out to the maximum range.\n\n"
-        @"By default only the frontier of that space is drawn — where coverage stops. "
-        @"There is far more of the volume than of its surface, and from outside the two "
-        @"look the same. Cut into one, though, and it is hollow: the blind cone under a "
-        @"setup draws as a cone-shaped shell, not a solid. Tick the box below to see "
-        @"every voxel.\n\n"
+        @"Every unobserved voxel is drawn. Untick that below to draw only the frontier "
+        @"— where coverage stops — which is far cheaper and looks the same from outside, "
+        @"except where a region's own boundary was never observed either: the blind cone "
+        @"under a lone setup then reads from beneath as a hole.\n\n"
         @"This is the CPU reference, so a large site at 5 cm takes minutes. "
         @"File ▸ Cancel stops it, and a coarser voxel is much faster: halving the "
         @"voxel size costs eight times the work.";
