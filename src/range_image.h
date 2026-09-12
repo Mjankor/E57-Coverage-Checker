@@ -371,6 +371,16 @@ struct Diagnostics {
     // The end was identified from those angles rather than from the range of the
     // returns bordering each band. The better signal, and the one to trust.
     bool     coneByElevation = false;
+    // Unsampled rows found at each end, whether or not they were marked. The
+    // marked band is blindConeRows/blindConeRowsLast; these are what was THERE.
+    //
+    // The difference between the two is the whole of the question "is a band
+    // being believed as a view of the sky?" A band left believed clears every ray
+    // in it to the rated range, and because the elevation table is extrapolated
+    // across a band, a direction near the pole maps INTO it — so a voxel directly
+    // above or below a setup is cleared through whatever is actually there.
+    uint32_t emptyLeadingRowsFound  = 0;
+    uint32_t emptyTrailingRowsFound = 0;
     // The pose puts this instrument's own up axis pointing downward in the file
     // frame, so the setup looks inverted. REPORTED, not acted on: the mount is
     // fixed at the instrument's own -z whatever the pose does with that frame, so

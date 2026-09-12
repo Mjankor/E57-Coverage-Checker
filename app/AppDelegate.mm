@@ -1599,6 +1599,18 @@ const char *kindLabel(check::Kind k) {
         // nothing else on this line changes the picture as much. Undecided leaves
         // both ends believed, which carves a cone through the ground under every
         // setup — a warning, not a footnote.
+        // A band that is there and was left believed. Each one clears a cone
+        // straight at the pole — up through a roof, down through a floor — because
+        // the elevation table is extrapolated across the band, so a direction near
+        // the pole maps into it. This is the number that says whether that is
+        // happening, and it used to take reading the source to find out.
+        if (result->setupsBandBelievedLow || result->setupsBandBelievedHigh)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   ⚠︎ UNSAMPLED BAND BELIEVED AS SKY on %llu setup(s) at the low end "
+                     "and %llu at the high end — each clears a cone at the pole, through a "
+                     "floor or a roof",
+                    (unsigned long long)result->setupsBandBelievedLow,
+                    (unsigned long long)result->setupsBandBelievedHigh];
         if (result->coneVerdict.bothEnds)
             warn = [warn stringByAppendingString:
                     @"   ·   blind cone at BOTH ends — neither believed as sky"];

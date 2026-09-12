@@ -716,6 +716,9 @@ void markBlindCone(RangeImage& im, const Options& opt) {
         return double(cm[cm.size() / 2]) * 0.01;
     };
 
+    im.diag.emptyLeadingRowsFound  = bandFirst;
+    im.diag.emptyTrailingRowsFound = bandLast;
+
     const double mFirst = borderMedian(bandFirst, true);
     const double mLast  = borderMedian(bandLast, false);
     im.diag.borderRangeFirst = mFirst;

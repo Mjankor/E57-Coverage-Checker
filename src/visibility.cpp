@@ -661,6 +661,23 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             if (img->diag.hasConeAxis && img->diag.coneAxisWorld[2] > 0.5)
                 ++out.setupsInverted;
         }
+        // A band that is there and was not marked. Which end of the raster is the
+        // low one is the elevation table's business, not a guess.
+        {
+            const bool firstIsLow = (img->map.elByRow.size() == img->rows && img->rows >= 2)
+                                  ? (img->map.elByRow.front() <= img->map.elByRow.back())
+                                  : true;
+            const uint32_t markedFirst = img->diag.blindConeAtFirstRow
+                                       ? img->diag.blindConeRows : img->diag.blindConeRowsLast;
+            const uint32_t markedLast  = img->diag.blindConeAtFirstRow
+                                       ? img->diag.blindConeRowsLast : img->diag.blindConeRows;
+            const bool firstBelieved = img->diag.emptyLeadingRowsFound  > markedFirst;
+            const bool lastBelieved  = img->diag.emptyTrailingRowsFound > markedLast;
+            if (firstBelieved) { if (firstIsLow) ++out.setupsBandBelievedLow;
+                                 else            ++out.setupsBandBelievedHigh; }
+            if (lastBelieved)  { if (firstIsLow) ++out.setupsBandBelievedHigh;
+                                 else            ++out.setupsBandBelievedLow; }
+        }
         // The accelerator the carve culls with. About 5/16 of a byte per cell, and
         // it settles most bricks with one lookup instead of 512 voxel tests. Built
         // after the cone is marked: it summarises cell statuses, so a pyramid

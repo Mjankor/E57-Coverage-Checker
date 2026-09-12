@@ -267,6 +267,15 @@ struct Result {
     std::string  mappingRefusedWhy;
     // Setups whose blind cone was found, and how many were mounted inverted.
     uint64_t     setupsWithBlindCone = 0;
+    // Setups with an unsampled band at an end that was left BELIEVED — treated as
+    // rays that saw through to the rated range rather than as directions never
+    // sampled. Each one clears a cone through whatever is beyond it, and because
+    // the elevation table is extrapolated across the band, that cone is aimed
+    // straight at the pole: up through a roof, down through a floor.
+    //
+    // Reported per end, because which end it is says what is being lost.
+    uint64_t     setupsBandBelievedLow  = 0;
+    uint64_t     setupsBandBelievedHigh = 0;
     uint64_t     setupsInverted = 0;
     // How the cone was decided across the whole corpus, which is a far stronger
     // signal than any single scan affords — see rimg::markBlindConeAcrossCorpus.
