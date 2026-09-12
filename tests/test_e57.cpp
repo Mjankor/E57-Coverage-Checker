@@ -8,6 +8,8 @@
 #include "../src/e57.h"
 
 #include <cmath>
+#include <memory>
+#include <sys/resource.h>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -386,7 +388,86 @@ static void testRejectsBadFiles() {
     CHECK(!missing.open(tmpPath("does_not_exist"), err), "missing file rejected");
 }
 
+// A reader does not hold a file descriptor open, so a corpus is not limited by
+// the process's descriptor cap.
+//
+// This is the regression test for a real failure on a thousand-scan job: opening
+// the scans reported "cannot open <path>" on an innocent file, and a different one
+// each run. The descriptor limit — 256 by default on macOS — was being reached,
+// because every open reader kept its descriptor for its whole life and the scan
+// count was gathered by opening all of them at once.
+//
+// A mapping keeps the file alive on its own, so the descriptor can go as soon as
+// mmap returns. The test lowers the limit to something small and then opens far
+// more readers than that, all at once.
+static void testReadersDoNotHoldDescriptors() {
+    std::printf("e57: readers release their descriptors\n");
+
+    fixture::Scan sc;
+    sc.name = "fd";
+    sc.fields = {
+        {"cartesianX", e57::FieldType::FloatDouble},
+        {"cartesianY", e57::FieldType::FloatDouble},
+        {"cartesianZ", e57::FieldType::FloatDouble},
+    };
+    sc.data.assign(3, {});
+    for (int i = 0; i < 64; ++i) {
+        sc.data[0].push_back(double(i));
+        sc.data[1].push_back(double(-i));
+        sc.data[2].push_back(double(i % 7));
+    }
+    const std::string path = tmpPath("fdlimit");
+    CHECK(fixture::write(path, {sc}, 64), "fixture written");
+
+    struct rlimit was {};
+    if (::getrlimit(RLIMIT_NOFILE, &was) != 0) { CHECK(false, "getrlimit"); return; }
+
+    // Well under the number of readers opened below, and low enough that a
+    // descriptor held per reader is certain to hit it.
+    struct rlimit low = was;
+    low.rlim_cur = 64;
+    if (low.rlim_cur > was.rlim_max) low.rlim_cur = was.rlim_max;
+    if (::setrlimit(RLIMIT_NOFILE, &low) != 0) {
+        std::printf("      (cannot lower RLIMIT_NOFILE here; skipped)\n");
+        return;
+    }
+
+    std::vector<std::unique_ptr<e57::Reader>> held;
+    bool allOpened = true;
+    std::string firstErr;
+    for (int i = 0; i < 200; ++i) {
+        auto r = std::make_unique<e57::Reader>();
+        std::string err;
+        if (!r->open(path, err)) {
+            allOpened = false;
+            if (firstErr.empty()) firstErr = err;
+            break;
+        }
+        held.push_back(std::move(r));
+    }
+    ::setrlimit(RLIMIT_NOFILE, &was);
+
+    CHECK(allOpened, firstErr.empty() ? "200 readers open under a 64 descriptor limit"
+                                      : firstErr.c_str());
+    CHECK(held.size() == 200, "and all of them are still usable");
+
+    // Still readable, which is the point of closing the descriptor rather than
+    // the file: the mapping outlives it.
+    if (!held.empty()) {
+        CHECK(held.front()->scanCount() == 1, "the first reader still reports its scan");
+        CHECK(held.back()->scanCount() == 1, "and so does the last");
+        uint64_t seen = 0;
+        std::string err;
+        std::vector<std::string> want = {"cartesianX", "cartesianY", "cartesianZ"};
+        CHECK(held.back()->readPoints(0, want, [&](const e57::PointBlock& b) {
+                  seen += b.count; return true;
+              }, err), "and its points still decode");
+        CHECK(seen == 64, "all of them");
+    }
+}
+
 int main() {
+    testReadersDoNotHoldDescriptors();
     std::printf("E57 Coverage Checker — reader tests\n\n");
     testCrcAndBits();
     testXml();

@@ -500,14 +500,24 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     // --- how many scans are there, so the per-image budget can be set ------
     // Opening every file twice is cheap next to decoding: the first pass reads
     // headers only.
-    std::vector<std::unique_ptr<e57::Reader>> readers;
+    // Opened one at a time and CLOSED again, keeping only the count.
+    //
+    // This used to hold an open reader for every path at once, which on a
+    // thousand-scan job is a thousand open descriptors and a thousand live
+    // mappings — for a number. macOS ships a soft RLIMIT_NOFILE of 256, so the
+    // open failed somewhere past the two hundred and fiftieth file with "cannot
+    // open <path>", naming a perfectly good scan. Which one varied, because the
+    // image workers are opening files of their own at the same time.
+    std::vector<uint32_t> scansInFile(paths.size(), 0);
     uint64_t scanCount = 0;
     for (size_t i = 0; i < paths.size(); ++i) {
-        auto r = std::make_unique<e57::Reader>();
-        std::string e;
-        if (!r->open(paths[i], e)) { err = paths[i] + ": " + e; return false; }
-        scanCount += r->scanCount();
-        readers.push_back(std::move(r));
+        {
+            e57::Reader r;
+            std::string e;
+            if (!r.open(paths[i], e)) { err = paths[i] + ": " + e; return false; }
+            scansInFile[i] = uint32_t(r.scanCount());
+            scanCount += r.scanCount();
+        }   // closed here, before the next is opened
         if (!tick("opening files", i + 1, paths.size())) {
             out.cancelled = true;
             err = "cancelled";
@@ -552,8 +562,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     struct Job { size_t path; size_t scan; };
     std::vector<Job> jobs;
     jobs.reserve(size_t(scanCount));
-    for (size_t f = 0; f < readers.size(); ++f)
-        for (size_t i = 0; i < readers[f]->scanCount(); ++i) jobs.push_back({f, i});
+    for (size_t f = 0; f < scansInFile.size(); ++f)
+        for (uint32_t i = 0; i < scansInFile[f]; ++i) jobs.push_back({f, i});
 
     std::vector<std::unique_ptr<rimg::RangeImage>> built(jobs.size());
     {

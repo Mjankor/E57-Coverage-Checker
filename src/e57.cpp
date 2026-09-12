@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+#include <cerrno>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
@@ -59,7 +60,16 @@ void PagedFile::close() {
 bool PagedFile::open(const std::string& path, std::string& err) {
     close();
     fd_ = ::open(path.c_str(), O_RDONLY);
-    if (fd_ < 0) { err = "cannot open " + path; return false; }
+    if (fd_ < 0) {
+        // With the reason. A corpus of a thousand scans meets the process's
+        // descriptor limit long before it meets anything else, and "cannot open"
+        // on its own names an innocent file and says nothing about why.
+        err = "cannot open " + path + ": " + std::strerror(errno);
+        if (errno == EMFILE || errno == ENFILE)
+            err += " (the process is out of file descriptors — raise the limit with "
+                   "ulimit -n, or open fewer scans at once)";
+        return false;
+    }
 
     struct stat st{};
     if (::fstat(fd_, &st) != 0) { err = "fstat failed on " + path; close(); return false; }
@@ -69,6 +79,15 @@ bool PagedFile::open(const std::string& path, std::string& err) {
     void* m = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
     if (m == MAP_FAILED) { err = "mmap failed on " + path; close(); return false; }
     base_ = static_cast<const uint8_t*>(m);
+
+    // The descriptor has done its job. A mapping keeps the file alive on its own
+    // — POSIX is explicit that closing the descriptor does not unmap it — so
+    // holding it open until the reader is destroyed buys nothing and costs one of
+    // a few hundred. That is the difference between a corpus of a thousand scans
+    // working and failing on whichever file happened to be the two hundred and
+    // fifty-seventh.
+    ::close(fd_);
+    fd_ = -1;
     return true;
 }
 
