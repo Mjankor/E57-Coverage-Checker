@@ -384,6 +384,11 @@ struct Diagnostics {
     // No-returns demoted to OutsideFov, and why.
     uint64_t isolatedNoReturns = 0;   // by the optional neighbourhood filter
     uint64_t blindConeCells    = 0;   // the instrument's own blind cone
+    // Of those, the cells OUTSIDE the empty band: the mount's legs, the pole it is
+    // clamped to, anything else within reach of it that blocks its own azimuths
+    // further out than the band. Each one was clearing a pencil of space to the
+    // rated range along a leg's shadow — see markBlindCone.
+    uint64_t blindConeSpurCells = 0;
     // Cells in zones found to be inside the instrument's minimum range, and how
     // many such zones there were. Every one of these would otherwise have cleared
     // a pencil of space to the rated range THROUGH the surface that was too close
@@ -676,6 +681,24 @@ void buildPyramid(RangeImage& im);
 // — see ConeVerdict for what that cost.
 ConeVerdict summariseBlindCones(const std::vector<RangeImage*>& images,
                                 const Options& opt);
+
+// One zone of no-returns that survived the build and is therefore believed: every
+// cell of it clears a pencil of space to the rated range. See describeNoReturnZones.
+struct NoReturnZone {
+    uint64_t cells = 0;            // how much space it clears
+    uint64_t borderCells = 0;      // measured cells around it, counted once per contact
+    double   borderMedianM = -1.0; // what the instrument measured all around it
+    double   borderMinM    = -1.0; // and the nearest of those
+    double   fractionWithinBar = 0.0;   // share of the border inside the too-close bar
+    bool     touchesUnsampled = false;  // adjacent to the blind cone, so at the mount
+    uint32_t rowLo = 0, rowHi = 0;
+    double   elLoDeg = 0.0, elHiDeg = 0.0;
+};
+
+// The believed zones, largest first, with the evidence about each. A diagnostic for
+// checking the minimum-range rule against a real scan rather than a fixture.
+std::vector<NoReturnZone> describeNoReturnZones(const RangeImage& im, const Options& opt,
+                                                size_t maxZones);
 
 // Exposed for testing.
 void filterIsolatedNoReturns(RangeImage& im, const Options& opt);

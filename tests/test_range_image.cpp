@@ -357,6 +357,117 @@ static void testPyramid() {
     CHECK(tooTight < checked, "the answers really are aggregated, not per-cell");
 }
 
+// The blind cone is not a block of rows. The legs are part of it.
+//
+// This is the second half of the minimum-range defect, and the half a border test
+// cannot reach. A tripod leg, the pole the head is clamped to, a handrail at the
+// instrument's elbow: each is inside the minimum range, returns nothing, and blocks
+// its own azimuths a good deal further from the pole than the mount does. With only
+// the whole-empty-row band marked, every one of those cells was believed and cleared
+// a pencil of space to the rated range along the leg's own shadow — three fans per
+// setup, radiating out through the walls and the roof.
+//
+// Why the border test cannot find them: it asks what the instrument measured around
+// the zone. For a wall the instrument is nearly touching, that is the same wall just
+// past the minimum range, and the zone is ringed by 0.5 m returns. For a leg it is
+// the FLOOR, a metre and a half away. Nothing about the border says "too close", and
+// this test asserts that directly — the minimum-range filter is run on the same
+// raster and finds nothing.
+//
+// What does say it is that the zone is attached to the mount. So the marking grows
+// from the band through connected no-returns, bounded by the cone's own angular size
+// about the pole the band runs into.
+static void testTheBlindConeIncludesWhatIsBoltedToIt() {
+    std::printf("range image: the blind cone includes the legs bolted to it\n");
+
+    // A sweep from -89 to +80 degrees over 120 rows, elevation rising with row.
+    //
+    //   rows 0-30      the mount: every azimuth blocked, so the band. Row 31 is the
+    //                  first with returns, at -45 deg, which is 45 deg from nadir —
+    //                  the instrument's cone, so the angle identifies this end.
+    //   rows 31-50     three legs, four columns wide, at three azimuths.
+    //   rows 110-119   sky, bordered by the scene at 20 m.
+    //   elsewhere      the floor and the room, 1.5 to 3 m.
+    const double el0 = -89.0, dEl = (80.0 + 89.0) / 119.0;
+    rimg::RangeImage im;
+    im.rows = 120; im.cols = 240;
+    im.cells.assign(im.cellCount(), rimg::Cell{});
+    const uint32_t legAt[3] = {30, 110, 190};
+    auto isLeg = [&](uint32_t r, uint32_t c) {
+        if (r < 31 || r > 50) return false;
+        for (uint32_t k = 0; k < 3; ++k)
+            if (c >= legAt[k] && c < legAt[k] + 4) return true;
+        return false;
+    };
+    for (uint32_t r = 0; r < im.rows; ++r) {
+        for (uint32_t c = 0; c < im.cols; ++c) {
+            rimg::Cell& cell = im.cells[size_t(r) * im.cols + c];
+            if (r <= 30 || r >= 110 || isLeg(r, c)) {
+                cell = rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+            } else if (r >= 105) {
+                cell = rimg::Cell{2000, uint8_t(rimg::Status::Hit)};   // the scene, 20 m
+            } else {
+                cell = rimg::Cell{uint16_t(150 + (c % 4) * 50), uint8_t(rimg::Status::Hit)};
+            }
+        }
+    }
+    im.diag.nearestReturn  = 1.5;
+    im.diag.furthestReturn = 20.0;
+    im.diag.noReturns = 0;
+    for (const rimg::Cell& c : im.cells)
+        if (rimg::Status(c.status) == rimg::Status::NoReturn) ++im.diag.noReturns;
+    im.map = rimg::uniformMapping(im.rows, im.cols, el0 * kPi / 180.0, dEl * kPi / 180.0,
+                                  0.0, kTau / 240.0);
+    im.map.valid = true;
+
+    // First: the minimum-range filter, on its own, finds nothing here. The legs are
+    // bounded by the floor, and the floor is at 1.5 m.
+    {
+        rimg::RangeImage alone = im;
+        rimg::Options noCone;
+        noCone.blindCone = rimg::BlindCone::None;      // so only the filter runs
+        rimg::filterNoReturnsTooClose(alone, noCone);
+        CHECK(alone.diag.tooCloseZones == 0,
+              "the border test cannot see a leg: what bounds it is the floor");
+    }
+
+    rimg::Options opt;
+    rimg::markBlindCone(im, opt);
+
+    CHECK(im.diag.blindConeRows == 31, "the band at the mount is found");
+    CHECK(im.diag.blindConeAtFirstRow, "at the nadir end of the sweep");
+    CHECK(im.diag.blindConeSpurCells > 0, "and it reaches past the band");
+
+    // The legs, as far as the cone's own angular size reaches. Sixty degrees from
+    // nadir on the defaults, so up to elevation -30: row (−30 − −89) / 1.42 = 41.5,
+    // which is row 41.
+    const uint32_t lastInside = uint32_t((-30.0 - el0) / dEl);
+    CHECK(lastInside >= 40 && lastInside <= 42, "the angular bound lands where expected");
+    CHECK(im.statusAt(35, legAt[0]) == rimg::Status::OutsideFov,
+          "a leg cell inside the bound clears nothing now");
+    CHECK(im.statusAt(35, legAt[1] + 3) == rimg::Status::OutsideFov, "on every leg");
+    CHECK(im.statusAt(41, legAt[2]) == rimg::Status::OutsideFov, "up to the bound");
+    CHECK(im.statusAt(50, legAt[0]) == rimg::Status::NoReturn,
+          "and past it the fill stops: sixty degrees from the pole is not the mount");
+
+    // The floor between the legs is untouched — it returned, and the fill only
+    // crosses no-returns.
+    CHECK(im.statusAt(35, 60) == rimg::Status::Hit, "the floor between the legs still measured");
+
+    // And the sky at the other pole is a hundred and twenty degrees away from the
+    // bound, so nothing about this can reach it. That band is what clears the volume
+    // above the site.
+    CHECK(im.statusAt(119, 0) == rimg::Status::NoReturn, "the sky still clears");
+    CHECK(im.statusAt(110, 120) == rimg::Status::NoReturn, "all of it");
+
+    // The accounting: every marked cell moved from no-returns to unsampled, once.
+    uint64_t unsampled = 0;
+    for (const rimg::Cell& c : im.cells)
+        if (rimg::Status(c.status) == rimg::Status::OutsideFov) ++unsampled;
+    CHECK(unsampled == im.diag.blindConeCells, "the count matches what was marked");
+    CHECK(im.diag.outsideFov == im.diag.blindConeCells, "and the diagnostic agrees");
+}
+
 // A surface inside the instrument's MINIMUM range returns nothing, and that
 // no-return means the opposite of every other one.
 //
@@ -1751,6 +1862,7 @@ int main() {
     testGridPath();
     testPyramid();
     testNoReturnsInsideTheMinimumRange();
+    testTheBlindConeIncludesWhatIsBoltedToIt();
     testSkyVersusDroppedReturns();
     testBlindConeFoundGeometrically();
     testDoubleCoveredMirrorIsRefused();

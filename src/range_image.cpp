@@ -654,6 +654,100 @@ void filterIsolatedNoReturns(RangeImage& im, const Options& opt) {
     }
 }
 
+// Every zone of no-returns that is still believed, largest first, with the numbers
+// that decide whether it should be.
+//
+// A diagnostic, and it exists because the first attempt at the minimum-range test
+// was built on an assumption about the shape of these zones, and the assumption was
+// wrong for the case that matters. Guessing again is not the way to find out: this
+// prints what actually borders each zone, so the rule can be checked against a real
+// scan instead of against a fixture built to agree with it.
+//
+// Read it as: `cells` is how much space this zone clears, since every one of them
+// clears a pencil to the rated range. `border` is what the instrument measured all
+// around it. A zone bordered at half a metre is a surface inside the minimum range,
+// too close to measure. A zone bordered at ten metres is sky, or a window, or a dark
+// surface. A zone bordered at a metre and a half that touches the unsampled cone is
+// the instrument's own mount and legs — and that is the one a border test cannot
+// see, because what bounds it is the floor, not the thing that is too close.
+std::vector<NoReturnZone> describeNoReturnZones(const RangeImage& im, const Options& opt,
+                                                size_t maxZones) {
+    std::vector<NoReturnZone> out;
+    if (im.rows == 0 || im.cols == 0 || maxZones == 0) return out;
+    const double bar = opt.minRange > 0 ? opt.minRange * opt.tooCloseFactor : 0.0;
+    const uint32_t barCm = uint32_t(std::min(std::max(bar, 0.0) * 100.0, 65535.0));
+
+    const int64_t cols = int64_t(im.cols), rows = int64_t(im.rows);
+    const size_t n = im.cells.size();
+    std::vector<uint64_t> seen((n + 63) / 64, 0);
+    auto mark  = [&](size_t i) { seen[i >> 6] |= 1ull << (i & 63); };
+    auto taken = [&](size_t i) { return (seen[i >> 6] >> (i & 63)) & 1ull; };
+    auto neighbours = [&](size_t i, size_t o[4]) -> int {
+        const int64_t r = int64_t(i) / cols, c = int64_t(i) % cols;
+        int k = 0;
+        if (r > 0)        o[k++] = size_t((r - 1) * cols + c);
+        if (r < rows - 1) o[k++] = size_t((r + 1) * cols + c);
+        o[k++] = size_t(r * cols + (c == 0 ? cols - 1 : c - 1));
+        o[k++] = size_t(r * cols + (c == cols - 1 ? 0 : c + 1));
+        return k;
+    };
+
+    std::vector<size_t>   stack;
+    std::vector<uint16_t> border;
+    const double kDeg = 57.29577951308232;
+
+    for (size_t start = 0; start < n; ++start) {
+        if (taken(start) || Status(im.cells[start].status) != Status::NoReturn) continue;
+        NoReturnZone z;
+        z.rowLo = uint32_t(im.rows - 1);
+        border.clear();
+        stack.assign(1, start);
+        mark(start);
+        uint64_t within = 0;
+        while (!stack.empty()) {
+            const size_t i = stack.back();
+            stack.pop_back();
+            ++z.cells;
+            const uint32_t r = uint32_t(int64_t(i) / cols);
+            z.rowLo = std::min(z.rowLo, r);
+            z.rowHi = std::max(z.rowHi, r);
+            size_t nb[4];
+            const int k = neighbours(i, nb);
+            for (int a = 0; a < k; ++a) {
+                const size_t j = nb[a];
+                const Status st = Status(im.cells[j].status);
+                if (st == Status::Hit) {
+                    border.push_back(im.cells[j].rangeCm);
+                    if (im.cells[j].rangeCm <= barCm) ++within;
+                    continue;
+                }
+                if (st == Status::OutsideFov) { z.touchesUnsampled = true; continue; }
+                if (taken(j)) continue;
+                mark(j);
+                stack.push_back(j);
+            }
+        }
+        z.borderCells = border.size();
+        if (!border.empty()) {
+            z.fractionWithinBar = double(within) / double(border.size());
+            z.borderMinM = double(*std::min_element(border.begin(), border.end())) * 0.01;
+            std::nth_element(border.begin(), border.begin() + ptrdiff_t(border.size() / 2),
+                             border.end());
+            z.borderMedianM = double(border[border.size() / 2]) * 0.01;
+        }
+        if (im.map.elByRow.size() == im.rows) {
+            z.elLoDeg = im.map.elByRow[z.rowLo] * kDeg;
+            z.elHiDeg = im.map.elByRow[z.rowHi] * kDeg;
+        }
+        out.push_back(z);
+    }
+
+    std::sort(out.begin(), out.end(),
+              [](const NoReturnZone& a, const NoReturnZone& b) { return a.cells > b.cells; });
+    if (out.size() > maxZones) out.resize(maxZones);
+    return out;
+}
+
 // Demotes zones of no-returns that are really the instrument's MINIMUM range.
 //
 // A ray that came back with nothing usually means nothing was there along it, and
@@ -1122,16 +1216,83 @@ void markBlindCone(RangeImage& im, const Options& opt) {
 
     // One marking path for one band or two, so that unmarking — which restores
     // both — can never be asked to undo something that was marked differently.
-    uint64_t marked = 0;
+    //
+    // The band is the SEED, not the whole answer. What the instrument cannot see
+    // is not a neat block of rows: the mount blocks every azimuth close to the
+    // pole, which is the band, and then the legs, the pole it is clamped to and
+    // whatever is hanging off it block their own azimuths for a good deal
+    // further out. Those cells hold no returns either, and with only the band
+    // marked they were left believed — so each leg cleared a pencil of space to
+    // the rated range along its own shadow. Seen from above, three fans per
+    // setup, radiating out through the walls and the roof.
+    //
+    // A border test cannot find them. The minimum-range rule asks what the
+    // instrument measured around a zone, and for a surface it is nearly touching
+    // — a wall — the answer is that same surface at just past the minimum range.
+    // For a leg it is not: the leg is a few centimetres wide and the zone around
+    // it is bounded by the FLOOR, a metre and a half away. Nothing about the
+    // border says "too close".
+    //
+    // What says it is that the zone is attached to the mount. So the marking
+    // grows from the band through connected no-returns — and is bounded, because
+    // "connected" on its own would walk out of a doorway and into the sky. The
+    // bound is the cone's own angular size: a cell can only join if it lies
+    // within blindConeFromNadirDeg + blindConeAngleTolDeg of the pole the band
+    // runs into. Sixty degrees of nadir, on the defaults. A leg reaches into
+    // that; the sky at the other pole is a hundred and twenty degrees away from
+    // it, and a hole in the floor beyond the mount is not attached to the mount.
+    //
+    // Elevations are measured, so the pole is whichever end of the sweep this
+    // band occupies and no notion of world up is involved.
+    uint64_t marked = 0, spur = 0;
+    const double limitDeg = opt.blindConeFromNadirDeg + opt.blindConeAngleTolDeg;
+    const bool   haveTable = (im.map.elByRow.size() == im.rows);
+    const int64_t cols64 = int64_t(im.cols), rows64 = int64_t(im.rows);
+    std::vector<size_t> stack;
+
+    auto claim = [&](size_t i) {
+        Cell& cell = im.cells[i];
+        cell.status  = uint8_t(Status::OutsideFov);
+        cell.rangeCm = 0;
+        ++marked;
+    };
+    // How far a row sits from the pole its band runs into, in degrees.
+    auto fromPole = [&](uint32_t r, bool fromFirst) {
+        const double el = im.map.elByRow[r] * kRad2Deg;
+        const bool lowEnd = (fromFirst == firstIsLow);
+        return lowEnd ? (90.0 + el) : (90.0 - el);
+    };
+
     auto markBand = [&](uint32_t bandRows, bool fromFirst) {
+        stack.clear();
         for (uint32_t i = 0; i < bandRows; ++i) {
             const uint32_t r = fromFirst ? i : (im.rows - 1 - i);
             Cell* row = &im.cells[size_t(r) * im.cols];
             for (uint32_t c = 0; c < im.cols; ++c) {
                 if (Status(row[c].status) != Status::NoReturn) continue;
-                row[c].status  = uint8_t(Status::OutsideFov);
-                row[c].rangeCm = 0;
-                ++marked;
+                const size_t i2 = size_t(r) * im.cols + c;
+                claim(i2);
+                stack.push_back(i2);
+            }
+        }
+        if (!haveTable) return;          // no measured elevations: the band alone
+        while (!stack.empty()) {
+            const size_t i = stack.back();
+            stack.pop_back();
+            const int64_t r = int64_t(i) / cols64, c = int64_t(i) % cols64;
+            size_t nb[4];
+            int k = 0;
+            if (r > 0)          nb[k++] = size_t((r - 1) * cols64 + c);
+            if (r < rows64 - 1) nb[k++] = size_t((r + 1) * cols64 + c);
+            nb[k++] = size_t(r * cols64 + (c == 0 ? cols64 - 1 : c - 1));
+            nb[k++] = size_t(r * cols64 + (c == cols64 - 1 ? 0 : c + 1));
+            for (int a = 0; a < k; ++a) {
+                const size_t j = nb[a];
+                if (Status(im.cells[j].status) != Status::NoReturn) continue;
+                if (fromPole(uint32_t(int64_t(j) / cols64), fromFirst) > limitDeg) continue;
+                claim(j);
+                ++spur;
+                stack.push_back(j);
             }
         }
     };
@@ -1139,6 +1300,7 @@ void markBlindCone(RangeImage& im, const Options& opt) {
     if (bandOther) markBand(bandOther, !atFirst);
 
     im.diag.blindConeCells      = marked;
+    im.diag.blindConeSpurCells  = spur;
     im.diag.blindConeRows       = band;
     im.diag.blindConeRowsLast   = bandOther;
     im.diag.blindConeAtFirstRow = atFirst;

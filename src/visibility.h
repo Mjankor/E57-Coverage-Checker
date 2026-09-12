@@ -289,6 +289,9 @@ struct Result {
     // judged on is kept as well, in metres, so the figure the decision turned on
     // is visible rather than inferred.
     uint64_t     setupsTooClose = 0;
+    // Blind-cone cells outside the band at the pole: the mount's legs and the pole
+    // it is clamped to — see rimg::Diagnostics::blindConeSpurCells.
+    uint64_t     coneSpurCells = 0;
     uint64_t     tooCloseCells  = 0;
     double       tooCloseNearest = -1.0;
     // Setups with an unsampled band at an end that was left BELIEVED — treated as

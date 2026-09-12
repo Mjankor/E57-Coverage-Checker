@@ -266,6 +266,28 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                      uint64_t(s.rowMax - s.rowMin + 1) > img.rows
                                          ? " (the raster was binned down)" : ""));
                     }
+                    // What is still being believed, which is the question the
+                    // minimum-range rule is trying to answer. Largest first,
+                    // because the largest zones are the ones clearing the space.
+                    {
+                        const std::vector<rimg::NoReturnZone> zones =
+                            rimg::describeNoReturnZones(img, ro, 6);
+                        if (!zones.empty()) {
+                            o.add("      zones     : no-return zones still believed, largest "
+                                        "first — each cell clears to %.0f m\n", ro.maxRange);
+                            for (const rimg::NoReturnZone& z : zones) {
+                                o.add("                  %10llu cells  el %+.1f..%+.1f deg  "
+                                            "border %llu cells, min %.2f m, median %.2f m, "
+                                            "%.0f%% within %.2f m%s\n",
+                                            (unsigned long long)z.cells, z.elLoDeg, z.elHiDeg,
+                                            (unsigned long long)z.borderCells, z.borderMinM,
+                                            z.borderMedianM, 100.0 * z.fractionWithinBar,
+                                            ro.minRange * ro.tooCloseFactor,
+                                            z.touchesUnsampled
+                                                ? "  TOUCHES THE UNSAMPLED CONE" : "");
+                            }
+                        }
+                    }
                     if (img.diag.tooCloseZones) {
                         o.add("      too close : %llu empty cells in %u zone(s) are the "
                                     "instrument's own\n                  minimum range: the "
@@ -401,6 +423,15 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                     (unsigned long long)img.diag.blindConeCells, here);
                         if (there >= 0) o.add("%.2f m at the other end\n", there);
                         else            o.add("no unsampled band at the other end\n");
+                        // The cells outside the band: the mount's legs, the pole,
+                        // whatever else is within reach of the head. Each one was
+                        // clearing a pencil along a leg's shadow.
+                        if (img.diag.blindConeSpurCells)
+                            o.add("                  %llu of those cells are outside the "
+                                        "band — the legs and the pole,\n                  "
+                                        "which block their own azimuths further out than "
+                                        "the mount does\n",
+                                        (unsigned long long)img.diag.blindConeSpurCells);
                         if (img.diag.hasConeAxis) {
                             o.add("      mounting  : cone axis (%.3f, %.3f, %.3f) — %s\n",
                                         img.diag.coneAxisWorld[0], img.diag.coneAxisWorld[1],
