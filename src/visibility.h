@@ -186,7 +186,15 @@ struct Options {
 
     // Upper bound on voxels handed back for drawing. 6 M is 120 MB as
     // StorePoints, which is a fraction of what the point cloud itself costs.
-    uint64_t displayCap = 6ull << 20;
+    // Voxels DRAWN at most. Over this the frontier is sampled by position hash.
+    //
+    // 24 M is about 480 MB of StorePoint, which is nothing on a machine carving a
+    // corpus this size, and it is what the default had to become: a large site at
+    // 5 cm has tens of millions of frontier voxels, and the old 6 M scattered
+    // through a whole building drew as almost nothing — indistinguishable from a
+    // run that found no unobserved space. Result::keptFraction says when it bit,
+    // and both the CLI and the run sheet now report it.
+    uint64_t displayCap = 24ull << 20;
 
     // An accelerator for carveTile — the Metal path installs itself here. Left
     // null the carve runs on the CPU, which is what happens anyway whenever the

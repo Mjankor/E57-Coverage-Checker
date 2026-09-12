@@ -1296,10 +1296,10 @@ const char *kindLabel(check::Kind k) {
     // adding a control by eyeballing a y is how the region popup ended up drawn
     // over the fourth parameter row.
     //
-    //   214 186 158 130   four label/value rows, 28 apart
-    //    99               the region popup, 24 tall, clearing 130 by seven
-    //    74  52  30   8    four tick boxes, 22 apart
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 242)];
+    //   242 214 186 158 130   five label/value rows, 28 apart
+    //    99                    the region popup, 24 tall, clearing 130 by seven
+    //    74  52  30   8         four tick boxes, 22 apart
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 270)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -1309,10 +1309,17 @@ const char *kindLabel(check::Kind k) {
         // — so the label names both rather than making it look like two settings.
         {@"Buffer / margin past the last return (m)",
                                 [NSString stringWithFormat:@"%.1f", _visOptions.domainMargin]},
+        // The cap on voxels DRAWN, not on voxels found. Over it the frontier is
+        // sampled, which is the one setting whose effect looks like a bug: a
+        // large site at 5 cm has tens of millions of frontier voxels and six
+        // million of them scattered through a building reads as nothing at all.
+        {@"Voxels drawn at most (millions)",
+                                [NSString stringWithFormat:@"%.0f",
+                                 double(_visOptions.displayCap) / 1048576.0]},
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
-    for (int i = 0; i < 4; ++i) {
-        const CGFloat y = 214 - i * 28;
+    for (int i = 0; i < 5; ++i) {
+        const CGFloat y = 242 - i * 28;
         [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 220, 20)]];
         NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(230, y - 3, 90, 22)];
         [acc addSubview:f];
@@ -1396,6 +1403,7 @@ const char *kindLabel(check::Kind k) {
     const double range = fields[1].doubleValue;
     const long   tile   = fields[2].integerValue;
     const double margin = fields[3].doubleValue;
+    const double drawnM = fields[4].doubleValue;
     if (!(voxel > 0.0) || !(range > 0.0) || tile <= 0 || tile > 4096 || margin < 0.0) {
         _status.stringValue =
             @"Voxel size and range must be positive, tile size 1–4096, margin not negative.";
@@ -1405,6 +1413,8 @@ const char *kindLabel(check::Kind k) {
     opt.maxRange     = range;
     opt.tileVoxels   = uint32_t(tile);
     opt.domainMargin = margin;
+    if (drawnM > 0.0)
+        opt.displayCap = uint64_t(std::min(drawnM, 512.0) * 1048576.0);
     {
         const vis::DomainMode order[3] = {vis::DomainMode::Shrinkwrap,
                                           vis::DomainMode::MeasuredExtent,
@@ -1548,6 +1558,19 @@ const char *kindLabel(check::Kind k) {
             warn = [warn stringByAppendingFormat:
                     @"   ·   interior only: %llu wrap cells outside the shell dropped",
                     (unsigned long long)result->wrapGrid.droppedOutside];
+        // Decimation, said out loud. The CLI has always reported it and the app
+        // never did, so a run whose frontier is larger than the display cap drew
+        // one voxel in however many and looked like a run that found nothing —
+        // which at 5 cm over a large building is the normal case, not an edge one.
+        if (result->keptFraction < 0.999 && result->qualified)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   ⚠︎ DRAWING 1 VOXEL IN %.0f — %llu of %llu unobserved voxels, "
+                     "sampled to fit the display cap of %.1f M. Raise it, or use a coarser "
+                     "voxel; the volume and percentage above are the whole set and are right",
+                    result->keptFraction > 0 ? 1.0 / result->keptFraction : 0.0,
+                    (unsigned long long)result->voxels.size(),
+                    (unsigned long long)result->qualified,
+                    double(opt.displayCap) / 1048576.0];
         if (intersectWrap && voxelsBeforeWrapFilter != voxelsDrawn)
             warn = [warn stringByAppendingFormat:
                     @"   ·   drawing %llu of %llu unobserved voxels — those inside the "
