@@ -535,6 +535,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     ro.noReturnRadius   = opt.skyRadius;
     ro.noReturnFraction = opt.skyFraction;
     ro.blindCone        = opt.blindCone;
+    ro.minRange         = opt.minRange;
 
     // --- range images -----------------------------------------------------
     std::vector<std::unique_ptr<rimg::RangeImage>> images;
@@ -661,6 +662,14 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     for (auto& img : images) {
         isolated    += img->diag.isolatedNoReturns;
         believedSky += img->diag.noReturns;
+        if (img->diag.tooCloseZones) {
+            ++out.setupsTooClose;
+            out.tooCloseCells += img->diag.tooCloseNoReturns;
+            if (out.tooCloseNearest < 0 ||
+                (img->diag.tooCloseBorderRange >= 0 &&
+                 img->diag.tooCloseBorderRange < out.tooCloseNearest))
+                out.tooCloseNearest = img->diag.tooCloseBorderRange;
+        }
         if (img->diag.blindConeRows) {
             ++out.setupsWithBlindCone;
             if (img->diag.hasConeAxis && img->diag.coneAxisWorld[2] > 0.5)

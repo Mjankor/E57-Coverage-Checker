@@ -58,6 +58,7 @@ int info(const std::vector<std::string>& paths, bool verifyCrc, double maxRange,
     ro.blindCone        = co.blindCone;
     ro.noReturnRadius   = co.skyRadius;
     ro.noReturnFraction = co.skyFraction;
+    ro.minRange         = co.minRange;
     std::string text;
     const int failures = report::scanReport(paths, ro, text);
     std::fputs(text.c_str(), stdout);
@@ -122,6 +123,16 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
         std::printf("            %llu with an identified blind cone, %llu of those inverted\n",
                     (unsigned long long)res.setupsWithBlindCone,
                     (unsigned long long)res.setupsInverted);
+    // Cells that came back empty because the surface was too close to measure, not
+    // because nothing was there. Stated because every one of them would otherwise
+    // have cleared space through that surface, and because a corpus with a lot of
+    // them is a corpus of setups parked against walls.
+    if (res.setupsTooClose)
+        std::printf("            %llu parked inside the %.2f m minimum range of something:\n"
+                    "            %llu cells demoted, nearest border %.2f m — each would have\n"
+                    "            cleared to %.0f m through the surface in the way\n",
+                    (unsigned long long)res.setupsTooClose, opt.minRange,
+                    (unsigned long long)res.tooCloseCells, res.tooCloseNearest, opt.maxRange);
     // Which empty cells clear space and which establish nothing is the single
     // decision that most changes the answer, so it is stated outright rather than
     // being inferred from a count.
@@ -225,6 +236,7 @@ int probePoint(const std::vector<std::string>& paths, const vis::Options& opt,
     ro.blindCone        = opt.blindCone;
     ro.noReturnRadius   = opt.skyRadius;
     ro.noReturnFraction = opt.skyFraction;
+    ro.minRange         = opt.minRange;
 
     for (const std::string& path : paths) {
         auto r = std::make_unique<e57::Reader>();
@@ -388,6 +400,14 @@ void usage() {
         "          outside without crossing observed space. Off by default: it\n"
         "          also excludes a building interior whose walls were only ever\n"
         "          seen from one side, which is usually the space you wanted.\n"
+        "  --min-range <m>\n"
+        "          The instrument's rated minimum range. Default 0.45. A surface\n"
+        "          closer than this returns nothing, and believing that empty\n"
+        "          cell clears a pencil of space straight through the surface:\n"
+        "          a setup parked half a metre from a wall otherwise carves a\n"
+        "          fan out through it to the rated range. Zones of empty cells\n"
+        "          whose bordering returns sit at nearly this range are read as\n"
+        "          too close and establish nothing. 0 switches the test off.\n"
         "  --blind-cone auto|none|first|last|both\n"
         "          (carve) Which end of each raster holds the instrument's own\n"
         "          blind cone, where no ray was fired. Default auto, and every\n"
@@ -491,6 +511,11 @@ int main(int argc, char** argv) {
             else { std::printf("--blind-cone must be auto, none, first, last or both\n"); return 2; }
             continue;
         }
+        if (std::strcmp(argv[i], "--min-range") == 0 && i + 1 < argc) {
+            co.minRange = std::strtod(argv[++i], nullptr);
+            if (co.minRange < 0.0) { std::printf("--min-range cannot be negative\n"); return 2; }
+            continue;
+        }
         if (std::strcmp(argv[i], "--sky-radius") == 0 && i + 1 < argc) {
             co.skyRadius = uint32_t(std::strtoul(argv[++i], nullptr, 10));
             continue;
@@ -578,6 +603,7 @@ int main(int argc, char** argv) {
         ro.blindCone        = co.blindCone;
         ro.noReturnRadius   = co.skyRadius;
         ro.noReturnFraction = co.skyFraction;
+        ro.minRange         = co.minRange;
         std::string text;
         const int failures = report::selfTest(paths, ro, text);
         std::fputs(text.c_str(), stdout);

@@ -231,6 +231,7 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                 ro.blindCone        = opt.blindCone;
                 ro.noReturnRadius   = opt.noReturnRadius;
                 ro.noReturnFraction = opt.noReturnFraction;
+                ro.minRange         = opt.minRange;
                 std::string rerr;
                 if (rimg::build(r, i, ro, img, rerr)) {
                     o.add("      grid      : %u x %u = %.2f M cells, %.1f%% filled\n",
@@ -264,6 +265,18 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                   : (s.hasIndexBounds &&
                                      uint64_t(s.rowMax - s.rowMin + 1) > img.rows
                                          ? " (the raster was binned down)" : ""));
+                    }
+                    if (img.diag.tooCloseZones) {
+                        o.add("      too close : %llu empty cells in %u zone(s) are the "
+                                    "instrument's own\n                  minimum range: the "
+                                    "returns bordering them are at %.2f m,\n                  "
+                                    "against a %.2f m minimum. The surface was there and was "
+                                    "too\n                  close to measure, so those cells "
+                                    "clear nothing — believed,\n                  each would "
+                                    "have cleared to %.0f m straight through it.\n",
+                                    (unsigned long long)img.diag.tooCloseNoReturns,
+                                    img.diag.tooCloseZones, img.diag.tooCloseBorderRange,
+                                    ro.minRange, ro.maxRange);
                     }
                     if (img.diag.isolatedNoReturns) {
                         const double pct = 100.0 * double(img.diag.isolatedNoReturns) /
@@ -1134,6 +1147,7 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
     ro.blindCone        = opt.blindCone;
     ro.noReturnRadius   = opt.noReturnRadius;
     ro.noReturnFraction = opt.noReturnFraction;
+    ro.minRange         = opt.minRange;
 
     std::vector<std::unique_ptr<e57::Reader>> readers;
     std::vector<std::unique_ptr<rimg::RangeImage>> images;

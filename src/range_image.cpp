@@ -654,6 +654,155 @@ void filterIsolatedNoReturns(RangeImage& im, const Options& opt) {
     }
 }
 
+// Demotes zones of no-returns that are really the instrument's MINIMUM range.
+//
+// A ray that came back with nothing usually means nothing was there along it, and
+// the carve clears it. Inside the instrument's minimum range it means the
+// opposite: a surface was there and it was too close to measure. A tripod parked
+// half a metre from a wall, a scan taken on a stair landing with the handrail at
+// the instrument's elbow, a column the setup was tucked behind — each puts a
+// large solid angle of the raster inside the minimum range, and every cell of it
+// comes back empty.
+//
+// Believed, each of those cells clears a pencil of space to the rated range
+// straight THROUGH the surface that was too close to see. A wall at 0.5 m and a
+// 45 m rated range clears ninety times the distance to the thing in the way. That
+// is what puts fans of cleared space radiating out of the setups of a survey
+// conducted entirely indoors, and what leaves its roof already cleared.
+//
+// Nothing local distinguishes those cells: an empty cell looks the same whether
+// the surface it failed to measure was at 0.3 m or at 300 m. What distinguishes
+// them is the company the zone keeps. A zone of unmeasurably-close surface is
+// bounded by that same surface, at the point where it crosses out of the minimum
+// range — so the returns bordering the zone are all at very nearly the minimum
+// range itself, where the returns bordering a band of sky are metres or tens of
+// metres off. So: take the returns bordering each connected zone of no-returns,
+// and if most of them are inside Options::tooCloseFactor of the minimum range,
+// the zone is the minimum range and it establishes nothing.
+//
+// Per ZONE, and that is the whole reason this needs connectivity. The border test
+// only has an answer near the border, and the cells deep inside the zone — the
+// ones that clear the longest pencils, straight at whatever the instrument was
+// standing against — have no returns anywhere near them. The verdict has to reach
+// them from the edge.
+//
+// The median rather than the minimum of the bordering returns, so the test is a
+// majority of the zone's border rather than one cell of it. A single close return
+// on the edge of a genuine sky band cannot condemn the band, and a single far one
+// on the edge of a too-close zone cannot rescue it. Each bordering return is
+// counted once per cell of the zone it touches, so a zone mostly against a near
+// wall is decided by that wall rather than by a sliver of distant scene.
+//
+// ON THE CPU deliberately. This is a flood fill with a dynamic stack over an
+// irregular region — the shape CLAUDE.md's GPU-first rule exempts, and the shape
+// a GPU is worst at. The parallel form is iterated dilation, and a zone spanning
+// ninety degrees of a 2500-row raster is hundreds of cells across, so that is
+// hundreds of full-raster passes to do what one walk does.
+//
+// Measured on a 2500 x 5280 raster (13.2 M cells) holding a 1.1 M cell too-close
+// zone beside a 4.4 M cell band of sky: 102 ms, against 51 ms for buildPyramid
+// over the same raster — the accepted per-cell pass standing next to it. Each cell
+// is visited once, plus once more for the cells of a zone that is condemned.
+void filterNoReturnsTooClose(RangeImage& im, const Options& opt) {
+    im.diag.tooCloseNoReturns   = 0;
+    im.diag.tooCloseZones       = 0;
+    im.diag.tooCloseBorderRange = -1.0;
+    if (opt.minRange <= 0.0 || im.rows == 0 || im.cols == 0) return;
+    const double bar = opt.minRange * opt.tooCloseFactor;
+    if (!(bar > 0.0)) return;
+    const uint32_t barCm = uint32_t(std::min(bar * 100.0, 65535.0));
+
+    const int64_t cols = int64_t(im.cols), rows = int64_t(im.rows);
+    const size_t n = im.cells.size();
+    // One bit per cell: a zone is walked once however many times it is reached.
+    std::vector<uint64_t> seen((n + 63) / 64, 0);
+    auto mark  = [&](size_t i) { seen[i >> 6] |= 1ull << (i & 63); };
+    auto taken = [&](size_t i) { return (seen[i >> 6] >> (i & 63)) & 1ull; };
+
+    std::vector<size_t>   stack;
+    std::vector<uint16_t> border;
+    uint64_t demoted = 0;
+    double   nearest = -1.0;
+
+    // The four face neighbours of a cell, with azimuth wrapping and rows clamped:
+    // a zone crossing the seam at azimuth zero is one zone, and the first and last
+    // rows of the raster are real edges.
+    auto neighbours = [&](size_t i, size_t out[4]) -> int {
+        const int64_t r = int64_t(i) / cols, c = int64_t(i) % cols;
+        int k = 0;
+        if (r > 0)        out[k++] = size_t((r - 1) * cols + c);
+        if (r < rows - 1) out[k++] = size_t((r + 1) * cols + c);
+        out[k++] = size_t(r * cols + (c == 0 ? cols - 1 : c - 1));
+        out[k++] = size_t(r * cols + (c == cols - 1 ? 0 : c + 1));
+        return k;
+    };
+
+    for (size_t start = 0; start < n; ++start) {
+        if (taken(start) || Status(im.cells[start].status) != Status::NoReturn) continue;
+
+        // Pass one: walk the zone and collect the ranges bordering it. The zone's
+        // own cells are not kept — a sky band is millions of them — so a zone that
+        // turns out to be too close is walked a second time to mark it. Only the
+        // too-close zones pay for that, and they are the small ones.
+        border.clear();
+        stack.assign(1, start);
+        mark(start);
+        while (!stack.empty()) {
+            const size_t i = stack.back();
+            stack.pop_back();
+            size_t nb[4];
+            const int k = neighbours(i, nb);
+            for (int a = 0; a < k; ++a) {
+                const size_t j = nb[a];
+                const Status st = Status(im.cells[j].status);
+                if (st == Status::Hit) { border.push_back(im.cells[j].rangeCm); continue; }
+                if (st != Status::NoReturn || taken(j)) continue;
+                mark(j);
+                stack.push_back(j);
+            }
+        }
+        // A zone with no returns around it at all — a raster that is empty, or a
+        // band walled off by the blind cone — has nothing to judge it on and is
+        // left as it is.
+        if (border.empty()) continue;
+        std::nth_element(border.begin(), border.begin() + ptrdiff_t(border.size() / 2),
+                         border.end());
+        const uint32_t med = border[border.size() / 2];
+        if (med > barCm) continue;
+
+        // Pass two: the same zone, marked. Setting the status to OutsideFov is what
+        // stops the walk revisiting a cell, so no second bitmap is needed.
+        ++im.diag.tooCloseZones;
+        const double medM = double(med) * 0.01;
+        if (nearest < 0 || medM < nearest) nearest = medM;
+        stack.assign(1, start);
+        im.cells[start].status  = uint8_t(Status::OutsideFov);
+        im.cells[start].rangeCm = 0;
+        ++demoted;
+        while (!stack.empty()) {
+            const size_t i = stack.back();
+            stack.pop_back();
+            size_t nb[4];
+            const int k = neighbours(i, nb);
+            for (int a = 0; a < k; ++a) {
+                const size_t j = nb[a];
+                if (Status(im.cells[j].status) != Status::NoReturn) continue;
+                im.cells[j].status  = uint8_t(Status::OutsideFov);
+                im.cells[j].rangeCm = 0;
+                ++demoted;
+                stack.push_back(j);
+            }
+        }
+    }
+
+    im.diag.tooCloseNoReturns   = demoted;
+    im.diag.tooCloseBorderRange = nearest;
+    if (demoted) {
+        im.diag.noReturns  -= std::min<uint64_t>(demoted, im.diag.noReturns);
+        im.diag.outsideFov += demoted;
+    }
+}
+
 // Finds and marks the instrument's blind cone, from this scan and nothing else.
 //
 // The cone is an unsampled band running off one end of the raster, and which end
@@ -1755,6 +1904,10 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     // Everything else empty is a ray that was fired and came back with nothing,
     // and clears along its path — whatever it passed through on the way.
     markBlindCone(out, opt);
+    // Then the OTHER kind of empty cell that does not mean "nothing was there":
+    // a surface inside the instrument's minimum range. After the cone, so a cone
+    // band is already unsampled and cannot be swallowed into a zone.
+    filterNoReturnsTooClose(out, opt);
     // Off by default; see rimg::Options.
     filterIsolatedNoReturns(out, opt);
 

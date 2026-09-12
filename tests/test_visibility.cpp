@@ -87,7 +87,11 @@ static bool hitRoom(double ox, double oy, double oz,
     return t < 1e299;
 }
 
-static fixture::Scan roomScan(const char* name, double sx, double sy, double sz) {
+// `dropCloserThan` models the instrument's MINIMUM range: a return closer than
+// that is not recorded, which is what a real scanner does and what leaves the cell
+// looking exactly like a ray that came back from nothing.
+static fixture::Scan roomScan(const char* name, double sx, double sy, double sz,
+                              double dropCloserThan = 0.0) {
     fixture::Scan sc;
     sc.name = name;
     sc.hasPose = true;
@@ -112,6 +116,7 @@ static fixture::Scan roomScan(const char* name, double sx, double sy, double sz)
             const double dx = ce * std::cos(az), dy = ce * std::sin(az), dz = std::sin(el);
             double t;
             if (!hitRoom(sx, sy, sz, dx, dy, dz, t)) continue;
+            if (t < dropCloserThan) continue;      // inside the minimum range
             sc.data[0].push_back(t * dx);
             sc.data[1].push_back(t * dy);
             sc.data[2].push_back(t * dz);
@@ -1516,6 +1521,79 @@ static void testANegativeMarginAsksAboutLess() {
     }
 }
 
+// A setup parked inside its own minimum range of a wall does not carve through it.
+//
+// This is the end-to-end guard for what the fans were: a stairwell scan with the
+// handrail at the instrument's elbow, a setup tucked against a lift shaft, a
+// tripod half a metre from a wall. The surface fills a large solid angle of the
+// raster and every cell of it comes back empty, because the instrument cannot
+// measure anything closer than 0.45 m. Believed, each of those cells clears a
+// pencil to the rated range straight through the wall — ninety times the distance
+// to the thing in the way — so the space beyond it comes back OBSERVED.
+//
+// Run twice over the same file, with the test on and off, because the difference
+// is the whole point and a single run cannot show it.
+static void testASetupAgainstAWallDoesNotCarveThroughIt() {
+    std::printf("a setup inside its minimum range of a wall does not carve through it\n");
+
+    // One setup 0.3 m from the wall at x = 5, and a second across the room so the
+    // domain covers the whole interior. The fixture drops every return closer than
+    // 0.45 m, which is what the instrument does.
+    const std::string path = tmpPath("tooclose");
+    CHECK(fixture::write(path, {roomScan("wall",  4.7, 0.0, 1.5, 0.45),
+                                roomScan("far",  -3.0, 2.0, 1.5, 0.45)}, 512),
+          "fixture written");
+
+    vis::Options base;
+    base.voxelSize  = 0.1;
+    base.maxRange   = 20.0;          // so a believed cell reaches well past the wall
+    base.tileVoxels = 32;
+    base.domain     = vis::DomainMode::MeasuredExtent;
+    base.domainMargin = 3.0;         // ask about the space beyond the wall
+    base.solid      = true;          // the volume, not its frontier
+
+    // Voxels in the slab just beyond the wall, at the height of the setup that is
+    // parked against it: the space the pencils would have cleared.
+    auto beyondTheWall = [](const vis::Result& r) {
+        uint64_t n = 0;
+        for (const lod::StorePoint& p : r.voxels) {
+            const double x = double(p.x) + r.origin[0];
+            const double y = double(p.y) + r.origin[1];
+            const double z = double(p.z) + r.origin[2];
+            if (x < 5.3 || x > 7.5) continue;
+            if (std::fabs(y) > 2.0 || z < 0.5 || z > 2.5) continue;
+            ++n;
+        }
+        return n;
+    };
+
+    std::string err;
+    vis::Options off = base;
+    off.minRange = 0.0;                       // the test switched off
+    vis::Result without;
+    CHECK(vis::run({path}, off, nullptr, without, err), err.empty() ? "ran" : err.c_str());
+
+    vis::Result with;
+    CHECK(vis::run({path}, base, nullptr, with, err), err.empty() ? "ran" : err.c_str());
+
+    CHECK(with.setupsTooClose == 1, "one setup is inside its minimum range of something");
+    CHECK(without.setupsTooClose == 0, "and with the test off, none is reported");
+    CHECK(with.tooCloseCells > 0, "cells were demoted");
+    CHECK(with.tooCloseNearest > 0 && with.tooCloseNearest <= 0.60,
+          "on a bordering range at or inside the bar the minimum range sets");
+
+    // The space beyond the wall. Unobserved either way in truth — nothing ever
+    // looked at it — so the run with the test off has to report LESS of it,
+    // because it cleared some away through the wall.
+    const uint64_t unknownWith    = beyondTheWall(with);
+    const uint64_t unknownWithout = beyondTheWall(without);
+    CHECK(unknownWith > 0, "the space beyond the wall is unobserved");
+    CHECK(unknownWithout < unknownWith,
+          "and believing the too-close cells had cleared some of it, through the wall");
+    CHECK(without.stats.visible > with.stats.visible,
+          "which is the same thing counted the other way round: it called more space seen");
+}
+
 // An indoor corpus does not clear a cone through its own roof and floor.
 //
 // This is the end-to-end guard for the defect the cross-section showed: wedges of
@@ -1608,6 +1686,7 @@ int main() {
     testTheWrapSkinSharesTheVoxelsFrame();
     testACarverRunsOnEveryThreadAndAgrees();
     testANegativeMarginAsksAboutLess();
+    testASetupAgainstAWallDoesNotCarveThroughIt();
     testAnIndoorCorpusCannotSeeThroughItsOwnRoof();
     testKeepingOnlyTheVoxelsInsideTheWrap();
     testKnownSceneFromFiveSetups();

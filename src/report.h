@@ -29,6 +29,7 @@ struct Options {
     rimg::BlindCone blindCone = rimg::BlindCone::Auto;
     uint32_t noReturnRadius   = 0;
     double   noReturnFraction = 0.75;
+    double   minRange         = rimg::Options{}.minRange;
 };
 
 // Appends the report for one file to `out`. Returns the number of problems

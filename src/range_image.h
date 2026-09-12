@@ -137,6 +137,29 @@ struct Options {
     uint32_t noReturnRadius   = 0;
     double   noReturnFraction = 0.75;
 
+    // The instrument's rated MINIMUM range, in metres. Inside it a surface is too
+    // close to measure and the cell comes back empty — which is the one other case
+    // where an empty cell does not mean "nothing was there", and it means the
+    // opposite: something was, and it was close.
+    //
+    // 0.45 m is the figure for the instrument this was built against. A setting
+    // because it differs by model, and 0 switches the test off — see
+    // filterNoReturnsTooClose for what the test does with it.
+    double   minRange = 0.45;
+    // How far past the minimum range a zone's bordering returns may sit and still
+    // say the zone is inside it.
+    //
+    // A zone of unmeasurably-close surface is bounded by that same surface at the
+    // point where it crosses OUT of the minimum range, so its bordering returns sit
+    // just past that: at 0.45 m with this factor the bar is 0.60 m, a third of the
+    // minimum range beyond it. The margin is for the surface's own slope — a wall
+    // the instrument is not quite parallel to crosses the limit over a few cells,
+    // not one — and for the cell quantisation of the raster. It does not need to be
+    // tight: what it has to separate is a border at half a metre from a border at
+    // several metres, which is the nearest anything bordering a band of sky or a
+    // dropped return gets.
+    double   tooCloseFactor = 4.0 / 3.0;
+
     // Treat the unsampled cone about the instrument's rotation axis as a
     // direction the scanner never looked, rather than as a no-return.
     //
@@ -361,6 +384,15 @@ struct Diagnostics {
     // No-returns demoted to OutsideFov, and why.
     uint64_t isolatedNoReturns = 0;   // by the optional neighbourhood filter
     uint64_t blindConeCells    = 0;   // the instrument's own blind cone
+    // Cells in zones found to be inside the instrument's minimum range, and how
+    // many such zones there were. Every one of these would otherwise have cleared
+    // a pencil of space to the rated range THROUGH the surface that was too close
+    // to measure — see filterNoReturnsTooClose.
+    uint64_t tooCloseNoReturns = 0;
+    uint32_t tooCloseZones     = 0;
+    // The median bordering range of the nearest such zone, in metres, which is the
+    // evidence the decision was made on. -1 where no zone was found.
+    double   tooCloseBorderRange = -1.0;
     uint32_t blindConeRows     = 0;
     // A SECOND band, at the other end, also marked unsampled. Non-zero where
     // nothing could show either band to be a view of anything — see markBlindCone —
@@ -647,6 +679,7 @@ ConeVerdict summariseBlindCones(const std::vector<RangeImage*>& images,
 
 // Exposed for testing.
 void filterIsolatedNoReturns(RangeImage& im, const Options& opt);
+void filterNoReturnsTooClose(RangeImage& im, const Options& opt);
 void markBlindCone(RangeImage& im, const Options& opt);
 
 const char* statusName(Status s);

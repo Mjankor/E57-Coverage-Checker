@@ -357,6 +357,168 @@ static void testPyramid() {
     CHECK(tooTight < checked, "the answers really are aggregated, not per-cell");
 }
 
+// A surface inside the instrument's MINIMUM range returns nothing, and that
+// no-return means the opposite of every other one.
+//
+// This is the defect the fans came from. A setup parked half a metre from a wall —
+// on a stair landing, tucked behind a column, up against a lift shaft — has a
+// large solid angle of its raster inside the minimum range, and every cell of it
+// comes back empty. Believed, each clears a pencil to the rated range straight
+// THROUGH the wall: at 0.45 m minimum and 45 m rated, ninety times the distance to
+// the thing that was in the way. On a survey conducted entirely indoors that
+// leaves fans of cleared space radiating out of the setups, through the walls,
+// through the roof.
+//
+// The evidence is the zone's border. The same surface that is too close to measure
+// crosses OUT of the minimum range at the zone's edge and returns there, so the
+// returns bordering the zone sit at very nearly the minimum range — where the
+// returns bordering a band of sky are metres away at the very least.
+static void testNoReturnsInsideTheMinimumRange() {
+    std::printf("range image: no-returns inside the minimum range clear nothing\n");
+
+    // A raster of a setup against a wall:
+    //
+    //   rows 0-39, all columns      the wall at 0.35 m: inside the minimum range,
+    //                               so empty, and bounded at row 40 by the same
+    //                               wall returning at 0.50 m where it crosses out
+    //   rows 100-119, all columns   open sky: empty, bounded at row 99 by the
+    //                               scene at 12 m
+    //   everything else             returns at 8-12 m
+    auto build = [](double wallEdgeM) {
+        rimg::RangeImage im;
+        im.rows = 120; im.cols = 200;
+        im.cells.assign(im.cellCount(), rimg::Cell{});
+        for (uint32_t r = 0; r < im.rows; ++r) {
+            for (uint32_t c = 0; c < im.cols; ++c) {
+                rimg::Cell& cell = im.cells[size_t(r) * im.cols + c];
+                if (r < 40 || r >= 100) {
+                    cell = rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+                } else if (r == 40) {
+                    cell = rimg::Cell{uint16_t(wallEdgeM * 100.0), uint8_t(rimg::Status::Hit)};
+                } else {
+                    cell = rimg::Cell{uint16_t(800 + (c % 5) * 100), uint8_t(rimg::Status::Hit)};
+                }
+            }
+        }
+        im.diag.noReturns = uint64_t(40 + 20) * im.cols;
+        return im;
+    };
+
+    rimg::Options opt;      // minRange 0.45, so the bar is 0.60 m
+
+    {
+        rimg::RangeImage im = build(0.50);
+        rimg::filterNoReturnsTooClose(im, opt);
+        CHECK(im.diag.tooCloseZones == 1, "the zone against the wall is found");
+        CHECK(im.diag.tooCloseNoReturns == 40 * im.cols, "all of it, to the last cell");
+        CHECK(std::fabs(im.diag.tooCloseBorderRange - 0.50) < 0.005,
+              "and the bordering range it was judged on is reported");
+
+        // Every cell of it establishes nothing now, including the ones far from
+        // the border. That is what the connectivity is for: a per-cell border test
+        // would only have reached row 39.
+        CHECK(im.statusAt(39, 100) == rimg::Status::OutsideFov, "the cell beside the border");
+        CHECK(im.statusAt(0, 100) == rimg::Status::OutsideFov, "and the cell furthest from it");
+        CHECK(im.rangeAt(0, 100) == 0.0,
+              "with the stored range gone, so nothing reads it as a measurement");
+
+        // The sky band is untouched. Its border is the scene at 8-12 m, which is
+        // nothing like the minimum range, and it is the clearing that carves the
+        // volume above the site.
+        CHECK(im.statusAt(119, 100) == rimg::Status::NoReturn, "the sky band still clears");
+        CHECK(im.statusAt(100, 0) == rimg::Status::NoReturn, "all of it");
+
+        // And the accounting moved with the cells.
+        CHECK(im.diag.outsideFov == 40 * im.cols, "the demoted cells are counted as unsampled");
+        CHECK(im.diag.noReturns == 20 * im.cols, "and no longer as no-returns");
+    }
+
+    // The same raster with the wall's edge returning at 0.90 m — past the bar, so
+    // the zone is not inside the minimum range and is a view of something. It
+    // keeps clearing. The test is a test, not a licence to demote every empty
+    // region that happens to touch a return.
+    {
+        rimg::RangeImage im = build(0.90);
+        rimg::filterNoReturnsTooClose(im, opt);
+        CHECK(im.diag.tooCloseZones == 0, "a zone bordered further out is left alone");
+        CHECK(im.statusAt(0, 100) == rimg::Status::NoReturn, "and still clears");
+    }
+
+    // The bar tracks the instrument. Told the minimum range is 0.2 m, a border at
+    // 0.50 m is no longer evidence of anything and the zone is believed; told 0.8 m,
+    // the 0.90 m border is.
+    {
+        rimg::Options shortMin = opt;
+        shortMin.minRange = 0.2;                      // bar 0.27 m
+        rimg::RangeImage im = build(0.50);
+        rimg::filterNoReturnsTooClose(im, shortMin);
+        CHECK(im.diag.tooCloseZones == 0, "a shorter minimum range condemns less");
+
+        rimg::Options longMin = opt;
+        longMin.minRange = 0.8;                       // bar 1.07 m
+        rimg::RangeImage far_ = build(0.90);
+        rimg::filterNoReturnsTooClose(far_, longMin);
+        CHECK(far_.diag.tooCloseZones == 1, "and a longer one condemns more");
+    }
+
+    // Off at zero, like every other filter here: what the file says, and nothing
+    // inferred about the instrument.
+    {
+        rimg::Options off = opt;
+        off.minRange = 0.0;
+        rimg::RangeImage im = build(0.50);
+        rimg::filterNoReturnsTooClose(im, off);
+        CHECK(im.diag.tooCloseZones == 0 && im.diag.tooCloseNoReturns == 0,
+              "minRange 0 switches the test off");
+        CHECK(im.statusAt(0, 100) == rimg::Status::NoReturn, "and changes nothing");
+    }
+
+    // A zone crossing the azimuth seam is ONE zone. Two half-zones would each be
+    // judged on half a border, and — worse — a zone whose near wall is all on one
+    // side of the seam would leave the other half believed.
+    {
+        rimg::RangeImage im;
+        im.rows = 60; im.cols = 200;
+        im.cells.assign(im.cellCount(), rimg::Cell{uint16_t(1000), uint8_t(rimg::Status::Hit)});
+        // Empty cells spanning the seam: columns 190-199 and 0-9, rows 20-39.
+        for (uint32_t r = 20; r < 40; ++r)
+            for (uint32_t k = 0; k < 20; ++k) {
+                const uint32_t c = (190 + k) % im.cols;
+                im.cells[size_t(r) * im.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+            }
+        // The wall's own edge, at 0.50 m, ringing the zone: the same surface where
+        // it crosses out of the minimum range, which is what bounds a real one.
+        for (uint32_t k = 0; k < 20; ++k) {
+            const uint32_t c = (190 + k) % im.cols;
+            im.cells[size_t(19) * im.cols + c] = rimg::Cell{50, uint8_t(rimg::Status::Hit)};
+            im.cells[size_t(40) * im.cols + c] = rimg::Cell{50, uint8_t(rimg::Status::Hit)};
+        }
+        for (uint32_t r = 20; r < 40; ++r) {
+            im.cells[size_t(r) * im.cols + 189] = rimg::Cell{50, uint8_t(rimg::Status::Hit)};
+            im.cells[size_t(r) * im.cols + 10]  = rimg::Cell{50, uint8_t(rimg::Status::Hit)};
+        }
+        im.diag.noReturns = 20 * 20;
+        rimg::filterNoReturnsTooClose(im, opt);
+        CHECK(im.diag.tooCloseZones == 1, "a zone across the seam is one zone");
+        CHECK(im.diag.tooCloseNoReturns == 20 * 20, "and all of it is demoted");
+        CHECK(im.statusAt(30, 199) == rimg::Status::OutsideFov, "the half before the seam");
+        CHECK(im.statusAt(30, 0) == rimg::Status::OutsideFov, "and the half after it");
+    }
+
+    // A majority of the border, not one cell of it. A sky band with a single close
+    // return on its edge — a bird, a leaf on the lens, a fence post at arm's
+    // length — is still sky.
+    {
+        rimg::RangeImage im = build(0.90);
+        for (uint32_t c = 90; c < 95; ++c)
+            im.cells[size_t(99) * im.cols + c] = rimg::Cell{40, uint8_t(rimg::Status::Hit)};
+        rimg::filterNoReturnsTooClose(im, opt);
+        CHECK(im.statusAt(110, 100) == rimg::Status::NoReturn,
+              "a handful of close returns on the edge of a sky band does not condemn it");
+    }
+}
+
 // The distinction the whole no-return path rests on: a large connected region of
 // empty cells is sky and clears space; an empty cell surrounded by returns is a
 // dropped return and clears nothing. Nothing in the file tells them apart, so
@@ -1588,6 +1750,7 @@ int main() {
     testEachScanDecidesItsOwnCone();
     testGridPath();
     testPyramid();
+    testNoReturnsInsideTheMinimumRange();
     testSkyVersusDroppedReturns();
     testBlindConeFoundGeometrically();
     testDoubleCoveredMirrorIsRefused();

@@ -1296,10 +1296,10 @@ const char *kindLabel(check::Kind k) {
     // adding a control by eyeballing a y is how the region popup ended up drawn
     // over the fourth parameter row.
     //
-    //   242 214 186 158 130   five label/value rows, 28 apart
-    //    99                    the region popup, 24 tall, clearing 130 by seven
-    //    74  52  30   8         four tick boxes, 22 apart
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 270)];
+    //   270 242 214 186 158 130   six label/value rows, 28 apart
+    //    99                        the region popup, 24 tall, clearing 130 by seven
+    //    74  52  30   8            four tick boxes, 22 apart
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 298)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -1317,10 +1317,18 @@ const char *kindLabel(check::Kind k) {
         {@"Voxels drawn at most (millions)",
                                 [NSString stringWithFormat:@"%.0f",
                                  double(_visOptions.displayCap) / 1048576.0]},
+        // The instrument's rated MINIMUM range. A surface closer than this returns
+        // nothing, and believing that empty cell clears a pencil of space straight
+        // through the surface — a setup parked half a metre from a wall otherwise
+        // carves a fan out through it to the maximum range. Here rather than
+        // buried because it is a property of the instrument the operator knows and
+        // the tool cannot read from the file.
+        {@"Instrument minimum range (m, 0 to ignore)",
+                                [NSString stringWithFormat:@"%.2f", _visOptions.minRange]},
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
-    for (int i = 0; i < 5; ++i) {
-        const CGFloat y = 242 - i * 28;
+    for (int i = 0; i < 6; ++i) {
+        const CGFloat y = 270 - i * 28;
         [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 220, 20)]];
         NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(230, y - 3, 90, 22)];
         [acc addSubview:f];
@@ -1390,6 +1398,9 @@ const char *kindLabel(check::Kind k) {
         @"Limiting to the surveyed extent asks only about a box around what the scans "
         @"actually returned. Leave it on for an interior job: the range spheres otherwise "
         @"reach tens of metres out through every wall, and the answer becomes mostly sky.\n\n"
+        @"The instrument minimum range matters more than it looks: a surface closer than "
+        @"that returns nothing, and an empty cell that is really a wall at arm's length "
+        @"would otherwise clear space straight through it, out to the maximum range.\n\n"
         @"By default only the frontier of that space is drawn — where coverage stops. "
         @"The full volume hides its own interior anyway, and there is far more of it.\n\n"
         @"This is the CPU reference, so a large site at 5 cm takes minutes. "
@@ -1406,13 +1417,15 @@ const char *kindLabel(check::Kind k) {
     const long   tile   = fields[2].integerValue;
     const double margin = fields[3].doubleValue;
     const double drawnM = fields[4].doubleValue;
+    const double minRng = fields[5].doubleValue;
     // The margin may be NEGATIVE — see vis::Options::domainMargin. On an indoor
     // job that is how the space past the walls is left out of the question in the
     // first place, rather than filtered out of the answer afterwards.
     if (!(voxel > 0.0) || !(range > 0.0) || tile <= 0 || tile > 4096 ||
-        !std::isfinite(margin)) {
+        !std::isfinite(margin) || !(minRng >= 0.0) || minRng >= range) {
         _status.stringValue =
-            @"Voxel size and range must be positive and tile size 1–4096. The margin "
+            @"Voxel size and range must be positive, tile size 1–4096, and the "
+             "instrument minimum range between zero and the maximum. The margin "
              "may be negative, which pulls the question inside the walls.";
         return;
     }
@@ -1420,6 +1433,7 @@ const char *kindLabel(check::Kind k) {
     opt.maxRange     = range;
     opt.tileVoxels   = uint32_t(tile);
     opt.domainMargin = margin;
+    opt.minRange     = minRng;
     if (drawnM > 0.0)
         opt.displayCap = uint64_t(std::min(drawnM, 512.0) * 1048576.0);
     {
@@ -1600,6 +1614,18 @@ const char *kindLabel(check::Kind k) {
         // which carves the volume above a site, and is what should happen; at the
         // LOW end it is a cone through whatever the instrument was standing on, so
         // that one is a warning and the other is a count.
+        // Setups parked inside their own minimum range of something. Every cell of
+        // such a zone would otherwise have cleared to the rated range through the
+        // surface that was too close to measure, which is the largest single way
+        // this answer can be wrong in the optimistic direction.
+        if (result->setupsTooClose)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   %llu setup(s) parked inside the %.2f m minimum range of "
+                     "something: %llu cells demoted, nearest border %.2f m — each would "
+                     "have cleared to %.0f m through the surface in the way",
+                    (unsigned long long)result->setupsTooClose, opt.minRange,
+                    (unsigned long long)result->tooCloseCells, result->tooCloseNearest,
+                    opt.maxRange];
         if (result->setupsBandBelievedLow)
             warn = [warn stringByAppendingFormat:
                     @"   ·   ⚠︎ UNSAMPLED BAND BELIEVED AS SKY at the LOW end of %llu setup(s) "

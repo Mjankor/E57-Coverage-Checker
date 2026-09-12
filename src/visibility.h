@@ -134,6 +134,12 @@ struct Options {
     uint32_t skyRadius   = 0;
     double   skyFraction = 0.75;
 
+    // The instrument's rated MINIMUM range, in metres, passed through to
+    // rimg::Options. A surface inside it returns nothing, and believing that
+    // no-return clears a pencil of space straight through the surface — see
+    // rimg::filterNoReturnsTooClose. 0 switches the test off.
+    double   minRange = rimg::Options{}.minRange;
+
     // Which end of each raster holds the instrument's blind cone. Auto finds it
     // from the geometry and copes with a scanner mounted upside down.
     rimg::BlindCone blindCone = rimg::BlindCone::Auto;
@@ -267,6 +273,16 @@ struct Result {
     std::string  mappingRefusedWhy;
     // Setups whose blind cone was found, and how many were mounted inverted.
     uint64_t     setupsWithBlindCone = 0;
+    // Setups that had at least one zone of no-returns inside the instrument's
+    // minimum range, and how many cells those zones held in total. Each of those
+    // cells would otherwise have cleared a pencil of space to the rated range
+    // through the surface that was too close to measure — see
+    // rimg::filterNoReturnsTooClose. The nearest bordering range any of them was
+    // judged on is kept as well, in metres, so the figure the decision turned on
+    // is visible rather than inferred.
+    uint64_t     setupsTooClose = 0;
+    uint64_t     tooCloseCells  = 0;
+    double       tooCloseNearest = -1.0;
     // Setups with an unsampled band at an end that was left BELIEVED — treated as
     // rays that saw through to the rated range rather than as directions never
     // sampled. Each one clears a cone through whatever is beyond it, and because
