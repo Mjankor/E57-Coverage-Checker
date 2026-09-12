@@ -1305,7 +1305,96 @@ static void testRangeImagesHaveIdentityThatIsNeverReused() {
     CHECK(e.uid == c.uid, "a copy shares the identity of what it copied");
 }
 
+// One odd scan in a corpus cannot overturn the blind-cone verdict.
+//
+// The cone is decided across the corpus, not per scan, because an instrument's
+// blind band is the same in every scan while an empty band caused by the scene is
+// not. That decision used a MIN and a MAX over every scan, and a min and a max can
+// only widen as scans are added — so one scan in fifty with an unusual leading
+// band, or a zero one, pushed the spread past the tolerance and undecided the
+// whole corpus.
+//
+// Undecided is not neutral. It unmarks every scan's cone, so each setup's blind
+// band becomes rays believed to have seen through to the rated range: a cone
+// carved through the floor under every setup. At thirty setups the corpus decided
+// and the answer was right; at fifty, one outlier cleared the building's interior
+// and the unobserved space vanished. That is what this pins.
+static void testOneOddScanCannotOverturnTheConeVerdict() {
+    std::printf("range image: the cone verdict survives an outlier\n");
+
+    rimg::Options opt;                       // BlindCone::Auto, spread 0.10
+
+    // Thirty scans of one instrument: a fixed band of about 590 rows at the start,
+    // and a trailing band that varies with the scene, which is the real shape.
+    auto corpus = [](size_t n) {
+        std::vector<std::pair<uint32_t, uint32_t>> b;
+        for (size_t i = 0; i < n; ++i)
+            b.push_back({590u + uint32_t(i % 3), 80u + uint32_t((i * 37) % 500)});
+        return b;
+    };
+
+    {
+        const rimg::ConeVerdict v = rimg::decideBlindConeEnd(corpus(30), opt);
+        CHECK(v.decided, "thirty consistent scans decide");
+        CHECK(v.atFirstRow, "and put the instrument's cone at the start");
+    }
+
+    // Now fifty, and one of them is odd — a scan cropped so it has no empty
+    // leading rows at all. The old test disqualified the leading end outright on
+    // `leadMin > 0`.
+    {
+        auto b = corpus(50);
+        b[37].first = 0;
+        const rimg::ConeVerdict v = rimg::decideBlindConeEnd(b, opt);
+        CHECK(v.decided, "one scan with no leading band does not undecide the corpus");
+        CHECK(v.atFirstRow, "and the verdict is the same one");
+    }
+
+    // And one whose leading band is wildly wrong, which is what moved the max.
+    {
+        auto b = corpus(50);
+        b[11].first = 2;
+        b[29].first = 4000;
+        const rimg::ConeVerdict v = rimg::decideBlindConeEnd(b, opt);
+        CHECK(v.decided, "two wild leading bands do not undecide it either");
+        CHECK(v.atFirstRow, "same verdict");
+    }
+
+    // The judgement is still a judgement: when the leading band genuinely varies
+    // across most of the corpus, it is not the instrument and the corpus says so.
+    {
+        std::vector<std::pair<uint32_t, uint32_t>> b;
+        for (size_t i = 0; i < 50; ++i)
+            b.push_back({100u + uint32_t((i * 53) % 600), 80u + uint32_t((i * 37) % 500)});
+        const rimg::ConeVerdict v = rimg::decideBlindConeEnd(b, opt);
+        CHECK(!v.decided, "a leading band that really does vary is not fixed geometry");
+    }
+
+    // Both ends fixed is still undecidable — five scans from inside one room have
+    // the same ceiling band in every one, and no corpus can break that tie.
+    {
+        std::vector<std::pair<uint32_t, uint32_t>> b;
+        for (size_t i = 0; i < 50; ++i) b.push_back({590u, 120u});
+        const rimg::ConeVerdict v = rimg::decideBlindConeEnd(b, opt);
+        CHECK(!v.decided, "two equally fixed ends cannot be told apart");
+    }
+
+    // A minority is a minority: a fifth of the corpus disagreeing is tolerated,
+    // half of it is not.
+    {
+        auto b = corpus(50);
+        for (int i = 0; i < 9; ++i) b[size_t(i) * 5].first = 3u;      // 9 of 50
+        CHECK(rimg::decideBlindConeEnd(b, opt).decided,
+              "nine scans in fifty disagreeing is still a fixed band");
+        auto c = corpus(50);
+        for (int i = 0; i < 25; ++i) c[size_t(i)].first = 3u;         // 25 of 50
+        CHECK(!rimg::decideBlindConeEnd(c, opt).decided,
+              "half of them disagreeing is not");
+    }
+}
+
 int main() {
+    testOneOddScanCannotOverturnTheConeVerdict();
     testRangeImagesHaveIdentityThatIsNeverReused();
     std::printf("E57 Coverage Checker — range image tests\n\n");
     testInstrumentNotLevel();

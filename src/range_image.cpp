@@ -864,14 +864,51 @@ ConeVerdict decideBlindConeEnd(
         trailMax = std::max(trailMax, b.second);
     }
 
-    // Fixed geometry is the same band every time; scene is not. A band present in
-    // only some scans is not the instrument either, so an end with a zero minimum
-    // is not a candidate however tight the rest of it looks.
-    auto spread = [](uint32_t lo, uint32_t hi) {
-        return hi ? double(hi - lo) / double(hi) : 1.0;
+    // Fixed geometry is the same band in MOST scans; scene is not.
+    //
+    // "Most", by a median and a count, rather than "every", by a min and a max.
+    // That is a correction and the reason matters, because the old form failed in
+    // the worst available direction as a corpus grew.
+    //
+    // A min and a max over the corpus can only widen as scans are added. So one
+    // scan out of fifty whose leading band is unusual — or zero, which the old
+    // `leadMin > 0` disqualified outright — moved the spread past the tolerance
+    // and took the whole verdict with it. Undecided then UNMARKS every scan's
+    // cone, so each setup's blind band becomes rays believed to have seen through
+    // to the rated range: a cone carved through the floor under every setup. With
+    // thirty setups the corpus decided and the answer was right; with fifty one
+    // outlier undecided it, fifty cones cleared the interior, and the unobserved
+    // space the tool exists to report vanished. A single scan should not be able
+    // to do that, and a median cannot be moved by one.
+    //
+    // The tolerance keeps its meaning — a relative band width — but is measured
+    // about the median, and a supermajority of scans has to sit inside it.
+    auto median = [](std::vector<uint32_t> v) -> uint32_t {
+        if (v.empty()) return 0;
+        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+        return v[v.size() / 2];
     };
-    const bool leadFixed  = leadMin  > 0 && spread(leadMin,  leadMax)  <= opt.coneCorpusSpread;
-    const bool trailFixed = trailMin > 0 && spread(trailMin, trailMax) <= opt.coneCorpusSpread;
+    std::vector<uint32_t> lead, trail;
+    lead.reserve(bands.size());
+    trail.reserve(bands.size());
+    for (const auto& b : bands) { lead.push_back(b.first); trail.push_back(b.second); }
+    const uint32_t leadMed = median(lead), trailMed = median(trail);
+
+    // How many scans agree with the median to within the tolerance. Fixed
+    // geometry is present in every scan that saw it, so the bar is high — but not
+    // unanimous, because one badly cropped scan in a corpus of a thousand is
+    // ordinary and says nothing about the instrument.
+    auto agreeing = [&](const std::vector<uint32_t>& v, uint32_t med) {
+        if (med == 0) return size_t(0);
+        const double tol = opt.coneCorpusSpread * double(med);
+        size_t n = 0;
+        for (uint32_t x : v)
+            if (std::fabs(double(x) - double(med)) <= tol) ++n;
+        return n;
+    };
+    const size_t need = (bands.size() * 4 + 4) / 5;      // four fifths, rounded up
+    const bool leadFixed  = leadMed  > 0 && agreeing(lead,  leadMed)  >= need;
+    const bool trailFixed = trailMed > 0 && agreeing(trail, trailMed) >= need;
 
     char buf[560];
     if (leadFixed == trailFixed) {
@@ -880,12 +917,14 @@ ConeVerdict decideBlindConeEnd(
         // a corpus can settle, so the per-scan decisions build() already made
         // stand, and the reason is recorded rather than resolved by a coin toss.
         std::snprintf(buf, sizeof(buf),
-                      "%s across %zu scans (%u-%u rows leading, %u-%u trailing), so the "
+                      "%s across %zu scans (leading %u rows median, %zu scans agree, "
+                      "%u-%u seen; trailing %u median, %zu agree, %u-%u seen), so the "
                       "corpus cannot say which end is the instrument; each scan's own "
                       "bordering-range verdict stands",
                       leadFixed ? "both ends of the raster are equally consistent"
                                 : "neither end of the raster is consistent",
-                      v.scans, leadMin, leadMax, trailMin, trailMax);
+                      v.scans, leadMed, agreeing(lead, leadMed), leadMin, leadMax,
+                      trailMed, agreeing(trail, trailMed), trailMin, trailMax);
         v.why = buf;
         return v;
     }
