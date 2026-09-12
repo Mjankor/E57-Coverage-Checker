@@ -726,6 +726,7 @@ const char *kindLabel(check::Kind k) {
     report::Options ro;
     ro.maxRange         = _visOptions.maxRange;
     ro.blindCone        = _visOptions.blindCone;
+    ro.minRange         = _visOptions.minRange;
 
     auto paths = std::make_shared<std::vector<std::string>>(_paths);
     __weak AppDelegate *weakSelf = self;
@@ -786,6 +787,7 @@ const char *kindLabel(check::Kind k) {
     report::Options ro;
     ro.maxRange         = _visOptions.maxRange;
     ro.blindCone        = _visOptions.blindCone;
+    ro.minRange         = _visOptions.minRange;
 
     auto paths = std::make_shared<std::vector<std::string>>(_paths);
     __weak AppDelegate *weakSelf = self;
@@ -1614,6 +1616,19 @@ const char *kindLabel(check::Kind k) {
         // such a zone would otherwise have cleared to the rated range through the
         // surface that was too close to measure, which is the largest single way
         // this answer can be wrong in the optimistic direction.
+        // What is still believed, and the largest single zone of it. Every one of
+        // these cells clears a ray to the rated range, so if the answer is too
+        // optimistic anywhere, it is in here. The border ranges say which of the
+        // three it is: metres away is sky or a surface past the rated range, half a
+        // metre is a surface the minimum-range test did not catch.
+        if (result->largestZoneCells)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   %llu empty cells still clearing; largest zone %llu cells at "
+                     "el %+.0f..%+.0f°, bordered at %.2f m (median %.2f m)",
+                    (unsigned long long)result->believedCells,
+                    (unsigned long long)result->largestZoneCells,
+                    result->largestZoneElLoDeg, result->largestZoneElHiDeg,
+                    result->largestZoneBorderMinM, result->largestZoneBorderMedianM];
         if (result->setupsTooClose)
             warn = [warn stringByAppendingFormat:
                     @"   ·   %llu setup(s) parked inside the %.2f m minimum range of "

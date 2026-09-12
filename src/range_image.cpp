@@ -745,57 +745,86 @@ void filterNoReturnsTooClose(RangeImage& im, const Options& opt) {
         return k;
     };
 
-    // The nearest return bordering each no-return cell, where there is one. That
-    // cell is decided outright, by the only evidence there is about it.
-    std::vector<uint32_t> nearestCm(n, 0);
-    uint64_t seeds = 0, closeSeeds = 0;
-    double nearest = -1.0;
+    // What counts as evidence, before any cell is judged by it.
+    //
+    // A return inside the bar is evidence of a surface too close to measure only
+    // where a neighbouring return is inside it too. A surface crossing out of the
+    // minimum range leaves a RUN of them all along the edge of the region it blanks
+    // out; a single one is a speck — a raindrop, an insect, a finger on the way
+    // past — and a speck is not a surface.
+    std::vector<uint8_t> ev(n, 0);            // bit 0: close evidence, bit 1: measured
     for (size_t i = 0; i < n; ++i) {
-        if (Status(im.cells[i].status) != Status::NoReturn) continue;
+        if (Status(im.cells[i].status) != Status::Hit) continue;
+        ev[i] = 2;
+        if (im.cells[i].rangeCm > barCm) continue;
         size_t nb[4];
         const int k = neighbours(i, nb);
-        uint32_t best = 0;
         for (int a = 0; a < k; ++a) {
             const size_t j = nb[a];
-            if (Status(im.cells[j].status) != Status::Hit) continue;
-            const uint32_t r = im.cells[j].rangeCm;
-            if (best == 0 || r < best) best = r;
+            if (Status(im.cells[j].status) == Status::Hit && im.cells[j].rangeCm <= barCm) {
+                ev[i] |= 1;
+                break;
+            }
         }
-        if (best == 0) continue;              // borders nothing measured: decided below
-        nearestCm[i] = best;
-        verdict[i] = (best <= barCm) ? kTooClose : kView;
-        ++seeds;
-        if (verdict[i] == kTooClose) {
-            ++closeSeeds;
-            const double m = double(best) * 0.01;
-            if (nearest < 0 || m < nearest) nearest = m;
+    }
+
+    // Each empty cell is then judged by the returns SURROUNDING it, not by the one
+    // cell next to it, and that is the whole of this correction.
+    //
+    // Judging by the single nearest neighbour let one cell overrule everything
+    // around it. The edge of a blanked region is a curve crossing a grid of cells,
+    // so along it there are always cells whose one measured neighbour happens to
+    // sit just past the bar while the run of returns a cell or two along sits
+    // inside it. Each of those came out as a view of something, kept its ray, and
+    // cleared a pencil to the rated range straight through the surface the rest of
+    // the edge had already shown was too close. Scattered along the edge of one
+    // region that is a handful of narrow bands fired through everything behind it —
+    // which is what a picture frame crossing the region made visible, because its
+    // own unreturned border put more such cells in the middle of the edge.
+    //
+    // The window is +/- 2 cells. Two because one is what a single cell can swing
+    // and this has to be robust to exactly that; no more than two because the
+    // window is only for raggedness — a surface crossing out of the minimum range
+    // spans tens of degrees, thousands of cells, so nothing real is resolved away
+    // by a window a seventh of a degree across. Close evidence anywhere in it wins,
+    // since a surface too close to measure also blocks everything behind it.
+    constexpr int kEvidenceWindow = 2;
+    std::vector<uint8_t> hz(n, 0);            // the same two bits, over a row window
+    for (int64_t r = 0; r < rows; ++r) {
+        const size_t base = size_t(r) * size_t(cols);
+        for (int64_t c = 0; c < cols; ++c) {
+            uint8_t m = 0;
+            for (int d = -kEvidenceWindow; d <= kEvidenceWindow; ++d) {
+                int64_t cc = c + d;
+                cc -= cols * (cc >= cols ? 1 : 0);         // azimuth wraps
+                cc += cols * (cc < 0 ? 1 : 0);
+                m |= ev[base + size_t(cc)];
+            }
+            hz[base + size_t(c)] = m;
+        }
+    }
+
+    uint64_t seeds = 0, closeSeeds = 0;
+    double nearest = -1.0;
+    for (int64_t r = 0; r < rows; ++r) {
+        const int64_t lo = std::max<int64_t>(0, r - kEvidenceWindow);
+        const int64_t hi = std::min<int64_t>(rows - 1, r + kEvidenceWindow);
+        for (int64_t c = 0; c < cols; ++c) {
+            const size_t i = size_t(r) * size_t(cols) + size_t(c);
+            if (Status(im.cells[i].status) != Status::NoReturn) continue;
+            uint8_t m = 0;
+            for (int64_t rr = lo; rr <= hi; ++rr) m |= hz[size_t(rr) * size_t(cols) + size_t(c)];
+            if (m & 1)      { verdict[i] = kTooClose; ++closeSeeds; ++seeds; }
+            else if (m & 2) { verdict[i] = kView;                   ++seeds; }
         }
     }
     if (closeSeeds == 0) return;              // nothing in this scan is that close
 
-    // A surface, not a speck. A close seed survives only where a neighbouring cell
-    // is one too: a surface that blanks out a region borders it along a RUN of
-    // cells, where a single stray return inside the bar — a raindrop, an insect, a
-    // finger on the way past — touches one or two. Without this the walk below
-    // spreads that one cell's verdict along a line all the way across a band of
-    // sky, because in a direction with nothing to argue against it the nearest
-    // close cell stays nearest for ever.
-    //
-    // Read off the seeds as they were, not as they are being edited, so the test
-    // cannot erode a run from one end.
-    {
-        std::vector<uint8_t> was(verdict);
-        for (size_t i = 0; i < n; ++i) {
-            if (was[i] != kTooClose) continue;
-            size_t nb[4];
-            const int k = neighbours(i, nb);
-            bool company = false;
-            for (int a = 0; a < k && !company; ++a) company = (was[nb[a]] == kTooClose);
-            if (company) continue;
-            verdict[i] = kView;
-            --closeSeeds;
-        }
-        if (closeSeeds == 0) return;
+    // The nearest close return in the scan, as the figure the decision turned on.
+    for (size_t i = 0; i < n; ++i) {
+        if (!(ev[i] & 1)) continue;
+        const double m = double(im.cells[i].rangeCm) * 0.01;
+        if (nearest < 0 || m < nearest) nearest = m;
     }
 
     // Breadth first from every decided cell at once, so an undecided cell takes the
@@ -1961,6 +1990,20 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
     // a surface inside the instrument's minimum range. After the cone, so a cone
     // band is already unsampled and cannot be swallowed into a zone.
     filterNoReturnsTooClose(out, opt);
+    // And what is left believed, for the report and the status line. Here rather
+    // than in the caller's aggregation loop because build() runs in parallel across
+    // scans and that loop does not: 94 ms a raster is 94 seconds over a thousand
+    // scans serially, and nothing beside a decode.
+    {
+        const std::vector<NoReturnZone> z = describeNoReturnZones(out, opt, 1);
+        if (!z.empty()) {
+            out.diag.largestZoneCells         = z[0].cells;
+            out.diag.largestZoneBorderMinM    = z[0].borderMinM;
+            out.diag.largestZoneBorderMedianM = z[0].borderMedianM;
+            out.diag.largestZoneElLoDeg       = z[0].elLoDeg;
+            out.diag.largestZoneElHiDeg       = z[0].elHiDeg;
+        }
+    }
 
     out.diag.fillFraction = double(out.diag.hits) / double(out.cellCount());
     if (out.diag.blindConeRows) {

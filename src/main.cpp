@@ -125,6 +125,14 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
     // because nothing was there. Stated because every one of them would otherwise
     // have cleared space through that surface, and because a corpus with a lot of
     // them is a corpus of setups parked against walls.
+    if (res.largestZoneCells)
+        std::printf("believed  : %llu empty cells still clear to %.0f m; the largest zone is\n"
+                    "            %llu cells at el %+.0f..%+.0f deg, bordered at %.2f m "
+                    "(median %.2f m)\n",
+                    (unsigned long long)res.believedCells, opt.maxRange,
+                    (unsigned long long)res.largestZoneCells,
+                    res.largestZoneElLoDeg, res.largestZoneElHiDeg,
+                    res.largestZoneBorderMinM, res.largestZoneBorderMedianM);
     if (res.setupsTooClose)
         std::printf("            %llu parked inside the %.2f m minimum range of something:\n"
                     "            %llu cells demoted, nearest border %.2f m — each would have\n"

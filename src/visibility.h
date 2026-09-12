@@ -280,6 +280,16 @@ struct Result {
     // judged on is kept as well, in metres, so the figure the decision turned on
     // is visible rather than inferred.
     uint64_t     setupsTooClose = 0;
+    // What is still BELIEVED once the two instrument cases are accounted for:
+    // every one of these cells clears a ray to the rated range, and if any of them
+    // is wrong this is where it is. `believedCells` is the total; the rest describe
+    // the largest single zone found in any scan, which is the one worth looking at
+    // first — see rimg::describeNoReturnZones for the same breakdown per scan.
+    uint64_t     believedCells = 0;
+    uint64_t     largestZoneCells = 0;
+    double       largestZoneBorderMinM = -1.0;
+    double       largestZoneBorderMedianM = -1.0;
+    double       largestZoneElLoDeg = 0.0, largestZoneElHiDeg = 0.0;
     uint64_t     tooCloseCells  = 0;
     double       tooCloseNearest = -1.0;
     // Setups with an unsampled band at an end that was left BELIEVED — treated as

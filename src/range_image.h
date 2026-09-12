@@ -369,6 +369,15 @@ struct Diagnostics {
     // The median bordering range of the nearest such zone, in metres, which is the
     // evidence the decision was made on. -1 where no zone was found.
     double   tooCloseBorderRange = -1.0;
+    // The largest zone of no-returns still BELIEVED once the cone and the minimum
+    // range have taken theirs — every cell of it clears a ray to the rated range,
+    // so if this scan is too optimistic anywhere it is here. The border ranges say
+    // which of the three cases it is: metres away and it is sky or a surface past
+    // the rated range; half a metre and the minimum-range test did not catch it.
+    // Measured in build(), where it is parallel with everything else per scan.
+    uint64_t largestZoneCells = 0;
+    double   largestZoneBorderMinM = -1.0, largestZoneBorderMedianM = -1.0;
+    double   largestZoneElLoDeg = 0.0, largestZoneElHiDeg = 0.0;
     uint32_t blindConeRows     = 0;
     // A SECOND band, at the other end, also marked unsampled. Non-zero where
     // nothing could show either band to be a view of anything — see markBlindCone —

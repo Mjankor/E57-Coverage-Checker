@@ -473,6 +473,56 @@ static void testNoReturnsInsideTheMinimumRange() {
         CHECK(im.statusAt(0, 100) == rimg::Status::NoReturn, "and changes nothing");
     }
 
+    // The edge of a blanked region is a curve crossing a grid of cells, and that
+    // is enough on its own to leak.
+    //
+    // Along such an edge there are always cells whose one measured neighbour sits
+    // just past the bar while the run of returns a cell or two along sits inside
+    // it. Judged by the single nearest neighbour, each of those came out a view of
+    // something, kept its ray, and cleared a pencil to the rated range straight
+    // through the surface the rest of the edge had already shown was too close.
+    // Scattered around one region that is a handful of narrow bands fired through
+    // everything behind it — and a picture frame crossing the region made it
+    // obvious, because its own unreturned border puts more such cells in the
+    // middle of the edge rather than only at its extremes.
+    //
+    // The region here is a disc of wall inside the minimum range, ringed by that
+    // same wall at 0.50 m where it crosses out, with a frame's border — unreturned,
+    // a thin raised edge at grazing incidence — crossing it. Not one cell of it may
+    // be left clearing.
+    {
+        rimg::RangeImage im;
+        im.rows = 50; im.cols = 100;
+        im.cells.assign(im.cellCount(), rimg::Cell{});
+        const double cr = 25.0, cc = 50.0, rad = 18.0;
+        for (uint32_t r = 0; r < im.rows; ++r)
+            for (uint32_t c = 0; c < im.cols; ++c) {
+                rimg::Cell& cell = im.cells[size_t(r) * im.cols + c];
+                const double d = std::hypot(double(r) - cr, (double(c) - cc) * 0.5);
+                const bool frame = ((r == 18 || r == 32) && c >= 20 && c <= 80) ||
+                                   ((c == 20 || c == 80) && r >= 18 && r <= 32);
+                if (frame || d < rad)   cell = rimg::Cell{0, uint8_t(rimg::Status::NoReturn)};
+                else if (d < rad + 2.0) cell = rimg::Cell{50, uint8_t(rimg::Status::Hit)};
+                else                    cell = rimg::Cell{300, uint8_t(rimg::Status::Hit)};
+            }
+        im.diag.nearestReturn = 0.5; im.diag.furthestReturn = 3.0;
+        for (const rimg::Cell& c : im.cells)
+            if (rimg::Status(c.status) == rimg::Status::NoReturn) ++im.diag.noReturns;
+        const uint64_t empty = im.diag.noReturns;
+
+        rimg::filterNoReturnsTooClose(im, opt);
+
+        // Measured against the face-neighbour rule this replaces: 12 cells of the
+        // 2017 survived as views, scattered around the edge, each of them a ray
+        // still clearing 45 m through the wall.
+        CHECK(im.diag.tooCloseNoReturns == empty,
+              "every cell of the region is demoted: nothing escapes along its edge");
+        uint64_t believed = 0;
+        for (const rimg::Cell& c : im.cells)
+            if (rimg::Status(c.status) == rimg::Status::NoReturn) ++believed;
+        CHECK(believed == 0, "and not one ray is left clearing through the wall");
+    }
+
     // A zone crossing the azimuth seam is ONE zone. Two half-zones would each be
     // judged on half a border, and — worse — a zone whose near wall is all on one
     // side of the seam would leave the other half believed.

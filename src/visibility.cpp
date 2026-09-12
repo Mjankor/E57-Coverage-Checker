@@ -684,6 +684,15 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
 
     for (auto& img : images) {
         believedSky += img->diag.noReturns;
+        // The largest zone still clearing, across the corpus. Measured per scan in
+        // build(), which is parallel; this only picks the worst of them.
+        if (img->diag.largestZoneCells > out.largestZoneCells) {
+            out.largestZoneCells         = img->diag.largestZoneCells;
+            out.largestZoneBorderMinM    = img->diag.largestZoneBorderMinM;
+            out.largestZoneBorderMedianM = img->diag.largestZoneBorderMedianM;
+            out.largestZoneElLoDeg       = img->diag.largestZoneElLoDeg;
+            out.largestZoneElHiDeg       = img->diag.largestZoneElHiDeg;
+        }
         if (img->diag.tooCloseZones) {
             ++out.setupsTooClose;
             out.tooCloseCells += img->diag.tooCloseNoReturns;
@@ -728,7 +737,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
               "sampling grid (indexBounds with rowIndex/columnIndex)";
         return false;
     }
-    out.setupsUsed = setups.size();
+    out.setupsUsed    = setups.size();
+    out.believedCells = believedSky;
 
     // --- carve ------------------------------------------------------------
     carve::Params p;
