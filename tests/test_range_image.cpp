@@ -619,26 +619,23 @@ static void testNoReturnsInsideTheMinimumRange() {
         im.diag.nearestReturn = 0.4; im.diag.furthestReturn = 12.0;
         rimg::filterNoReturnsTooClose(im, opt);
 
-        CHECK(im.diag.tooCloseNoReturns == 0,
-              "one close return is a speck, not a surface, and costs the band nothing");
-        CHECK(im.statusAt(40, 100) == rimg::Status::NoReturn, "the cell beside it stays");
-        CHECK(im.statusAt(119, 100) == rimg::Status::NoReturn, "the far side of the band stays");
-        CHECK(im.statusAt(40, 20) == rimg::Status::NoReturn, "and so does the rest of its edge");
+        // A speck costs the band a column five cells wide — the window's reach —
+        // running away from it, because in a direction with nothing to argue
+        // against it the nearest close cell stays nearest. 400 cells of 16,000 here.
+        //
+        // Left as it is, deliberately. It is a thin line of cells that clear
+        // NOTHING rather than a hole through a surface, which is the harmless
+        // direction; and the rule that used to prevent it — asking each close
+        // return for a close neighbour — disqualified the dithered edge of every
+        // real blanked region, which is the other direction entirely and cost
+        // hundreds of thousands of cells clearing 45 m through a wall.
+        CHECK(im.diag.tooCloseNoReturns * 20 < 80 * im.cols,
+              "one close return costs the band a thin line, not the band");
+        CHECK(im.statusAt(40, 100) == rimg::Status::OutsideFov, "the cells beside it go");
+        CHECK(im.statusAt(60, 106) == rimg::Status::NoReturn,
+              "a few cells to the side of that line, the band still clears");
+        CHECK(im.statusAt(40, 20) == rimg::Status::NoReturn, "as does the rest of its edge");
 
-        // Two of them side by side ARE a run, and cost the band the wedge nearest
-        // them. The line between a speck and a surface is drawn at the smallest
-        // thing that can be a surface, because anything larger is a judgement about
-        // the scene rather than about the instrument.
-        rimg::RangeImage pair = im;
-        for (uint32_t c = 100; c < 102; ++c) {
-            pair.cells[size_t(39) * pair.cols + c] = rimg::Cell{40, uint8_t(rimg::Status::Hit)};
-            pair.cells[size_t(40) * pair.cols + c] =
-                rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
-        }
-        rimg::filterNoReturnsTooClose(pair, opt);
-        CHECK(pair.diag.tooCloseNoReturns > 0, "two together are a surface");
-        CHECK(pair.statusAt(119, 0) == rimg::Status::NoReturn,
-              "and the far corner of the band is still sky");
     }
 
     // A majority of the border, not one cell of it. A sky band with a single close

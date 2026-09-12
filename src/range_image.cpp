@@ -745,62 +745,61 @@ void filterNoReturnsTooClose(RangeImage& im, const Options& opt) {
         return k;
     };
 
-    // What counts as evidence, before any cell is judged by it.
-    //
-    // A return inside the bar is evidence of a surface too close to measure only
-    // where a neighbouring return is inside it too. A surface crossing out of the
-    // minimum range leaves a RUN of them all along the edge of the region it blanks
-    // out; a single one is a speck — a raindrop, an insect, a finger on the way
-    // past — and a speck is not a surface.
-    std::vector<uint8_t> ev(n, 0);            // bit 0: close evidence, bit 1: measured
+    // What counts as evidence: a return, and whether it is inside the bar.
+    std::vector<uint8_t> ev(n, 0);            // bit 0: inside the bar, bit 1: measured
     for (size_t i = 0; i < n; ++i) {
         if (Status(im.cells[i].status) != Status::Hit) continue;
-        ev[i] = 2;
-        if (im.cells[i].rangeCm > barCm) continue;
-        size_t nb[4];
-        const int k = neighbours(i, nb);
-        for (int a = 0; a < k; ++a) {
-            const size_t j = nb[a];
-            if (Status(im.cells[j].status) == Status::Hit && im.cells[j].rangeCm <= barCm) {
-                ev[i] |= 1;
-                break;
-            }
-        }
+        ev[i] = uint8_t(2 | (im.cells[i].rangeCm <= barCm ? 1 : 0));
     }
 
-    // Each empty cell is then judged by the returns SURROUNDING it, not by the one
-    // cell next to it, and that is the whole of this correction.
+    // Each empty cell is judged by the returns SURROUNDING it, within +/- 2 cells.
+    // A return inside the bar anywhere in that window makes the call.
     //
-    // Judging by the single nearest neighbour let one cell overrule everything
-    // around it. The edge of a blanked region is a curve crossing a grid of cells,
-    // so along it there are always cells whose one measured neighbour happens to
-    // sit just past the bar while the run of returns a cell or two along sits
-    // inside it. Each of those came out as a view of something, kept its ray, and
-    // cleared a pencil to the rated range straight through the surface the rest of
-    // the edge had already shown was too close. Scattered along the edge of one
-    // region that is a handful of narrow bands fired through everything behind it —
-    // which is what a picture frame crossing the region made visible, because its
-    // own unreturned border put more such cells in the middle of the edge.
+    // The window is the whole of the guard, and it replaces two rules that each
+    // failed in their own direction.
     //
-    // The window is +/- 2 cells. Two because one is what a single cell can swing
-    // and this has to be robust to exactly that; no more than two because the
-    // window is only for raggedness — a surface crossing out of the minimum range
-    // spans tens of degrees, thousands of cells, so nothing real is resolved away
-    // by a window a seventh of a degree across. Close evidence anywhere in it wins,
-    // since a surface too close to measure also blocks everything behind it.
+    // Asking only the four cells next door let one cell overrule everything around
+    // it: the edge of a blanked region is a curve crossing a grid, so along it
+    // there are always cells whose one measured neighbour sits just past the bar
+    // while the run of returns a cell or two along sits inside it. Each of those
+    // kept its ray and cleared a pencil to the rated range straight through a
+    // surface the rest of the edge had already shown was too close.
+    //
+    // Asking each close return for a close NEIGHBOUR, to tell a surface from a
+    // speck, failed the other way and failed badly. The edge of a blanked region in
+    // real data is not a clean run: at the minimum range the returns come and go
+    // cell by cell — the ray at 0.50 m comes back, its neighbour does not, the next
+    // one does. On the fifty scans this was measured against, that dither shattered
+    // single regions into twelve thousand pieces and disqualified the evidence
+    // exactly where it mattered, leaving zones of two and three hundred thousand
+    // cells whose every measured border was at 0.50 m still clearing to 45 m.
+    //
+    // The window handles the speck on its own, which is why no company rule is
+    // needed: one stray return inside the bar reaches two cells and no further, so
+    // it costs a band of sky a couple of dozen cells rather than the band.
+    //
+    // Two cells is the size of it: one is what a single cell can swing, and no more
+    // than two because a surface crossing out of the minimum range spans tens of
+    // degrees — thousands of cells — so nothing real is resolved away by a window a
+    // seventh of a degree across. Close evidence in the window wins over far, since
+    // a surface too close to measure also blocks whatever is behind it.
     constexpr int kEvidenceWindow = 2;
-    std::vector<uint8_t> hz(n, 0);            // the same two bits, over a row window
+    constexpr int kCloseEvidenceNeeded = 1;
+    std::vector<uint8_t> hzClose(n, 0), hzHit(n, 0);   // counts over a row window
     for (int64_t r = 0; r < rows; ++r) {
         const size_t base = size_t(r) * size_t(cols);
         for (int64_t c = 0; c < cols; ++c) {
-            uint8_t m = 0;
+            uint8_t close_ = 0, any = 0;
             for (int d = -kEvidenceWindow; d <= kEvidenceWindow; ++d) {
                 int64_t cc = c + d;
                 cc -= cols * (cc >= cols ? 1 : 0);         // azimuth wraps
                 cc += cols * (cc < 0 ? 1 : 0);
-                m |= ev[base + size_t(cc)];
+                const uint8_t e = ev[base + size_t(cc)];
+                close_ = uint8_t(close_ + (e & 1));
+                any    = uint8_t(any + ((e >> 1) & 1));
             }
-            hz[base + size_t(c)] = m;
+            hzClose[base + size_t(c)] = close_;
+            hzHit[base + size_t(c)]   = any;
         }
     }
 
@@ -812,12 +811,17 @@ void filterNoReturnsTooClose(RangeImage& im, const Options& opt) {
         for (int64_t c = 0; c < cols; ++c) {
             const size_t i = size_t(r) * size_t(cols) + size_t(c);
             if (Status(im.cells[i].status) != Status::NoReturn) continue;
-            uint8_t m = 0;
-            for (int64_t rr = lo; rr <= hi; ++rr) m |= hz[size_t(rr) * size_t(cols) + size_t(c)];
-            if (m & 1)      { verdict[i] = kTooClose; ++closeSeeds; ++seeds; }
-            else if (m & 2) { verdict[i] = kView;                   ++seeds; }
+            uint32_t close_ = 0, any = 0;
+            for (int64_t rr = lo; rr <= hi; ++rr) {
+                const size_t j = size_t(rr) * size_t(cols) + size_t(c);
+                close_ += hzClose[j];
+                any    += hzHit[j];
+            }
+            if (close_ >= kCloseEvidenceNeeded) { verdict[i] = kTooClose; ++closeSeeds; ++seeds; }
+            else if (any)                       { verdict[i] = kView;                   ++seeds; }
         }
     }
+
     if (closeSeeds == 0) return;              // nothing in this scan is that close
 
     // The nearest close return in the scan, as the figure the decision turned on.

@@ -1297,7 +1297,12 @@ const char *kindLabel(check::Kind k) {
     //   270 242 214 186 158 130   six label/value rows, 28 apart
     //    99                        the region popup, 24 tall, clearing 130 by seven
     //    74  52  30   8            four tick boxes, 22 apart
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 298)];
+    //
+    // 620 wide, with the labels given 380 of it. The labels say what a setting
+    // means rather than naming it, so they are sentences, and at 220 they were
+    // being clipped mid-word — "Buffer / margin past the last return (m," — which
+    // is worse than a short label would have been.
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 620, 298)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -1327,8 +1332,8 @@ const char *kindLabel(check::Kind k) {
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (int i = 0; i < 6; ++i) {
         const CGFloat y = 270 - i * 28;
-        [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 220, 20)]];
-        NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(230, y - 3, 90, 22)];
+        [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 380, 20)]];
+        NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(390, y - 3, 90, 22)];
         [acc addSubview:f];
         [fields addObject:f];
     }
@@ -1337,7 +1342,7 @@ const char *kindLabel(check::Kind k) {
     // than any other, so it is a choice rather than a tick box.
     [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 102, 60, 20)]];
     NSPopUpButton *region =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 99, 396, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 99, 556, 24) pullsDown:NO];
     [region addItemsWithTitles:@[@"Shrinkwrap of the returns (tightest)",
                                  @"Box around the surveyed extent",
                                  @"Everything in range of a setup"]];
@@ -1348,26 +1353,27 @@ const char *kindLabel(check::Kind k) {
         if (regionOrder[i] == _visOptions.domain) [region selectItemAtIndex:i];
     [acc addSubview:region];
 
-    NSButton *interior = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
-    interior.title = @"Scanned entirely indoors (leave the space outside the walls out) "
-                     @"— or give the margin above a minus sign";
+    NSButton *interior = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 620, 20)];
+    interior.title = @"Scanned entirely indoors — leaves the space outside the walls out "
+                     @"(same as a negative margin)";
     [interior setButtonType:NSButtonTypeSwitch];
     interior.font = [NSFont systemFontOfSize:11];
     interior.state = _visOptions.wrapInteriorOnly ? NSControlStateValueOn
                                                   : NSControlStateValueOff;
     [acc addSubview:interior];
 
-    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 460, 20)];
-    firstHit.title = @"Stop at the first evidence (faster; visible and occupied become "
-                     @"lower bounds)";
+    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 620, 20)];
+    firstHit.title = @"Stop at the first evidence — faster, and visible and occupied "
+                     @"become lower bounds";
     [firstHit setButtonType:NSButtonTypeSwitch];
     firstHit.font = [NSFont systemFontOfSize:11];
     firstHit.state = (_visOptions.earlyOut == carve::EarlyOut::AnyEvidence)
                    ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:firstHit];
 
-    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 460, 20)];
-    solid.title = @"Show every unobserved voxel, not just the frontier";
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 620, 20)];
+    solid.title = @"Show every unobserved voxel, not just the frontier "
+                  @"(a solid body otherwise draws as a shell)";
     [solid setButtonType:NSButtonTypeSwitch];
     solid.font = [NSFont systemFontOfSize:11];
     solid.state = _visOptions.solid ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1377,9 +1383,9 @@ const char *kindLabel(check::Kind k) {
     // parameter of it, but it belongs here: it only means anything when the region
     // is the shrinkwrap, and it is the difference between seeing the site and
     // seeing a solid red mass in front of it.
-    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 460, 20)];
+    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 620, 20)];
     insideWrap.title = @"Keep only unobserved voxels inside the shrinkwrap "
-                       @"(drops the blanket running out to the range limit)";
+                       @"(drops the blanket out to the range limit)";
     [insideWrap setButtonType:NSButtonTypeSwitch];
     insideWrap.font = [NSFont systemFontOfSize:11];
     insideWrap.state = _intersectWrap ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1400,7 +1406,10 @@ const char *kindLabel(check::Kind k) {
         @"that returns nothing, and an empty cell that is really a wall at arm's length "
         @"would otherwise clear space straight through it, out to the maximum range.\n\n"
         @"By default only the frontier of that space is drawn — where coverage stops. "
-        @"The full volume hides its own interior anyway, and there is far more of it.\n\n"
+        @"There is far more of the volume than of its surface, and from outside the two "
+        @"look the same. Cut into one, though, and it is hollow: the blind cone under a "
+        @"setup draws as a cone-shaped shell, not a solid. Tick the box below to see "
+        @"every voxel.\n\n"
         @"This is the CPU reference, so a large site at 5 cm takes minutes. "
         @"File ▸ Cancel stops it, and a coarser voxel is much faster: halving the "
         @"voxel size costs eight times the work.";
