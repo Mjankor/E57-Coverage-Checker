@@ -687,7 +687,6 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     for (auto& img : images) {
         isolated    += img->diag.isolatedNoReturns;
         believedSky += img->diag.noReturns;
-        out.coneSpurCells += img->diag.blindConeSpurCells;
         if (img->diag.tooCloseZones) {
             ++out.setupsTooClose;
             out.tooCloseCells += img->diag.tooCloseNoReturns;

@@ -748,55 +748,48 @@ std::vector<NoReturnZone> describeNoReturnZones(const RangeImage& im, const Opti
     return out;
 }
 
-// Demotes zones of no-returns that are really the instrument's MINIMUM range.
+// Demotes no-returns that are really a surface inside the instrument's MINIMUM
+// range.
 //
 // A ray that came back with nothing usually means nothing was there along it, and
-// the carve clears it. Inside the instrument's minimum range it means the
-// opposite: a surface was there and it was too close to measure. A tripod parked
-// half a metre from a wall, a scan taken on a stair landing with the handrail at
-// the instrument's elbow, a column the setup was tucked behind — each puts a
-// large solid angle of the raster inside the minimum range, and every cell of it
-// comes back empty.
+// the carve clears it. Inside the minimum range it means the opposite: a surface
+// was there and it was too close to measure. Believed, each of those cells clears
+// a pencil of space to the rated range straight THROUGH that surface — at 0.45 m
+// minimum and 45 m rated, ninety times the distance to the thing in the way.
 //
-// Believed, each of those cells clears a pencil of space to the rated range
-// straight THROUGH the surface that was too close to see. A wall at 0.5 m and a
-// 45 m rated range clears ninety times the distance to the thing in the way. That
-// is what puts fans of cleared space radiating out of the setups of a survey
-// conducted entirely indoors, and what leaves its roof already cleared.
+// Nothing about the cell says which it is. What says it is the distance the
+// instrument measured AROUND it: the same surface crosses out of the minimum range
+// at the edge of the region it blanks out, and returns there. So a no-return cell
+// whose nearest surrounding return is inside `minRange * tooCloseFactor` is a
+// surface too close to measure, and establishes nothing.
 //
-// Nothing local distinguishes those cells: an empty cell looks the same whether
-// the surface it failed to measure was at 0.3 m or at 300 m. What distinguishes
-// them is the company the zone keeps. A zone of unmeasurably-close surface is
-// bounded by that same surface, at the point where it crosses out of the minimum
-// range — so the returns bordering the zone are all at very nearly the minimum
-// range itself, where the returns bordering a band of sky are metres or tens of
-// metres off. So: take the returns bordering each connected zone of no-returns,
-// and if most of them are inside Options::tooCloseFactor of the minimum range,
-// the zone is the minimum range and it establishes nothing.
+// NEAREST, and per cell. This was a median over a whole connected zone, and that
+// is what stopped it working on real data: a zone is not bounded by one thing. The
+// region blanked out by a surface at 0.3 m spans most of a hemisphere, so it runs
+// off the edges of that surface and its border is part near surface and part
+// whatever the rays reached beyond it — a room at three metres, a stairwell, sky.
+// One median over that mixture is a number about nothing: it answered "not close"
+// for a border that was half at half a metre, so not one cell of the region was
+// demoted and the fans stayed exactly as they were.
 //
-// Per ZONE, and that is the whole reason this needs connectivity. The border test
-// only has an answer near the border, and the cells deep inside the zone — the
-// ones that clear the longest pencils, straight at whatever the instrument was
-// standing against — have no returns anywhere near them. The verdict has to reach
-// them from the edge.
+// Taking the nearest instead puts the verdict where the evidence is. Every cell
+// bordering a return is decided by that return; the cells inside, which border
+// nothing, take the verdict of the nearest decided cell, by a breadth-first walk
+// out from all of them at once. A region bounded by a close surface on one side and
+// open room on the other splits along the middle, which is what it physically is.
+// A band of sky with one close return on its edge loses the handful of cells around
+// that return and keeps the rest, where the median could only condemn all of it or
+// none.
 //
-// The median rather than the minimum of the bordering returns, so the test is a
-// majority of the zone's border rather than one cell of it. A single close return
-// on the edge of a genuine sky band cannot condemn the band, and a single far one
-// on the edge of a too-close zone cannot rescue it. Each bordering return is
-// counted once per cell of the zone it touches, so a zone mostly against a near
-// wall is decided by that wall rather than by a sliver of distant scene.
+// Ties go to "too close": the walk enqueues those seeds first, so a cell the same
+// distance from both kinds is not cleared. Clearing space that was never seen is
+// the error that matters; leaving a few cells unsampled is not.
 //
-// ON THE CPU deliberately. This is a flood fill with a dynamic stack over an
-// irregular region — the shape CLAUDE.md's GPU-first rule exempts, and the shape
-// a GPU is worst at. The parallel form is iterated dilation, and a zone spanning
-// ninety degrees of a 2500-row raster is hundreds of cells across, so that is
-// hundreds of full-raster passes to do what one walk does.
-//
-// Measured on a 2500 x 5280 raster (13.2 M cells) holding a 1.1 M cell too-close
-// zone beside a 4.4 M cell band of sky: 102 ms, against 51 ms for buildPyramid
-// over the same raster — the accepted per-cell pass standing next to it. Each cell
-// is visited once, plus once more for the cells of a zone that is condemned.
+// ON THE CPU deliberately, per CLAUDE.md's exemption for an irregular walk with a
+// dynamic queue. Every cell is visited once. Measured on a 2500 x 5280 raster
+// (13.2 M cells) holding a blanked region of 0.7 M cells beside a 4.4 M cell band
+// of sky: 187 ms, against 48 ms for buildPyramid over the same raster — the
+// accepted per-cell pass standing next to it.
 void filterNoReturnsTooClose(RangeImage& im, const Options& opt) {
     im.diag.tooCloseNoReturns   = 0;
     im.diag.tooCloseZones       = 0;
@@ -808,82 +801,122 @@ void filterNoReturnsTooClose(RangeImage& im, const Options& opt) {
 
     const int64_t cols = int64_t(im.cols), rows = int64_t(im.rows);
     const size_t n = im.cells.size();
-    // One bit per cell: a zone is walked once however many times it is reached.
-    std::vector<uint64_t> seen((n + 63) / 64, 0);
-    auto mark  = [&](size_t i) { seen[i >> 6] |= 1ull << (i & 63); };
-    auto taken = [&](size_t i) { return (seen[i >> 6] >> (i & 63)) & 1ull; };
 
-    std::vector<size_t>   stack;
-    std::vector<uint16_t> border;
-    uint64_t demoted = 0;
-    double   nearest = -1.0;
+    // 0 undecided, 1 too close, 2 a view. Only no-returns ever get a verdict.
+    enum : uint8_t { kUndecided = 0, kTooClose = 1, kView = 2 };
+    std::vector<uint8_t> verdict(n, kUndecided);
 
-    // The four face neighbours of a cell, with azimuth wrapping and rows clamped:
-    // a zone crossing the seam at azimuth zero is one zone, and the first and last
-    // rows of the raster are real edges.
-    auto neighbours = [&](size_t i, size_t out[4]) -> int {
+    // The four face neighbours, with azimuth wrapping and rows clamped: a region
+    // crossing the seam at azimuth zero is one region, and the first and last rows
+    // of the raster are real edges.
+    auto neighbours = [&](size_t i, size_t o[4]) -> int {
         const int64_t r = int64_t(i) / cols, c = int64_t(i) % cols;
         int k = 0;
-        if (r > 0)        out[k++] = size_t((r - 1) * cols + c);
-        if (r < rows - 1) out[k++] = size_t((r + 1) * cols + c);
-        out[k++] = size_t(r * cols + (c == 0 ? cols - 1 : c - 1));
-        out[k++] = size_t(r * cols + (c == cols - 1 ? 0 : c + 1));
+        if (r > 0)        o[k++] = size_t((r - 1) * cols + c);
+        if (r < rows - 1) o[k++] = size_t((r + 1) * cols + c);
+        o[k++] = size_t(r * cols + (c == 0 ? cols - 1 : c - 1));
+        o[k++] = size_t(r * cols + (c == cols - 1 ? 0 : c + 1));
         return k;
     };
 
-    for (size_t start = 0; start < n; ++start) {
-        if (taken(start) || Status(im.cells[start].status) != Status::NoReturn) continue;
-
-        // Pass one: walk the zone and collect the ranges bordering it. The zone's
-        // own cells are not kept — a sky band is millions of them — so a zone that
-        // turns out to be too close is walked a second time to mark it. Only the
-        // too-close zones pay for that, and they are the small ones.
-        border.clear();
-        stack.assign(1, start);
-        mark(start);
-        while (!stack.empty()) {
-            const size_t i = stack.back();
-            stack.pop_back();
-            size_t nb[4];
-            const int k = neighbours(i, nb);
-            for (int a = 0; a < k; ++a) {
-                const size_t j = nb[a];
-                const Status st = Status(im.cells[j].status);
-                if (st == Status::Hit) { border.push_back(im.cells[j].rangeCm); continue; }
-                if (st != Status::NoReturn || taken(j)) continue;
-                mark(j);
-                stack.push_back(j);
-            }
+    // The nearest return bordering each no-return cell, where there is one. That
+    // cell is decided outright, by the only evidence there is about it.
+    std::vector<uint32_t> nearestCm(n, 0);
+    uint64_t seeds = 0, closeSeeds = 0;
+    double nearest = -1.0;
+    for (size_t i = 0; i < n; ++i) {
+        if (Status(im.cells[i].status) != Status::NoReturn) continue;
+        size_t nb[4];
+        const int k = neighbours(i, nb);
+        uint32_t best = 0;
+        for (int a = 0; a < k; ++a) {
+            const size_t j = nb[a];
+            if (Status(im.cells[j].status) != Status::Hit) continue;
+            const uint32_t r = im.cells[j].rangeCm;
+            if (best == 0 || r < best) best = r;
         }
-        // A zone with no returns around it at all — a raster that is empty, or a
-        // band walled off by the blind cone — has nothing to judge it on and is
-        // left as it is.
-        if (border.empty()) continue;
-        std::nth_element(border.begin(), border.begin() + ptrdiff_t(border.size() / 2),
-                         border.end());
-        const uint32_t med = border[border.size() / 2];
-        if (med > barCm) continue;
+        if (best == 0) continue;              // borders nothing measured: decided below
+        nearestCm[i] = best;
+        verdict[i] = (best <= barCm) ? kTooClose : kView;
+        ++seeds;
+        if (verdict[i] == kTooClose) {
+            ++closeSeeds;
+            const double m = double(best) * 0.01;
+            if (nearest < 0 || m < nearest) nearest = m;
+        }
+    }
+    if (closeSeeds == 0) return;              // nothing in this scan is that close
 
-        // Pass two: the same zone, marked. Setting the status to OutsideFov is what
-        // stops the walk revisiting a cell, so no second bitmap is needed.
+    // A surface, not a speck. A close seed survives only where a neighbouring cell
+    // is one too: a surface that blanks out a region borders it along a RUN of
+    // cells, where a single stray return inside the bar — a raindrop, an insect, a
+    // finger on the way past — touches one or two. Without this the walk below
+    // spreads that one cell's verdict along a line all the way across a band of
+    // sky, because in a direction with nothing to argue against it the nearest
+    // close cell stays nearest for ever.
+    //
+    // Read off the seeds as they were, not as they are being edited, so the test
+    // cannot erode a run from one end.
+    {
+        std::vector<uint8_t> was(verdict);
+        for (size_t i = 0; i < n; ++i) {
+            if (was[i] != kTooClose) continue;
+            size_t nb[4];
+            const int k = neighbours(i, nb);
+            bool company = false;
+            for (int a = 0; a < k && !company; ++a) company = (was[nb[a]] == kTooClose);
+            if (company) continue;
+            verdict[i] = kView;
+            --closeSeeds;
+        }
+        if (closeSeeds == 0) return;
+    }
+
+    // Breadth first from every decided cell at once, so an undecided cell takes the
+    // verdict of the nearest decided one. The close seeds go in first, so a cell the
+    // same distance from both is not cleared.
+    std::vector<uint32_t> queue;
+    queue.reserve(seeds);
+    for (size_t i = 0; i < n; ++i) if (verdict[i] == kTooClose) queue.push_back(uint32_t(i));
+    for (size_t i = 0; i < n; ++i) if (verdict[i] == kView)     queue.push_back(uint32_t(i));
+    for (size_t head = 0; head < queue.size(); ++head) {
+        const size_t i = queue[head];
+        const uint8_t v = verdict[i];
+        size_t nb[4];
+        const int k = neighbours(i, nb);
+        for (int a = 0; a < k; ++a) {
+            const size_t j = nb[a];
+            if (verdict[j] != kUndecided) continue;
+            if (Status(im.cells[j].status) != Status::NoReturn) continue;
+            verdict[j] = v;
+            queue.push_back(uint32_t(j));
+        }
+    }
+
+    // And the marking. `tooCloseZones` counts the connected pieces, for the report:
+    // one region blanked out by one surface is one piece however many cells it is.
+    uint64_t demoted = 0;
+    std::vector<uint64_t> seen((n + 63) / 64, 0);
+    std::vector<size_t> stack;
+    for (size_t start = 0; start < n; ++start) {
+        if (verdict[start] != kTooClose) continue;
+        if ((seen[start >> 6] >> (start & 63)) & 1ull) continue;
         ++im.diag.tooCloseZones;
-        const double medM = double(med) * 0.01;
-        if (nearest < 0 || medM < nearest) nearest = medM;
+        seen[start >> 6] |= 1ull << (start & 63);
         stack.assign(1, start);
-        im.cells[start].status  = uint8_t(Status::OutsideFov);
-        im.cells[start].rangeCm = 0;
-        ++demoted;
         while (!stack.empty()) {
             const size_t i = stack.back();
             stack.pop_back();
+            im.cells[i].status  = uint8_t(Status::OutsideFov);
+            im.cells[i].rangeCm = 0;
+            ++demoted;
             size_t nb[4];
             const int k = neighbours(i, nb);
             for (int a = 0; a < k; ++a) {
                 const size_t j = nb[a];
-                if (Status(im.cells[j].status) != Status::NoReturn) continue;
-                im.cells[j].status  = uint8_t(Status::OutsideFov);
-                im.cells[j].rangeCm = 0;
-                ++demoted;
+                if (verdict[j] != kTooClose) continue;
+                if ((seen[j >> 6] >> (j & 63)) & 1ull) continue;
+                seen[j >> 6] |= 1ull << (j & 63);
                 stack.push_back(j);
             }
         }
@@ -1216,83 +1249,16 @@ void markBlindCone(RangeImage& im, const Options& opt) {
 
     // One marking path for one band or two, so that unmarking — which restores
     // both — can never be asked to undo something that was marked differently.
-    //
-    // The band is the SEED, not the whole answer. What the instrument cannot see
-    // is not a neat block of rows: the mount blocks every azimuth close to the
-    // pole, which is the band, and then the legs, the pole it is clamped to and
-    // whatever is hanging off it block their own azimuths for a good deal
-    // further out. Those cells hold no returns either, and with only the band
-    // marked they were left believed — so each leg cleared a pencil of space to
-    // the rated range along its own shadow. Seen from above, three fans per
-    // setup, radiating out through the walls and the roof.
-    //
-    // A border test cannot find them. The minimum-range rule asks what the
-    // instrument measured around a zone, and for a surface it is nearly touching
-    // — a wall — the answer is that same surface at just past the minimum range.
-    // For a leg it is not: the leg is a few centimetres wide and the zone around
-    // it is bounded by the FLOOR, a metre and a half away. Nothing about the
-    // border says "too close".
-    //
-    // What says it is that the zone is attached to the mount. So the marking
-    // grows from the band through connected no-returns — and is bounded, because
-    // "connected" on its own would walk out of a doorway and into the sky. The
-    // bound is the cone's own angular size: a cell can only join if it lies
-    // within blindConeFromNadirDeg + blindConeAngleTolDeg of the pole the band
-    // runs into. Sixty degrees of nadir, on the defaults. A leg reaches into
-    // that; the sky at the other pole is a hundred and twenty degrees away from
-    // it, and a hole in the floor beyond the mount is not attached to the mount.
-    //
-    // Elevations are measured, so the pole is whichever end of the sweep this
-    // band occupies and no notion of world up is involved.
-    uint64_t marked = 0, spur = 0;
-    const double limitDeg = opt.blindConeFromNadirDeg + opt.blindConeAngleTolDeg;
-    const bool   haveTable = (im.map.elByRow.size() == im.rows);
-    const int64_t cols64 = int64_t(im.cols), rows64 = int64_t(im.rows);
-    std::vector<size_t> stack;
-
-    auto claim = [&](size_t i) {
-        Cell& cell = im.cells[i];
-        cell.status  = uint8_t(Status::OutsideFov);
-        cell.rangeCm = 0;
-        ++marked;
-    };
-    // How far a row sits from the pole its band runs into, in degrees.
-    auto fromPole = [&](uint32_t r, bool fromFirst) {
-        const double el = im.map.elByRow[r] * kRad2Deg;
-        const bool lowEnd = (fromFirst == firstIsLow);
-        return lowEnd ? (90.0 + el) : (90.0 - el);
-    };
-
+    uint64_t marked = 0;
     auto markBand = [&](uint32_t bandRows, bool fromFirst) {
-        stack.clear();
         for (uint32_t i = 0; i < bandRows; ++i) {
             const uint32_t r = fromFirst ? i : (im.rows - 1 - i);
             Cell* row = &im.cells[size_t(r) * im.cols];
             for (uint32_t c = 0; c < im.cols; ++c) {
                 if (Status(row[c].status) != Status::NoReturn) continue;
-                const size_t i2 = size_t(r) * im.cols + c;
-                claim(i2);
-                stack.push_back(i2);
-            }
-        }
-        if (!haveTable) return;          // no measured elevations: the band alone
-        while (!stack.empty()) {
-            const size_t i = stack.back();
-            stack.pop_back();
-            const int64_t r = int64_t(i) / cols64, c = int64_t(i) % cols64;
-            size_t nb[4];
-            int k = 0;
-            if (r > 0)          nb[k++] = size_t((r - 1) * cols64 + c);
-            if (r < rows64 - 1) nb[k++] = size_t((r + 1) * cols64 + c);
-            nb[k++] = size_t(r * cols64 + (c == 0 ? cols64 - 1 : c - 1));
-            nb[k++] = size_t(r * cols64 + (c == cols64 - 1 ? 0 : c + 1));
-            for (int a = 0; a < k; ++a) {
-                const size_t j = nb[a];
-                if (Status(im.cells[j].status) != Status::NoReturn) continue;
-                if (fromPole(uint32_t(int64_t(j) / cols64), fromFirst) > limitDeg) continue;
-                claim(j);
-                ++spur;
-                stack.push_back(j);
+                row[c].status  = uint8_t(Status::OutsideFov);
+                row[c].rangeCm = 0;
+                ++marked;
             }
         }
     };
@@ -1300,7 +1266,6 @@ void markBlindCone(RangeImage& im, const Options& opt) {
     if (bandOther) markBand(bandOther, !atFirst);
 
     im.diag.blindConeCells      = marked;
-    im.diag.blindConeSpurCells  = spur;
     im.diag.blindConeRows       = band;
     im.diag.blindConeRowsLast   = bandOther;
     im.diag.blindConeAtFirstRow = atFirst;

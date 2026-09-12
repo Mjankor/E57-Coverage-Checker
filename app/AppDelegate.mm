@@ -1618,13 +1618,6 @@ const char *kindLabel(check::Kind k) {
         // such a zone would otherwise have cleared to the rated range through the
         // surface that was too close to measure, which is the largest single way
         // this answer can be wrong in the optimistic direction.
-        // Cells the instrument's own legs and pole were blocking, outside the band
-        // at the pole. Each one was clearing a pencil along a leg's shadow.
-        if (result->coneSpurCells)
-            warn = [warn stringByAppendingFormat:
-                    @"   ·   %llu cells belong to the mount's legs and pole rather than "
-                     "the band at the pole",
-                    (unsigned long long)result->coneSpurCells];
         if (result->setupsTooClose)
             warn = [warn stringByAppendingFormat:
                     @"   ·   %llu setup(s) parked inside the %.2f m minimum range of "

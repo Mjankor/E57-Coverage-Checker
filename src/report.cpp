@@ -423,15 +423,6 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                     (unsigned long long)img.diag.blindConeCells, here);
                         if (there >= 0) o.add("%.2f m at the other end\n", there);
                         else            o.add("no unsampled band at the other end\n");
-                        // The cells outside the band: the mount's legs, the pole,
-                        // whatever else is within reach of the head. Each one was
-                        // clearing a pencil along a leg's shadow.
-                        if (img.diag.blindConeSpurCells)
-                            o.add("                  %llu of those cells are outside the "
-                                        "band — the legs and the pole,\n                  "
-                                        "which block their own azimuths further out than "
-                                        "the mount does\n",
-                                        (unsigned long long)img.diag.blindConeSpurCells);
                         if (img.diag.hasConeAxis) {
                             o.add("      mounting  : cone axis (%.3f, %.3f, %.3f) — %s\n",
                                         img.diag.coneAxisWorld[0], img.diag.coneAxisWorld[1],

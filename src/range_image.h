@@ -384,11 +384,6 @@ struct Diagnostics {
     // No-returns demoted to OutsideFov, and why.
     uint64_t isolatedNoReturns = 0;   // by the optional neighbourhood filter
     uint64_t blindConeCells    = 0;   // the instrument's own blind cone
-    // Of those, the cells OUTSIDE the empty band: the mount's legs, the pole it is
-    // clamped to, anything else within reach of it that blocks its own azimuths
-    // further out than the band. Each one was clearing a pencil of space to the
-    // rated range along a leg's shadow — see markBlindCone.
-    uint64_t blindConeSpurCells = 0;
     // Cells in zones found to be inside the instrument's minimum range, and how
     // many such zones there were. Every one of these would otherwise have cleared
     // a pencil of space to the rated range THROUGH the surface that was too close
