@@ -12,11 +12,18 @@
 //   Volume. A site 40 m across at 5 cm is order 10^8 voxels in range, and most
 //   of them are unknown simply because they are outside the building. Drawing
 //   that is neither possible nor useful. What is worth looking at is the
-//   frontier: unknown voxels that touch space some setup could see. That is
-//   where coverage stops — the mouth of a shadow, the far edge of the range
-//   spheres — and since an opaque blob hides its own interior anyway, the
-//   frontier looks the same as the solid volume from outside it while costing
-//   area instead of volume. `solid` turns the reduction off.
+//   frontier: unknown voxels with a face neighbour that was OBSERVED — seen
+//   through, or measured on. That is where coverage stops: the mouth of a
+//   shadow, the far edge of the range spheres, and the back of the ceiling a
+//   beam stopped on. Since an opaque blob hides its own interior anyway, the
+//   frontier then looks the same as the solid volume from outside it while
+//   costing area instead of volume. `solid` turns the reduction off.
+//
+//   "Observed" rather than "visible" is a correction, and the reason is the
+//   ceiling: the slab of unobserved space above one is bounded by measured
+//   surface below and by itself everywhere else, so asking for a neighbour seen
+//   THROUGH left the whole slab undrawable and an indoor survey showed nothing
+//   above its own roof.
 //
 //   Count. Even a frontier can exceed what is sensible to upload, so there is
 //   a cap. It is applied by hashing each voxel's position on the global lattice
@@ -75,7 +82,8 @@ struct Options {
     // sample, and `Result::partial` says so.
     uint64_t maxTiles   = 0;
 
-    // Keep only unknown voxels that touch visible space. See the header note.
+    // Keep only unknown voxels that touch OBSERVED space — seen through or
+    // measured on. See the header note.
     bool     solid      = false;
 
     // See carve::EarlyOut. Saturated is exact; AnyEvidence is exact for the
@@ -422,7 +430,7 @@ void buildWrapSkin(Result& r, uint64_t cap);
 uint64_t keepVoxelsInsideWrap(Result& r);
 
 // Exposed for testing: the frontier rule and the sampling decision.
-bool touchesVisible(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z);
+bool touchesObserved(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z);
 uint64_t voxelHash(int64_t x, int64_t y, int64_t z);
 
 } // namespace vis

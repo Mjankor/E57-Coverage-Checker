@@ -21,7 +21,7 @@ namespace {
 // review get their own and this becomes a lookup.
 constexpr uint8_t kUnknownR = 255, kUnknownG = 64, kUnknownB = 96;
 
-// The face directions, in the order visibleFaces reports them.
+// The face directions, in the order observedFaces reports them.
 const int32_t kFaceDirs[6][3] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, {0,0,-1}};
 
 // Shading, so a wall of identical dots reads as a shape.
@@ -34,8 +34,8 @@ const int32_t kFaceDirs[6][3] = {{1,0,0}, {-1,0,0}, {0,1,0}, {0,-1,0}, {0,0,1}, 
 //
 // Two cues, because they answer different questions:
 //
-//   Form. visibleFaces already looked at the six face neighbours to decide this
-//   voxel is on the frontier; the visible ones summed give the outward normal,
+//   Form. observedFaces already looked at the six face neighbours to decide this
+//   voxel is on the frontier; the observed ones summed give the outward normal,
 //   and a fixed world-space light on that normal turns the blob into a surface
 //   with lit and shaded sides. World-space rather than a headlight on purpose:
 //   the shading then stays put as the model turns, which is what lets you read
@@ -105,18 +105,43 @@ std::string fmt(const char* f, ...) {
 
 } // namespace
 
-// Which of a voxel's six face neighbours are visible, as a bit per face.
+// Which of a voxel's six face neighbours were OBSERVED, as a bit per face. Seen
+// through or measured on: either one is a place where coverage reaches.
 //
-// The frontier test only needs to know whether any of them is, but the same six
-// lookups also say which way the frontier faces — and that is a surface normal,
-// for nothing. Summing the directions of the visible faces points from the
-// unobserved voxel out into the space that was seen, which is the outward normal
-// of the shadow's mouth. It is what makes the drawn result readable as a shape
-// rather than as a fog of identical dots. See shadeFrontier.
+// Measured counts, and that is a correction. The rule used to ask only for a
+// neighbour some setup saw THROUGH, on the reasoning that a measured surface
+// between two voxels is exactly what stops there being a line of sight between
+// them. True, and beside the point: the frontier is where coverage STOPS, and a
+// measured surface is where it stops.
+//
+// What that cost was a whole class of unobserved space, silently. The slab above
+// a ceiling is bounded below by the ceiling the beam stopped on and everywhere
+// else by more of itself or by the edge of the domain — so not one of its voxels
+// had a visible face neighbour, the entire slab failed the frontier test, and a
+// survey conducted indoors drew nothing at all above its own roof. The same goes
+// for the space under a slab and behind any wall only ever seen from one side.
+// The volume was counted correctly the whole time; it just could not be drawn
+// without asking for the solid mass, and the solid mass buries the finding. The
+// comment above `solid` claimed the frontier "looks the same as the solid volume
+// from outside it", and for a region whose whole boundary is measured surface
+// that was simply false.
+//
+// The connectivity path has always asked for observed rather than visible — see
+// voids::touchesObserved — so this also makes the two paths agree about what a
+// frontier is.
+//
+// The frontier test only needs to know whether any neighbour qualifies, but the
+// same six lookups also say which way the frontier faces — and that is a surface
+// normal, for nothing. Summing the directions of the observed faces points from
+// the unobserved voxel out into the space coverage reached, which is the outward
+// normal of the shadow's mouth, or of the back of the ceiling. It is what makes
+// the drawn result readable as a shape rather than as a fog of identical dots.
+// See shadeFrontier.
 //
 // Faces only, not the 26-neighbourhood: a diagonal touch is a shared edge or
-// corner, which is not a line of sight passing between the two.
-uint8_t visibleFaces(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
+// corner, which is not a face this voxel presents to anything.
+uint8_t observedFaces(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
+    const uint8_t kObserved = uint8_t(carve::kVisible | carve::kOccupied);
     uint8_t mask = 0;
     for (int i = 0; i < 6; ++i) {
         const int64_t nx = int64_t(x) + kFaceDirs[i][0];
@@ -127,14 +152,14 @@ uint8_t visibleFaces(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
         // would silently make the frontier depend on the tiling.
         if (nx < 0 || ny < 0 || nz < 0 ||
             nx >= int64_t(t.dim) || ny >= int64_t(t.dim) || nz >= int64_t(t.dim)) continue;
-        if (t.state[t.index(uint32_t(nx), uint32_t(ny), uint32_t(nz))] & carve::kVisible)
+        if (t.state[t.index(uint32_t(nx), uint32_t(ny), uint32_t(nz))] & kObserved)
             mask |= uint8_t(1u << i);
     }
     return mask;
 }
 
-bool touchesVisible(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
-    return visibleFaces(t, x, y, z) != 0;
+bool touchesObserved(const carve::Tile& t, uint32_t x, uint32_t y, uint32_t z) {
+    return observedFaces(t, x, y, z) != 0;
 }
 
 // A position hash, used to pick which voxels survive the display cap. It has to
@@ -1093,8 +1118,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                             // question or was seen by something.
                             if (tile.state[tile.index(x, y, z)] != carve::kReachable) continue;
                             // The same six lookups decide the frontier and give
-                            // the outward normal — see visibleFaces.
-                            const uint8_t faces = visibleFaces(tile, x, y, z);
+                            // the outward normal — see observedFaces.
+                            const uint8_t faces = observedFaces(tile, x, y, z);
                             if (!opt.solid && !faces) continue;
                             double c[3];
                             tile.centre(x, y, z, p.voxelSize, c);

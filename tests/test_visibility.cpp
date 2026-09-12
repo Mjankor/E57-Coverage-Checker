@@ -196,7 +196,7 @@ static void testVoxelHash() {
     CHECK(agree > 0.45 && agree < 0.55, "adjacent voxels are uncorrelated");
 }
 
-static void testTouchesVisible() {
+static void testTouchesObserved() {
     std::printf("frontier rule\n");
 
     carve::Tile t;
@@ -208,14 +208,18 @@ static void testTouchesVisible() {
 
     // A lone unknown voxel with nothing around it is not on any frontier.
     at(2, 2, 2) = carve::kReachable;
-    CHECK(!vis::touchesVisible(t, 2, 2, 2), "isolated unknown touches nothing");
+    CHECK(!vis::touchesObserved(t, 2, 2, 2), "isolated unknown touches nothing");
 
     // A face neighbour that is visible puts it on the frontier.
     at(3, 2, 2) = carve::kReachable | carve::kVisible;
-    CHECK(vis::touchesVisible(t, 2, 2, 2), "a visible face neighbour is a frontier");
+    CHECK(vis::touchesObserved(t, 2, 2, 2), "a visible face neighbour is a frontier");
 
-    // An occupied neighbour is not: a measured surface between them is exactly
-    // what stops it being a line of sight.
+    // An OCCUPIED neighbour is a frontier too, and that is a correction. A
+    // measured surface between two voxels is indeed what stops there being a line
+    // of sight between them — and it is also exactly where coverage stops, which
+    // is what the frontier is for. Asking only for a visible neighbour made the
+    // slab above a ceiling undrawable: measured surface below it, itself
+    // everywhere else, not one visible face in the whole slab.
     carve::Tile u = t;
     u.state.assign(125, 0);
     auto uat = [&](uint32_t x, uint32_t y, uint32_t z) -> uint8_t& {
@@ -223,14 +227,14 @@ static void testTouchesVisible() {
     };
     uat(2, 2, 2) = carve::kReachable;
     uat(3, 2, 2) = carve::kReachable | carve::kOccupied;
-    CHECK(!vis::touchesVisible(u, 2, 2, 2), "an occupied neighbour is not a frontier");
+    CHECK(vis::touchesObserved(u, 2, 2, 2), "an occupied neighbour is a frontier as well");
 
     // Diagonals do not count — a shared edge is not a path between voxels.
     carve::Tile v = u;
     v.state.assign(125, 0);
     v.state[v.index(2, 2, 2)] = carve::kReachable;
     v.state[v.index(3, 3, 2)] = carve::kReachable | carve::kVisible;
-    CHECK(!vis::touchesVisible(v, 2, 2, 2), "a diagonal neighbour is not a frontier");
+    CHECK(!vis::touchesObserved(v, 2, 2, 2), "a diagonal neighbour is not a frontier");
 
     // The apron is what makes an edge voxel answerable: voxel 1 is the first
     // interior one, and its neighbour at 0 lives in the apron.
@@ -238,7 +242,7 @@ static void testTouchesVisible() {
     w.state.assign(125, 0);
     w.state[w.index(1, 2, 2)] = carve::kReachable;
     w.state[w.index(0, 2, 2)] = carve::kReachable | carve::kVisible;
-    CHECK(vis::touchesVisible(w, 1, 2, 2), "an interior voxel can see into the apron");
+    CHECK(vis::touchesObserved(w, 1, 2, 2), "an interior voxel can see into the apron");
 }
 
 static void testRebase() {
@@ -1672,12 +1676,54 @@ static void testAnIndoorCorpusCannotSeeThroughItsOwnRoof() {
     }
     CHECK(aboveCeiling > 100, "space above the ceiling is still unobserved");
     CHECK(belowFloor > 100, "and so is space below the floor");
+
+    // And it is DRAWN the way the app draws by default: the frontier, not the
+    // solid volume.
+    //
+    // This is the second half of the same report and it was the half still
+    // missing. The slab of unobserved space above a ceiling is bounded below by
+    // the ceiling the beam stopped on, and above and to the sides by more of
+    // itself or by the edge of the domain. Not one of its voxels has a face
+    // neighbour that some setup saw THROUGH — so under a frontier rule that asks
+    // only for a visible neighbour the whole slab is undrawable, and a top-down
+    // view of an indoor survey shows bare roof with nothing over it. What did
+    // show was the comb of thin cleared pencils where rays escaped through
+    // openings, with frontier between them: radial fans outside the building.
+    //
+    // Coverage stops AT the ceiling, and that is the frontier. The rule has to ask
+    // whether a neighbour was OBSERVED — seen through or measured — not only seen
+    // through. The connectivity path has always asked it that way
+    // (voids::touchesObserved); this is the plain path catching up.
+    {
+        vis::Options frontier = opt;
+        frontier.solid = false;
+        vis::Result fr;
+        CHECK(vis::run({path}, frontier, nullptr, fr, err), err.empty() ? "ran" : err.c_str());
+        // Above the band the ceiling itself occupies: the returns are at z = 3 and
+        // a voxel within half a diagonal of them is occupied rather than unknown,
+        // so the first unobserved layer sits just over 3.2. That layer is the whole
+        // test — under the old rule it was empty, because the only thing beneath it
+        // is the measured ceiling.
+        uint64_t roof = 0;
+        for (const lod::StorePoint& p : fr.voxels) {
+            const double x = double(p.x) + fr.origin[0];
+            const double y = double(p.y) + fr.origin[1];
+            const double z = double(p.z) + fr.origin[2];
+            if (std::fabs(x) > 4.0 || std::fabs(y) > 3.0) continue;
+            if (z > 3.2) ++roof;
+        }
+        CHECK(roof > 100, "the unobserved space above the ceiling is drawn, not just counted");
+        // A sheet, not the slab: the frontier is still a reduction, and one layer
+        // against the back of the ceiling is what makes the roof read as covered.
+        CHECK(fr.voxels.size() < r.voxels.size(),
+              "and it is still a reduction — fewer voxels than the solid volume");
+    }
 }
 
 int main() {
     testDefaultsAgreeWithTheLibrary();
     testVoxelHash();
-    testTouchesVisible();
+    testTouchesObserved();
     testRebase();
     testEndToEnd();
     testImageBudgetAndWhatCoarseningCosts();
