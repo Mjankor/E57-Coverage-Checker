@@ -1022,6 +1022,17 @@ bool build(const Survey& s, const std::string& storePath, const BuildOptions& op
     std::vector<Built> batch(ct);
     for (size_t base = 0; base < cells.size(); base += ct) {
         const size_t n = std::min<size_t>(ct, cells.size() - base);
+        // Announced BEFORE the batch is built, not after it is appended.
+        //
+        // Reporting only on completion left everything up to the first finished
+        // chunk — the spill flush, the top tree's finish and append, and the whole
+        // first batch — attributed to whatever stage was reported last, which was
+        // "indexing points". That made a phase which had got no slower look like it
+        // had doubled, and a progress line that lies about which stage is running
+        // is worse than a coarse one.
+        if (progress && !progress("building chunks", base, cells.size())) {
+            err = "cancelled"; return false;
+        }
         for (size_t k = 0; k < n; ++k) batch[k] = Built{};
 
         if (n == 1 || ct == 1) {
