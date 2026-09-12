@@ -654,24 +654,40 @@ void filterIsolatedNoReturns(RangeImage& im, const Options& opt) {
     }
 }
 
-// Finds and marks the instrument's blind cone.
+// Finds and marks the instrument's blind cone, from this scan and nothing else.
 //
 // The cone is an unsampled band running off one end of the raster, and which end
 // is not something to assume. A scanner mounted upside down has its cone
-// pointing up; a producer that rewrites the local frame so world up is +Z puts
-// the cone at the opposite end of the raster from an upright scan. Assuming
-// "nadir" from the sign of the elevation mapping gets both of those wrong, and
-// gets them wrong in the worst direction: it believes the cone, clearing space
-// to maxRange through whatever the instrument was standing on, and disbelieves
-// the sky, losing the clearing that carves the volume above a site.
+// pointing up; a producer that rewrites the local frame so world up is +Z, and
+// reverses the row order with it, puts the cone at the opposite end of the raster
+// from an upright scan. Assuming "nadir" from the sign of the elevation mapping
+// gets both of those wrong, and gets them wrong in the worst direction: it
+// believes the cone, clearing space to maxRange through whatever the instrument
+// was standing on, and disbelieves the sky, losing the clearing that carves the
+// volume above a site.
 //
-// So the end is found from the geometry. Just outside the blind cone the beam
-// grazes the instrument's own mount and lands on the ground a metre or two away,
-// so the returns bordering the cone are among the closest in the scan. Just
-// outside a sky band they are distant, or absent. The band bordered by the
-// nearer returns is the cone. Nothing in that test refers to up.
+// So each unsampled band is judged on its own merits, in this order:
+//
+//   1. The ANGLE it spans from its own pole. The instrument's cone is a fixed
+//      half-angle about the instrument's own downward axis — hardware, not scene —
+//      and a band of sky is not that shape. Measured in the instrument's own
+//      frame, so it needs no notion of world up and no pose.
+//   2. Where both bands are the cone's size, the RANGE of the returns bordering
+//      each. Just outside the cone the beam grazes the mount and lands on the
+//      ground a metre or two away; just outside a sky band the returns are
+//      distant. Several times nearer is the claim — see Options::blindConeTieRatio.
+//   3. Where neither band is the cone's size, or no angles could be measured, the
+//      bordering ranges alone, compared with each other.
+//
+// A band that gets through all of that without being shown to be a view of
+// anything is marked unsampled rather than believed, and that applies to both ends
+// at once where both ends deserve it. Believing a band that is really unsampled
+// clears every ray in it to the rated range straight at the pole — up through a
+// roof, down through a floor — because the elevation table is extrapolated across
+// the band, so a direction near the pole maps into it.
 void markBlindCone(RangeImage& im, const Options& opt) {
-    im.diag.blindConeRows  = 0;
+    im.diag.blindConeRows     = 0;
+    im.diag.blindConeRowsLast = 0;
     im.diag.blindConeCells = 0;
     im.diag.borderRangeFirst = -1.0;
     im.diag.borderRangeLast  = -1.0;
@@ -767,176 +783,219 @@ void markBlindCone(RangeImage& im, const Options& opt) {
         im.diag.looksInvertedByPose = (R.R[8] < -0.5);   // local +z, z component
     }
 
-    bool atFirst = false;
-    uint32_t band = 0;
-    std::string why;
-
-    if (opt.blindCone == BlindCone::BothEnds) {
-        // Both, which needs no comparison between them: the corpus already
-        // established that each is fixed geometry. Marked here and reported as
-        // one band plus a second, so unmarking can undo both.
-        uint64_t marked = 0;
-        auto markBand = [&](uint32_t bandRows, bool fromFirst) {
-            for (uint32_t i = 0; i < bandRows; ++i) {
-                const uint32_t r = fromFirst ? i : (im.rows - 1 - i);
-                Cell* row = &im.cells[size_t(r) * im.cols];
-                for (uint32_t c = 0; c < im.cols; ++c)
-                    if (Status(row[c].status) == Status::NoReturn) {
-                        row[c].status  = uint8_t(Status::OutsideFov);
-                        row[c].rangeCm = 0;
-                        ++marked;
-                    }
-            }
-        };
-        if (bandFirst + bandLast >= im.rows) return;
-        markBand(bandFirst, true);
-        markBand(bandLast, false);
-        im.diag.blindConeCells      = marked;
-        im.diag.blindConeRows       = bandFirst;
-        im.diag.blindConeAtFirstRow = true;
-        im.diag.blindConeRowsLast   = bandLast;
-        if (marked) {
-            im.diag.noReturns  -= std::min<uint64_t>(marked, im.diag.noReturns);
-            im.diag.outsideFov += marked;
-        }
-        return;
-    }
-    // Is a band the size the instrument's cone should be?
+    // Is a band the size the instrument's own cone should be? Measured from the
+    // band's own pole, so the answer says nothing about WHICH pole that is: an
+    // inverted mounting reads exactly the same as an upright one, which is what
+    // makes this safe to lead with.
     auto isCone = [&](double ang) {
         return ang >= 0.0 && std::fabs(ang - opt.blindConeFromNadirDeg) <= opt.blindConeAngleTolDeg;
     };
-    const bool coneFirst = isCone(angFirst), coneLast = isCone(angLast);
+    const bool coneFirst = haveAngles && isCone(angFirst);
+    const bool coneLast  = haveAngles && isCone(angLast);
+
+    // What gets marked: the mount's band, and — where the band at the other end
+    // cannot be shown to be a view of anything either — a second band there.
+    bool     atFirst   = false;
+    uint32_t band      = 0;      // rows at the `atFirst` end
+    uint32_t bandOther = 0;      // rows at the other end; 0 when only one is marked
 
     if (opt.blindCone == BlindCone::FirstRows) {
-        atFirst = true;  band = bandFirst;  why = "forced to the first rows";
+        atFirst = true;  band = bandFirst;
     } else if (opt.blindCone == BlindCone::LastRows) {
-        atFirst = false; band = bandLast;   why = "forced to the last rows";
+        atFirst = false; band = bandLast;
+    } else if (opt.blindCone == BlindCone::BothEnds) {
+        atFirst = true;  band = bandFirst;  bandOther = bandLast;
     } else if (bandFirst && bandLast) {
-        // Both ends are empty, which is the ordinary outdoor case: sky at one
-        // end, the mount at the other. Compare like with like within the one
-        // scan — no absolute threshold needed, and no notion of up.
-        if (mFirst < 0 || mLast < 0) return;
-        const double near_ = std::min(mFirst, mLast), far_ = std::max(mFirst, mLast);
-        if (near_ > opt.blindConeRatio * far_) {
-            // The ranges cannot separate them — a ceiling at 1.5 m and a floor at
-            // 1.5 m, which is every scan of a job done entirely indoors. This is
-            // where the ANGLE earns its keep, and why it is tried here rather than
-            // ahead of the range test: where the ranges are clearly separated they
-            // are the better evidence, because they still work on a scan whose
-            // frame puts the mount at +z with the elevation table unchanged — a
-            // hanging mount, which no elevation can detect.
+        // Both ends of the raster are unsampled, and each band is judged on its
+        // own merits from this scan's own geometry. No vote, and no comparison
+        // with other scans: what makes a band the instrument's cone is a property
+        // of the instrument, and this scan was taken with it.
+        //
+        // The ANGLE leads, because it is the only evidence here that is a
+        // property of the hardware rather than of where the tripod stood. A
+        // scanner cannot see its own mount, so a cone of a fixed half-angle about
+        // its own downward axis is missing from every scan it takes. A band of sky
+        // is not that shape: it runs from whatever the scene left up to the pole,
+        // so it measures a few degrees from zenith on a built-up site and ninety
+        // on an open one.
+        if (coneFirst != coneLast) {
+            // One band is the size of the instrument's cone and the other is not.
+            // Nothing else needs asking, and in particular the bordering ranges
+            // are NOT asked. They would be asked at a cost: on the five scans this
+            // was measured against they point the wrong way in three, because a
+            // wall a metre from the instrument borders the scene band more closely
+            // than the ground borders the mount's. The angle gets all five right.
+            atFirst = coneFirst;
+            band    = atFirst ? bandFirst : bandLast;
+            im.diag.coneByElevation = true;
+            char buf[540];
+            std::snprintf(buf, sizeof(buf),
+                "the cone was identified by ANGLE: the band at the raster's %s end spans "
+                "%.1f deg from its pole, which is the instrument's cone (%.1f +/- %.1f), "
+                "while the band at the other end spans %.1f deg and is therefore a view of "
+                "something — sky, or a field of view that stops. The returns bordering them, "
+                "%.2f m and %.2f m, were not consulted: the angle is instrument geometry and "
+                "they are scene%s",
+                atFirst ? "first" : "last", atFirst ? angFirst : angLast,
+                opt.blindConeFromNadirDeg, opt.blindConeAngleTolDeg,
+                atFirst ? angLast : angFirst, mFirst, mLast,
+                (atFirst != firstIsLow)
+                    ? " — and the cone is at the HIGH end, so this scan's frame has its "
+                      "mount at +z: an inverted mounting" : "");
+            if (!im.diag.note.empty()) im.diag.note += "; ";
+            im.diag.note += buf;
+        } else {
+            // The angle cannot separate them: either both bands are the size of the
+            // instrument's cone — a sweep that stops short of both poles leaves
+            // about the same gap at each — or neither is, and then no band here is
+            // this instrument's cone at all.
             //
-            // A scanner cannot see its own mount, so a cone of a fixed half-angle
-            // about its own downward axis is missing from every scan it takes.
-            // Sky is not that shape: it runs all the way to the pole, so it
-            // measures a few degrees from zenith where a mount cone measures
-            // forty-odd from nadir.
-            if (haveAngles && (coneFirst || coneLast)) {
-                if (coneFirst != coneLast) {
-                    atFirst = coneFirst;
-                    band    = atFirst ? bandFirst : bandLast;
-                    im.diag.coneByElevation = true;
-                    char buf[460];
-                    std::snprintf(buf, sizeof(buf),
-                        "the returns bordering the two unsampled bands are at %.2f m and "
-                        "%.2f m, too similar to tell apart, so the cone was identified by "
-                        "ANGLE: the band at the raster's %s end spans %.1f deg from its pole, "
-                        "which is the instrument's cone (%.1f +/- %.1f), while the other "
-                        "spans %.1f deg%s",
-                        mFirst, mLast, atFirst ? "first" : "last",
-                        atFirst ? angFirst : angLast, opt.blindConeFromNadirDeg,
-                        opt.blindConeAngleTolDeg, atFirst ? angLast : angFirst,
-                        (atFirst != firstIsLow)
-                            ? " — and it is at the HIGH end, so this scan's frame has its "
-                              "mount at +z: an inverted mounting" : "");
-                    if (!im.diag.note.empty()) im.diag.note += "; ";
-                    im.diag.note += buf;
-                } else {
-                    // Both bands are the size of the cone — a scanner sweeping,
-                    // say, -45 to +45 leaves the same gap at each pole. Assume the
-                    // instrument was UPRIGHT, which in its own frame means the
-                    // mount is at the low-elevation end.
-                    //
-                    // The pose is not consulted for this. The mount sits at the
-                    // instrument's own -z however that frame was later placed in
-                    // the world, so a pose rotation says where the scan went, not
-                    // where its mount is. An inverted mounting is reported
-                    // instead — see Diagnostics::looksInvertedByPose.
-                    atFirst = firstIsLow;
-                    band    = atFirst ? bandFirst : bandLast;
-                    im.diag.coneByElevation = true;
-                    char buf[460];
-                    std::snprintf(buf, sizeof(buf),
-                        "both unsampled bands are the size of the instrument's cone (%.1f and "
-                        "%.1f deg, expected %.1f +/- %.1f) and their bordering ranges are "
-                        "%.2f m and %.2f m, so neither test separates them; the scanner is "
-                        "assumed upright and the mount taken as the raster's %s (low "
-                        "elevation) end%s",
-                        angFirst, angLast, opt.blindConeFromNadirDeg,
-                        opt.blindConeAngleTolDeg, mFirst, mLast,
-                        atFirst ? "first" : "last",
-                        im.diag.looksInvertedByPose
-                            ? " — though the pose puts this setup's own up axis pointing "
-                              "downward, which is worth checking" : "");
-                    if (!im.diag.note.empty()) im.diag.note += "; ";
-                    im.diag.note += buf;
-                }
-            } else {
-                // Neither band is the size of a cone and the ranges cannot choose.
-                // Refusing is not neutral — it leaves both bands believed — but
-                // guessing risks the same error silently, and this way it is
-                // reported and the corpus still gets its say.
-                char buf[520];
+            // The returns bordering each band are asked, and asked for a clear
+            // answer: several times nearer, not merely nearer. See
+            // Options::blindConeTieRatio for why the bar is that high.
+            const bool haveBoth  = mFirst > 0 && mLast > 0;
+            const bool nearFirst = haveBoth && mFirst <= opt.blindConeTieRatio * mLast;
+            const bool nearLast  = haveBoth && mLast  <= opt.blindConeTieRatio * mFirst;
+            if (nearFirst != nearLast) {
+                atFirst = nearFirst;
+                band    = atFirst ? bandFirst : bandLast;
+                char buf[560];
                 std::snprintf(buf, sizeof(buf),
-                              "both ends of the raster are unsampled (%u and %u rows, %.1f and "
-                              "%.1f deg from their poles) and the returns bordering them are at "
-                              "%.2f m and %.2f m — neither the ranges nor the angles tell the "
-                              "instrument's blind cone from sky, so neither is treated as "
-                              "unsampled. Set the blind cone explicitly if you know it, or "
-                              "adjust the expected cone angle",
-                              bandFirst, bandLast, angFirst, angLast, mFirst, mLast);
+                    "the two unsampled bands span %.1f and %.1f deg from their poles, which "
+                    "the expected cone (%.1f +/- %.1f) cannot separate — %s. The returns "
+                    "bordering the raster's %s end are at %.2f m against %.2f m at the "
+                    "other, several times nearer: a beam grazing the mount and landing "
+                    "beside the tripod rather than one crossing the site",
+                    angFirst, angLast, opt.blindConeFromNadirDeg, opt.blindConeAngleTolDeg,
+                    coneFirst ? "both are its size" : "neither is its size",
+                    atFirst ? "first" : "last", atFirst ? mFirst : mLast,
+                    atFirst ? mLast : mFirst);
                 if (!im.diag.note.empty()) im.diag.note += "; ";
                 im.diag.note += buf;
-                return;
+            } else {
+                // Nothing separates them, so NEITHER is believed: both bands are
+                // marked unsampled.
+                //
+                // That is the whole of the correction, and it replaces a refusal.
+                // Refusing to choose left both bands BELIEVED, which is not
+                // neutral: because the elevation table is extrapolated across an
+                // unsampled band, a direction near the pole maps into it, so every
+                // ray in the band clears to the rated range straight at the pole.
+                // Up through a roof and down through a floor, at every setup —
+                // which is what a survey conducted entirely inside a building
+                // looks like, with the mount blocking one end and a ceiling at a
+                // constant height the other.
+                //
+                // The cost of marking both is a cone of unknown space at each
+                // pole, and any other setup whose sweep covers that direction
+                // clears it. The cost of believing the wrong one is space reported
+                // as seen that the instrument never looked at. Note also where
+                // "nothing separates them" comes from: for the bordering ranges to
+                // be within a factor of three of each other, the scan has to be
+                // enclosed. On an open site the sky border is tens of metres and
+                // the mount's is two, and the test above settles it.
+                //
+                // Which band is the MOUNT is still reported, and there the scanner
+                // is taken to be upright: the mount sits at the instrument's own
+                // low-elevation end. The pose is not consulted for it — the mount
+                // is at the instrument's -z however that frame was later placed in
+                // the world — but a pose that disagrees is worth seeing, so it is
+                // mentioned.
+                atFirst   = firstIsLow;
+                band      = atFirst ? bandFirst : bandLast;
+                bandOther = atFirst ? bandLast  : bandFirst;
+                if (coneFirst) im.diag.coneByElevation = true;
+                char buf[640];
+                std::snprintf(buf, sizeof(buf),
+                    "both ends of the raster are unsampled (%u and %u rows, spanning %.1f and "
+                    "%.1f deg from their poles against an expected cone of %.1f +/- %.1f) and "
+                    "the returns bordering them, %.2f m and %.2f m, are not several times "
+                    "apart, so nothing says which is the instrument. NEITHER is believed as a "
+                    "view and both are marked unsampled; believing either would clear a cone "
+                    "to the rated range straight at its pole. The mount is reported at the "
+                    "raster's %s (low elevation) end, the scanner assumed upright%s",
+                    bandFirst, bandLast, angFirst, angLast, opt.blindConeFromNadirDeg,
+                    opt.blindConeAngleTolDeg, mFirst, mLast, atFirst ? "first" : "last",
+                    im.diag.looksInvertedByPose
+                        ? " — though the pose puts this setup's own up axis pointing "
+                          "downward, which is worth checking" : "");
+                if (!im.diag.note.empty()) im.diag.note += "; ";
+                im.diag.note += buf;
             }
-        } else {
-            atFirst = (mFirst < mLast);
-            band    = atFirst ? bandFirst : bandLast;
         }
     } else if (bandFirst || bandLast) {
-        // Only one end is empty. It is the cone only if the returns bordering it
-        // are much closer than the scan's returns generally; otherwise it is a
-        // field of view that simply stops, or sky.
+        // Only one end is unsampled, so there is no second band to compare it
+        // with — and then WHICH end it is carries most of the answer.
+        //
+        // The mount sits at the instrument's own -z by construction, so the band
+        // that can be the cone is the one at the LOW-elevation end of the
+        // instrument's own sweep. A band at the other end is at zenith, and a band
+        // of sky at zenith is what clears the volume above a site: it is believed.
+        //
+        // The pose is not asked. For a scan stored scanner-local the raster's
+        // elevations ARE the instrument's own, so the mount is at the low end
+        // however the pose then places that frame in the world — an instrument
+        // hanging upside down included. The one case this reads as sky and should
+        // not is a producer that rewrote the points into a world-up frame AND
+        // reversed the row order, and nothing in the file says so: its pose is
+        // identity. Where both ends are unsampled the angle catches that on its
+        // own, because it is measured from each band's own pole; with one band
+        // there is nothing to catch it with, and reading it as sky is the reading
+        // that cannot clear space through a floor.
         atFirst = (bandFirst != 0);
         band    = atFirst ? bandFirst : bandLast;
         const double m = atFirst ? mFirst : mLast;
-        if (m < 0) return;
-        double overall = im.diag.nearestReturn > 0 ? im.diag.furthestReturn : 0.0;
-        if (overall <= 0) return;
-        // Half the scan's furthest return is a generous bar: a mount's ground
-        // ring is metres where a site is tens of metres.
-        if (m > opt.blindConeRatio * 0.5 * overall) return;
+        if (haveAngles) {
+            if (atFirst != firstIsLow) return;    // a band at zenith: a view, and it clears
+            // And it is the cone only if it is the size of one. A band much bigger
+            // than the instrument's cone is not the mount, whatever end it is at:
+            // the rays are either sky below an edge or a field of view that stops,
+            // and both of those clear.
+            if (!isCone(atFirst ? angFirst : angLast)) return;
+            im.diag.coneByElevation = true;
+        } else {
+            // No measured angles — a raster whose mapping could not be built. The
+            // range of the returns bordering the band is then all there is: it is
+            // the cone only if they are much closer than the scan's returns
+            // generally.
+            if (m < 0) return;
+            double overall = im.diag.nearestReturn > 0 ? im.diag.furthestReturn : 0.0;
+            if (overall <= 0) return;
+            // Half the scan's furthest return is a generous bar: a mount's ground
+            // ring is metres where a site is tens of metres.
+            if (m > opt.blindConeRatio * 0.5 * overall) return;
+        }
     } else {
         return;      // no unsampled band at either end
     }
     if (band == 0 || band >= im.rows) return;
+    if (bandOther && band + bandOther >= im.rows) bandOther = 0;
 
-    for (uint32_t i = 0; i < band; ++i) {
-        const uint32_t r = atFirst ? i : (im.rows - 1 - i);
-        Cell* row = &im.cells[size_t(r) * im.cols];
-        for (uint32_t c = 0; c < im.cols; ++c) {
-            if (Status(row[c].status) == Status::NoReturn) {
+    // One marking path for one band or two, so that unmarking — which restores
+    // both — can never be asked to undo something that was marked differently.
+    uint64_t marked = 0;
+    auto markBand = [&](uint32_t bandRows, bool fromFirst) {
+        for (uint32_t i = 0; i < bandRows; ++i) {
+            const uint32_t r = fromFirst ? i : (im.rows - 1 - i);
+            Cell* row = &im.cells[size_t(r) * im.cols];
+            for (uint32_t c = 0; c < im.cols; ++c) {
+                if (Status(row[c].status) != Status::NoReturn) continue;
                 row[c].status  = uint8_t(Status::OutsideFov);
                 row[c].rangeCm = 0;
-                ++im.diag.blindConeCells;
+                ++marked;
             }
         }
-    }
+    };
+    markBand(band, atFirst);
+    if (bandOther) markBand(bandOther, !atFirst);
+
+    im.diag.blindConeCells      = marked;
     im.diag.blindConeRows       = band;
+    im.diag.blindConeRowsLast   = bandOther;
     im.diag.blindConeAtFirstRow = atFirst;
-    if (im.diag.blindConeCells) {
-        im.diag.noReturns  -= std::min<uint64_t>(im.diag.blindConeCells, im.diag.noReturns);
-        im.diag.outsideFov += im.diag.blindConeCells;
+    if (marked) {
+        im.diag.noReturns  -= std::min<uint64_t>(marked, im.diag.noReturns);
+        im.diag.outsideFov += marked;
     }
 
     // Which way the instrument was actually pointing. The cone sits at the end
@@ -959,253 +1018,85 @@ void markBlindCone(RangeImage& im, const Options& opt) {
     }
 }
 
-// Puts a band that markBlindCone claimed back as it was: no-returns clearing to
-// the rated range. Exactly reversible because the marking only ever converted
-// NoReturn to OutsideFov across a whole band.
-//
-// (If the optional drop filter is on it runs after the cone marking, so a cell it
-// demoted inside the band would come back as a no-return here. The filter is off
-// by default, and a caller that wants both should run the corpus pass before it.)
-static void unmarkBlindCone(RangeImage& im, const Options& opt) {
-    if ((im.diag.blindConeRows == 0 && im.diag.blindConeRowsLast == 0) ||
-        im.rows == 0 || im.cols == 0) return;
-    const uint16_t clearTo = uint16_t(std::min(opt.maxRange * 100.0, 65535.0));
-    uint64_t restored = 0;
-    auto restore = [&](uint32_t bandRows, bool fromFirst) {
-        for (uint32_t i = 0; i < bandRows; ++i) {
-            const uint32_t r = fromFirst ? i : (im.rows - 1 - i);
-            Cell* row = &im.cells[size_t(r) * im.cols];
-            for (uint32_t c = 0; c < im.cols; ++c) {
-                if (Status(row[c].status) != Status::OutsideFov) continue;
-                row[c].status  = uint8_t(Status::NoReturn);
-                row[c].rangeCm = clearTo;
-                ++restored;
-            }
-        }
-    };
-    restore(im.diag.blindConeRows, im.diag.blindConeAtFirstRow);
-    // A both-ends marking has a second band, at the other end.
-    restore(im.diag.blindConeRowsLast, !im.diag.blindConeAtFirstRow);
-    im.diag.noReturns  += restored;
-    im.diag.outsideFov -= std::min<uint64_t>(restored, im.diag.outsideFov);
-    im.diag.blindConeRows     = 0;
-    im.diag.blindConeRowsLast = 0;
-    im.diag.blindConeCells    = 0;
-    im.diag.hasConeAxis       = false;
-}
-
-ConeVerdict decideBlindConeEnd(
-    const std::vector<std::pair<uint32_t, uint32_t>>& bands, const Options& opt) {
+ConeVerdict summariseBlindCones(const std::vector<RangeImage*>& images,
+                                const Options& opt) {
     ConeVerdict v;
-    v.scans = bands.size();
+    for (const RangeImage* im : images) {
+        if (!im || im->rows == 0) continue;
+        ++v.scans;
+        const Diagnostics& d = im->diag;
+        if (d.blindConeRows == 0) {
+            ++v.undecided;
+        } else {
+            if (d.blindConeRowsLast)        ++v.bothEnds;
+            else if (d.blindConeAtFirstRow) ++v.atFirst;
+            else                            ++v.atLast;
+            if (d.coneByElevation) ++v.byAngle;
+            if (d.hasConeAxis && d.coneAxisWorld[2] > 0.5) ++v.inverted;
+        }
+        // A band that was THERE and was not marked is a band believed to be a view
+        // of something. Which end each marked band is at comes from the scan, not
+        // from an assumption about row order.
+        const uint32_t markedFirst = d.blindConeAtFirstRow ? d.blindConeRows : d.blindConeRowsLast;
+        const uint32_t markedLast  = d.blindConeAtFirstRow ? d.blindConeRowsLast : d.blindConeRows;
+        if (d.emptyLeadingRowsFound  > markedFirst) ++v.bandsBelieved;
+        if (d.emptyTrailingRowsFound > markedLast)  ++v.bandsBelieved;
+    }
+
+    char buf[720];
     if (opt.blindCone == BlindCone::None) {
-        v.why = "blind cone detection is switched off: every empty cell is believed";
+        v.headline = "switched off";
+        v.why = "blind cone detection is switched off: every empty cell is believed, so "
+                "each one clears space to the rated range";
         return v;
     }
-    if (opt.blindCone != BlindCone::Auto) {
-        v.decided    = true;
-        v.atFirstRow = (opt.blindCone == BlindCone::FirstRows);
-        v.why        = "the blind cone was set explicitly";
+    if (v.scans == 0) {
+        v.headline = "no usable raster";
+        v.why      = "no scan produced a raster to look at";
         return v;
     }
-    if (v.scans < 2) {
-        v.why = "one scan, so the cone was judged from its own geometry — the "
-                "bordering-range test, which is the best a single scan can do";
-        return v;
-    }
-
-    uint32_t leadMin = UINT32_MAX, leadMax = 0, trailMin = UINT32_MAX, trailMax = 0;
-    for (const auto& b : bands) {
-        leadMin  = std::min(leadMin,  b.first);
-        leadMax  = std::max(leadMax,  b.first);
-        trailMin = std::min(trailMin, b.second);
-        trailMax = std::max(trailMax, b.second);
-    }
-
-    // Fixed geometry is the same band in MOST scans; scene is not.
-    //
-    // "Most", by a median and a count, rather than "every", by a min and a max.
-    // That is a correction and the reason matters, because the old form failed in
-    // the worst available direction as a corpus grew.
-    //
-    // A min and a max over the corpus can only widen as scans are added. So one
-    // scan out of fifty whose leading band is unusual — or zero, which the old
-    // `leadMin > 0` disqualified outright — moved the spread past the tolerance
-    // and took the whole verdict with it. Undecided then UNMARKS every scan's
-    // cone, so each setup's blind band becomes rays believed to have seen through
-    // to the rated range: a cone carved through the floor under every setup. With
-    // thirty setups the corpus decided and the answer was right; with fifty one
-    // outlier undecided it, fifty cones cleared the interior, and the unobserved
-    // space the tool exists to report vanished. A single scan should not be able
-    // to do that, and a median cannot be moved by one.
-    //
-    // The tolerance keeps its meaning — a relative band width — but is measured
-    // about the median, and a supermajority of scans has to sit inside it.
-    auto median = [](std::vector<uint32_t> v) -> uint32_t {
-        if (v.empty()) return 0;
-        std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
-        return v[v.size() / 2];
-    };
-    std::vector<uint32_t> lead, trail;
-    lead.reserve(bands.size());
-    trail.reserve(bands.size());
-    for (const auto& b : bands) { lead.push_back(b.first); trail.push_back(b.second); }
-    const uint32_t leadMed = median(lead), trailMed = median(trail);
-
-    // How many scans agree with the median to within the tolerance. Fixed
-    // geometry is present in every scan that saw it, so the bar is high — but not
-    // unanimous, because one badly cropped scan in a corpus of a thousand is
-    // ordinary and says nothing about the instrument.
-    auto agreeing = [&](const std::vector<uint32_t>& v, uint32_t med) {
-        if (med == 0) return size_t(0);
-        const double tol = opt.coneCorpusSpread * double(med);
-        size_t n = 0;
-        for (uint32_t x : v)
-            if (std::fabs(double(x) - double(med)) <= tol) ++n;
-        return n;
-    };
-    const size_t need = (bands.size() * 4 + 4) / 5;      // four fifths, rounded up
-    const bool leadFixed  = leadMed  > 0 && agreeing(lead,  leadMed)  >= need;
-    const bool trailFixed = trailMed > 0 && agreeing(trail, trailMed) >= need;
-
-    char buf[560];
-    if (leadFixed && trailFixed) {
-        // Each end is the same in every scan, so neither is the scene. An
-        // instrument level inside a building sees its own mount one way and, at a
-        // constant height, the ceiling the other — two fixed bands, and no
-        // comparison between them can say which is "the" cone because both are.
-        // Treated as unsampled rather than tied: a band every scan shares is not
-        // a view of anything.
-        v.decided  = true;
-        v.bothEnds = true;
-        v.rowsMin  = leadMin;  v.rowsMax  = leadMax;
-        v.otherMin = trailMin; v.otherMax = trailMax;
-        std::snprintf(buf, sizeof(buf),
-                      "both ends of the raster carry a band that is fixed across %zu scans "
-                      "(leading %u rows median, %zu agree; trailing %u median, %zu agree), so "
-                      "both are the instrument rather than the scene and NEITHER is believed "
-                      "as a view of the sky. Believing them would clear a cone through "
-                      "whatever is on the other side — the roof and the floor, on a job "
-                      "scanned from inside throughout",
-                      v.scans, leadMed, agreeing(lead, leadMed),
-                      trailMed, agreeing(trail, trailMed));
-        v.why = buf;
-        return v;
-    }
-    if (leadFixed == trailFixed) {
-        // Neither end is consistent, or both are — five scans from inside one room
-        // would have the same ceiling band in every one. Neither case is something
-        // a corpus can settle, so the per-scan decisions build() already made
-        // stand, and the reason is recorded rather than resolved by a coin toss.
-        std::snprintf(buf, sizeof(buf),
-                      "%s across %zu scans (leading %u rows median, %zu scans agree, "
-                      "%u-%u seen; trailing %u median, %zu agree, %u-%u seen), so the "
-                      "corpus cannot say which end is the instrument; each scan's own "
-                      "bordering-range verdict stands",
-                      "neither end of the raster is consistent",
-                      v.scans, leadMed, agreeing(lead, leadMed), leadMin, leadMax,
-                      trailMed, agreeing(trail, trailMed), trailMin, trailMax);
-        v.why = buf;
-        return v;
-    }
-
-    v.decided    = true;
-    v.atFirstRow = leadFixed;
-    v.rowsMin    = leadFixed ? leadMin  : trailMin;
-    v.rowsMax    = leadFixed ? leadMax  : trailMax;
-    v.otherMin   = leadFixed ? trailMin : leadMin;
-    v.otherMax   = leadFixed ? trailMax : leadMax;
+    // The headline is the shape of the answer across the scans; the sentence says
+    // where it came from. Both are built from the tally, because there is no
+    // corpus-wide answer to state — every scan answered for itself.
     std::snprintf(buf, sizeof(buf),
-                  "across %zu scans the band at the %s of the raster is %u-%u rows — "
-                  "fixed geometry, so the instrument's blind cone — while the other end "
-                  "runs %u-%u rows, which is scene. Decided from that rather than from "
-                  "the range of the returns bordering each end, which on real outdoor "
-                  "data cannot tell a beam grazing the mount from one grazing an eave",
-                  v.scans, v.atFirstRow ? "start" : "end",
-                  v.rowsMin, v.rowsMax, v.otherMin, v.otherMax);
+                  "%zu at the START, %zu at the END, %zu at BOTH ends, %zu not identified",
+                  v.atFirst, v.atLast, v.bothEnds, v.undecided);
+    v.headline = buf;
+    // Assembled from the parts that have something to say, because a line of
+    // zeroes is a line nobody reads.
+    std::snprintf(buf, sizeof(buf),
+                  "each of %zu scan(s) decided from its own raster, %zu of them by the angle "
+                  "the band spans about its own pole — instrument geometry, and it needs no "
+                  "notion of up",
+                  v.scans, v.byAngle);
     v.why = buf;
-    return v;
-}
-
-void applyBlindConeVerdict(const std::vector<RangeImage*>& images,
-                           const ConeVerdict& v, const Options& opt) {
-    if (!v.decided) return;
-    Options forced = opt;
-    forced.blindCone = v.atFirstRow ? BlindCone::FirstRows : BlindCone::LastRows;
-    for (RangeImage* im : images) {
-        if (!im || im->rows == 0) continue;
-        if (im->diag.blindConeRows != 0 && im->diag.blindConeAtFirstRow == v.atFirstRow)
-            continue;                      // build() already reached the same answer
-        unmarkBlindCone(*im, opt);
-        markBlindCone(*im, forced);
-    }
-}
-
-ConeVerdict markBlindConeAcrossCorpus(const std::vector<RangeImage*>& images,
-                                      const Options& opt) {
-    std::vector<std::pair<uint32_t, uint32_t>> bands;
-    std::vector<RangeImage*> usable;
-    bands.reserve(images.size());
-    for (RangeImage* im : images) {
-        if (!im || im->rows == 0) continue;
-        bands.push_back({im->diag.emptyLeadingRows, im->diag.emptyTrailingRows});
-        usable.push_back(im);
-    }
-    ConeVerdict v = decideBlindConeEnd(bands, opt);
     if (v.bothEnds) {
-        // Both bands are fixed across the corpus, so both are geometry and
-        // NEITHER is believed. This is the all-indoors case and it used to be the
-        // worst outcome available: "the corpus cannot choose an end" fell through
-        // to "believe both", which turned every setup's blind bands into rays
-        // that had seen through to the rated range — a cone cleared straight up
-        // through the roof and straight down through the floor, at every setup.
-        // On a building scanned from inside throughout, that removed the
-        // unobserved space above the ceiling and below the slab, which is exactly
-        // the space a coverage check is asked about.
-        Options forced = opt;
-        forced.blindCone = BlindCone::BothEnds;
-        for (RangeImage* im : usable) {
-            if (!im || im->rows == 0) continue;
-            unmarkBlindCone(*im, opt);        // undo whatever the scan guessed
-            markBlindCone(*im, forced);
-            ++v.corrected;
-        }
-        return v;
+        std::snprintf(buf, sizeof(buf),
+                      ". %zu scan(s) have a band at BOTH ends that nothing could show to be a "
+                      "view of anything, so neither end is believed there: believing either "
+                      "would clear a cone to the rated range straight at its pole",
+                      v.bothEnds);
+        v.why += buf;
     }
-    if (!v.decided) {
-        // The corpus looked and found no band that is the same in every scan.
-        // That is not "no opinion": an instrument's blind cone IS the same in
-        // every scan, so its absence means there is no instrument cone here and
-        // every empty band is scene. Any per-scan guess build() made has to go.
-        //
-        // It has to go because of which way that guess fails. The single-scan
-        // fallback, faced with a raster empty at one end only, asks whether the
-        // returns bordering that end are near — and near is exactly what the sky
-        // border looks like on a site ringed by trees and eaves. Believed, it
-        // marks the sky unsampled, and then nothing clears at all: the site comes
-        // back as a solid ball of "unobserved", which is the shape this whole
-        // stage exists to avoid.
-        if (usable.size() >= 2 && opt.blindCone == BlindCone::Auto) {
-            size_t undone = 0;
-            for (RangeImage* im : usable)
-                if (im->diag.blindConeRows) { unmarkBlindCone(*im, opt); ++undone; }
-            if (undone) {
-                v.corrected = undone;
-                char buf[300];
-                std::snprintf(buf, sizeof(buf),
-                              "; %zu scan(s) had guessed a cone on their own, and those "
-                              "bands are believed again — a cone the corpus cannot see in "
-                              "every scan is not the instrument's",
-                              undone);
-                v.why += buf;
-            }
-        }
-        return v;
+    if (v.undecided) {
+        std::snprintf(buf, sizeof(buf),
+                      ". %zu scan(s) identified no cone at all, and every empty cell in those "
+                      "clears to the rated range",
+                      v.undecided);
+        v.why += buf;
     }
-    for (const RangeImage* im : usable)
-        if (im->diag.blindConeRows == 0 || im->diag.blindConeAtFirstRow != v.atFirstRow)
-            ++v.corrected;
-    applyBlindConeVerdict(usable, v, opt);
+    std::snprintf(buf, sizeof(buf),
+                  ". %zu band(s) in all are left believed as a view, which is usually the sky "
+                  "that clears the volume above a site",
+                  v.bandsBelieved);
+    v.why += buf;
+    if (v.inverted) {
+        std::snprintf(buf, sizeof(buf),
+                      ". %zu setup(s) have a cone pointing up once the pose is applied, which "
+                      "is an inverted mounting",
+                      v.inverted);
+        v.why += buf;
+    }
     return v;
 }
 

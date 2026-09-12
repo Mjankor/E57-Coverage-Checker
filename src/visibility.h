@@ -277,8 +277,8 @@ struct Result {
     uint64_t     setupsBandBelievedLow  = 0;
     uint64_t     setupsBandBelievedHigh = 0;
     uint64_t     setupsInverted = 0;
-    // How the cone was decided across the whole corpus, which is a far stronger
-    // signal than any single scan affords — see rimg::markBlindConeAcrossCorpus.
+    // What the scans decided about their own blind cones, tallied up — each one
+    // decides from its own raster, see rimg::markBlindCone.
     rimg::ConeVerdict coneVerdict;
     bool         partial   = false;    // maxTiles stopped it short
     bool         cancelled = false;

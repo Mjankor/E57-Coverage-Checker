@@ -51,31 +51,42 @@ enum class BlindCone {
     None,        // there is no blind cone; every empty cell is a no-return
     FirstRows,   // force: the band running off row 0
     LastRows,    // force: the band running off the last row
-    // Both bands unsampled. For a survey where the corpus finds a FIXED band at
-    // each end: a band that is the same in every scan is not the scene, and that
-    // is as true of two bands as of one. An instrument level in a building sees
-    // its own mount one way and, at a constant height, the ceiling the other.
+    // Force: both bands unsampled. Auto reaches this on its own for a raster whose
+    // two bands are each the size of the instrument's cone and whose bordering
+    // returns cannot say which is the mount — an instrument level in a building
+    // sees its own mount one way and, at a constant height, the ceiling the other.
+    // Here as a setting for an operator who knows that is the instrument.
     BothEnds,
 };
 
-// How a corpus-wide decision came out, for reporting.
+// What the scans decided about their own blind cones, gathered up for reporting.
+//
+// A TALLY, not a decision. Each scan identifies its own cone from its own raster
+// — see markBlindCone — because what makes a band the instrument's cone is a
+// property of the instrument, and every scan was taken with that instrument. A
+// corpus has nothing to add to it.
+//
+// It used to decide, by looking for a band of the same size in every scan, and
+// that is now gone. It was wrong in a way worth remembering: where the corpus
+// could not find such a band — the ordinary case, because the band at the other
+// end is scene and varies from 87 rows to 576 — it UNMARKED every scan's own
+// correctly identified cone, and a band left believed clears every ray in it to
+// the rated range straight at the pole. So one scan came out right and any corpus
+// came out with a cone through the roof and the floor at every setup.
 struct ConeVerdict {
-    bool     decided = false;      // a corpus-wide end was identified
-    bool     atFirstRow = false;
-    // Both ends carry a band that is fixed across the corpus, so both are
-    // unsampled and `atFirstRow` says nothing. Reported separately because the
-    // alternative reading of "the corpus cannot choose an end" used to be
-    // "believe both", and believing a band that every scan shares clears a cone
-    // through whatever is on the other side of it.
-    bool     bothEnds = false;
-    uint32_t rowsMin = 0, rowsMax = 0;    // the band's size across the corpus
-    uint32_t otherMin = 0, otherMax = 0;  // and the other end's, which is scene
-    size_t   scans = 0;
-    // Scans whose own bordering-range verdict disagreed with the corpus and were
-    // re-marked. The count of scans a single-scan test got wrong, which is the
-    // number worth seeing: it was two of five on the job this was built against.
-    size_t   corrected = 0;
-    std::string why;
+    size_t scans     = 0;    // scans with a usable raster
+    size_t atFirst   = 0;    // cone identified at the start of the raster
+    size_t atLast    = 0;    // and at the end
+    size_t bothEnds  = 0;    // both bands unsampled: neither could be shown to be a view
+    size_t undecided = 0;    // no cone identified, so every empty cell is believed
+    size_t byAngle   = 0;    // decided by the band's angle about its own pole
+    size_t inverted  = 0;    // cone axis pointing up once the pose is applied
+    // Bands left believed as a view of something, counted over every scan. Usually
+    // right — a band of sky is what clears the volume above a site — and the
+    // number is here so that "usually" can be checked rather than assumed.
+    size_t bandsBelieved = 0;
+    std::string headline;    // a phrase for a status line
+    std::string why;         // and a sentence for a report
 };
 
 struct Options {
@@ -155,23 +166,20 @@ struct Options {
     // disbelieving sky loses real coverage — so an unclear case is reported
     // rather than resolved by a coin toss.
     double   blindConeRatio = 0.6;
-    // How much the unsampled band at one end of the raster may vary across a
-    // corpus and still be read as the instrument's own geometry.
+    // The same test at a stricter bar, for the one case where it is all that is
+    // left: BOTH unsampled bands are the size of the instrument's cone, so the
+    // angle cannot separate them and only one of them can be the mount.
     //
-    // The bordering-range test above is the best a single scan can do, and on real
-    // outdoor data it is not good enough: on five scans from one job it refused two
-    // and called two of the others inverted, because a beam grazing an eave
-    // overhead looks exactly like a beam grazing the mount. A corpus settles it
-    // outright. The instrument's cone is fixed geometry, so it is the same band in
-    // every scan — 590, 591, 591, 590, 591 rows on those five — while the band at
-    // the other end is scene and varied 87, 116, 125, 304, 576. One of those is a
-    // property of the instrument and the other is a property of where it stood,
-    // and telling them apart needs no notion of up, no ground plane and no
-    // threshold in metres.
-    //
-    // A tenth: one row in 591 is 0.2%, and the loosest thing that could still be
-    // called fixed geometry is far inside 10%.
-    double   coneCorpusSpread = 0.10;
+    // Stricter because a wrong answer here is the one that clears a cone through a
+    // floor or a roof, and because the claim being made is a specific piece of
+    // geometry: the ray bordering the cone grazes the mount and lands on the
+    // ground a metre or two from the tripod, while the other band's border is a
+    // ceiling, an eave or a tree. "Several times nearer", so a third. On the five
+    // scans this was measured against the two borders ran 2.20 m and 1.20 m — a
+    // factor of 1.8, which is not several, and reading that as decided is what put
+    // a cone under that setup. Below this bar neither band is believed as a view
+    // and both are marked unsampled.
+    double   blindConeTieRatio = 1.0 / 3.0;
 
     // The instrument's unsampled cone, as a half-angle measured from NADIR, in
     // degrees, and how far a measured band may sit from it and still be called
@@ -354,8 +362,9 @@ struct Diagnostics {
     uint64_t isolatedNoReturns = 0;   // by the optional neighbourhood filter
     uint64_t blindConeCells    = 0;   // the instrument's own blind cone
     uint32_t blindConeRows     = 0;
-    // A SECOND band, at the other end, also marked unsampled. Non-zero only for
-    // BlindCone::BothEnds — see that enumerator.
+    // A SECOND band, at the other end, also marked unsampled. Non-zero where
+    // nothing could show either band to be a view of anything — see markBlindCone —
+    // and for a forced BlindCone::BothEnds.
     uint32_t blindConeRowsLast = 0;
     bool     blindConeAtFirstRow = false;
     // The evidence the decision was made on: the median range of the returns
@@ -626,39 +635,15 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
 // no use for it and should not pay the memory.
 void buildPyramid(RangeImage& im);
 
-// Finds the instrument's blind cone across a whole corpus, then marks it in every
-// image. This is the entry point a caller with more than one scan should use;
-// markBlindCone below is what it falls back to for a single scan.
+// Gathers up what the scans decided about their own blind cones. Reads the images
+// and changes nothing in them: build() already marked each scan's cone from that
+// scan's own raster, which is where the evidence is.
 //
-// The decision is which END of the raster the cone is at, never how many rows:
-// each image's own contiguous empty band is what gets marked, so a row that holds
-// returns in one scan is never marked unsampled there because it was empty in
-// another.
-//
-// Safe to call on images build() has already marked per scan, and that is the
-// intended order. build() keeps deciding for itself, so a single image is never
-// left believing a cone it should not; where this disagrees it puts that band back
-// as no-returns and marks the other end instead.
-ConeVerdict markBlindConeAcrossCorpus(const std::vector<RangeImage*>& images,
-                                      const Options& opt);
-
-// The same decision, from nothing but the unsampled bands — {leading, trailing}
-// row counts, one pair per scan. Separate from the images because that is all the
-// evidence it uses, and a caller that has not got every image in memory at once
-// can still reach the same verdict: the bands come from the rowIndex field alone,
-// which is a few bits per point against a whole decoded raster.
-//
-// The band sizes need not be on the same scale as the images' — a binned-down
-// raster has proportionally smaller bands — because the test is on their
-// consistency across scans, which is scale-free, and what it produces is an END,
-// not a row count.
-ConeVerdict decideBlindConeEnd(
-    const std::vector<std::pair<uint32_t, uint32_t>>& bands, const Options& opt);
-
-// Marks a decided verdict in every image, putting back any band build() claimed at
-// the other end. A verdict that decided nothing leaves every image as it is.
-void applyBlindConeVerdict(const std::vector<RangeImage*>& images,
-                           const ConeVerdict& v, const Options& opt);
+// Call it for a status line or a report, on one scan or a thousand. It is the
+// replacement for a corpus-wide vote that used to run here and override the scans
+// — see ConeVerdict for what that cost.
+ConeVerdict summariseBlindCones(const std::vector<RangeImage*>& images,
+                                const Options& opt);
 
 // Exposed for testing.
 void filterIsolatedNoReturns(RangeImage& im, const Options& opt);

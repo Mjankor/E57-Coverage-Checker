@@ -897,19 +897,19 @@ static void testKnownSceneFromFiveSetups() {
         images.push_back(std::move(im));
         readers.push_back(std::move(rd));
     }
-    // The blind cone, decided across the corpus exactly as vis::run decides it.
-    // Not an optional extra: left to itself, a scan whose only empty band is the
-    // sky guesses that band is the instrument's cone, and then nothing clears at
-    // all. This scene has no instrument cone — its rasters reach the ground at
-    // every setup — and the corpus is what establishes that.
+    // The blind cone, as each scan decided it while being built — which is how
+    // vis::run has it too. This scene has no instrument cone: its rasters reach the
+    // ground at every setup, so the only empty band is sky, and a band of sky is
+    // not the size of a cone about nadir. Each scan sees that in its own raster.
     {
         std::vector<rimg::RangeImage*> raw;
         for (auto& im : images) raw.push_back(im.get());
-        const rimg::ConeVerdict cv = rimg::markBlindConeAcrossCorpus(raw, ro);
-        CHECK(!cv.decided, "no band is the same in every scan, so there is no instrument cone");
+        const rimg::ConeVerdict cv = rimg::summariseBlindCones(raw, ro);
+        CHECK(cv.undecided == cv.scans,
+              "no scan finds a band the size of the instrument's cone, because there is none");
         for (auto& im : images)
             CHECK(im->diag.blindConeRows == 0,
-                  "and no scan is left having guessed one on its own");
+                  "and no scan marks one, so the sky still clears");
     }
     for (auto& im : images) views.push_back(carve::makeSetupView(*im));
 
@@ -1573,10 +1573,12 @@ static void testAnIndoorCorpusCannotSeeThroughItsOwnRoof() {
     std::string err;
     CHECK(vis::run({path}, opt, nullptr, r, err), err.empty() ? "ran" : err.c_str());
     CHECK(r.setupsUsed == 4, "all four setups contributed");
-
-    // Both ends fixed across the corpus, so both are the instrument.
-    CHECK(r.coneVerdict.bothEnds,
-          "the corpus sees a fixed band at each end and calls both the instrument");
+    // Each raster has a band at both ends, both the size of the instrument's cone,
+    // and nothing separates them — so neither is believed, in every scan, decided
+    // by each scan on its own.
+    CHECK(r.coneVerdict.bothEnds == r.coneVerdict.scans,
+          "every scan marks both ends unsampled, from its own geometry");
+    CHECK(r.coneVerdict.bandsBelieved == 0, "and leaves no band believed as a view");
 
     // The consequence, which is the whole point: space beyond the ceiling and
     // below the floor is still unobserved. A believed band would have cleared a

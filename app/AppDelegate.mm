@@ -1594,33 +1594,36 @@ const char *kindLabel(check::Kind k) {
                     @"   ·   ⚠︎ %llu raster(s) COARSENED up to %ux to fit memory — "
                      "unobserved volume is overstated; raise the image budget",
                     (unsigned long long)result->setupsBinned, result->worstBinStep];
-        // Which end of the raster the blind cone is at decides whether a band of
-        // empty cells clears space to the rated range or establishes nothing, and
-        // nothing else on this line changes the picture as much. Undecided leaves
-        // both ends believed, which carves a cone through the ground under every
-        // setup — a warning, not a footnote.
-        // A band that is there and was left believed. Each one clears a cone
-        // straight at the pole — up through a roof, down through a floor — because
-        // the elevation table is extrapolated across the band, so a direction near
-        // the pole maps into it. This is the number that says whether that is
-        // happening, and it used to take reading the source to find out.
-        if (result->setupsBandBelievedLow || result->setupsBandBelievedHigh)
+        // A band that is there and was left believed clears a cone straight at its
+        // pole, because the elevation table is extrapolated across the band and a
+        // direction near the pole maps into it. At the HIGH end that is the sky
+        // which carves the volume above a site, and is what should happen; at the
+        // LOW end it is a cone through whatever the instrument was standing on, so
+        // that one is a warning and the other is a count.
+        if (result->setupsBandBelievedLow)
             warn = [warn stringByAppendingFormat:
-                    @"   ·   ⚠︎ UNSAMPLED BAND BELIEVED AS SKY on %llu setup(s) at the low end "
-                     "and %llu at the high end — each clears a cone at the pole, through a "
-                     "floor or a roof",
-                    (unsigned long long)result->setupsBandBelievedLow,
+                    @"   ·   ⚠︎ UNSAMPLED BAND BELIEVED AS SKY at the LOW end of %llu setup(s) "
+                     "— each clears a cone straight down, through a floor",
+                    (unsigned long long)result->setupsBandBelievedLow];
+        if (result->setupsBandBelievedHigh)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   sky believed at the high end of %llu setup(s)",
                     (unsigned long long)result->setupsBandBelievedHigh];
-        if (result->coneVerdict.bothEnds)
-            warn = [warn stringByAppendingString:
-                    @"   ·   blind cone at BOTH ends — neither believed as sky"];
-        else if (!result->coneVerdict.decided)
-            warn = [warn stringByAppendingString:
-                    @"   ·   ⚠︎ blind cone NOT identified — empty cells at both ends "
-                     "of the raster are believed"];
-        else
-            warn = [warn stringByAppendingFormat:@"   ·   cone at the %@ of the raster",
-                    result->coneVerdict.atFirstRow ? @"start" : @"end"];
+        // Where each scan put its own cone. Every scan decides from its own raster,
+        // so this is a tally rather than one verdict, and a scan that identified
+        // nothing is the one worth flagging: every empty cell in it clears.
+        warn = [warn stringByAppendingFormat:
+                @"   ·   cone: %llu at the start, %llu at the end, %llu at both ends, "
+                 "%llu by angle",
+                (unsigned long long)result->coneVerdict.atFirst,
+                (unsigned long long)result->coneVerdict.atLast,
+                (unsigned long long)result->coneVerdict.bothEnds,
+                (unsigned long long)result->coneVerdict.byAngle];
+        if (result->coneVerdict.undecided)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   ⚠︎ no cone identified on %llu setup(s) — every empty cell in "
+                     "those clears to the rated range",
+                    (unsigned long long)result->coneVerdict.undecided];
 
         // Which path actually ran, and — when asked to check it — what the check
         // found. A verification that prints nothing is indistinguishable from one

@@ -127,13 +127,7 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
     // being inferred from a count.
     if (!res.coneVerdict.why.empty())
         std::printf("blind cone: %s\n            %s\n",
-                    res.coneVerdict.bothEnds
-                        ? "BOTH ends of each raster (neither believed as sky)"
-                        : res.coneVerdict.decided
-                        ? (res.coneVerdict.atFirstRow ? "the START of each raster"
-                                                      : "the END of each raster")
-                        : "*** NOT IDENTIFIED — empty cells at both ends are believed ***",
-                    res.coneVerdict.why.c_str());
+                    res.coneVerdict.headline.c_str(), res.coneVerdict.why.c_str());
     std::printf("voxel     : %.3f m   ·   tile %u^3   ·   max range %.0f m   ·   %u thread(s)\n",
                 opt.voxelSize, opt.tileVoxels, opt.maxRange,
                 opt.threads ? opt.threads : std::thread::hardware_concurrency());
@@ -246,21 +240,17 @@ int probePoint(const std::vector<std::string>& paths, const vis::Options& opt,
     }
     if (images.empty()) { std::printf("no usable scans\n"); return 1; }
 
-    // The same corpus-wide blind cone decision the carve makes. This command
-    // exists to explain why a voxel came out the way it did, so it must not reach
-    // its own conclusion about which empty cells clear space — an explanation that
-    // disagrees with the run it is explaining is worse than none.
+    // What the scans decided about their own blind cones — read, not re-decided.
+    // This command exists to explain why a voxel came out the way it did, so it
+    // must not reach its own conclusion about which empty cells clear space: an
+    // explanation that disagrees with the run it is explaining is worse than none.
     {
         std::vector<rimg::RangeImage*> raw;
         raw.reserve(images.size());
         for (auto& im : images) raw.push_back(im.get());
-        const rimg::ConeVerdict v = rimg::markBlindConeAcrossCorpus(raw, ro);
+        const rimg::ConeVerdict v = rimg::summariseBlindCones(raw, ro);
         std::printf("blind cone: %s\n            %s\n\n",
-                    v.bothEnds ? "BOTH ends of each raster (neither believed as sky)"
-                    : v.decided ? (v.atFirstRow ? "the START of each raster"
-                                             : "the END of each raster")
-                              : "not identified",
-                    v.why.c_str());
+                    v.headline.c_str(), v.why.c_str());
     }
     for (auto& im : images) setups.push_back(carve::makeSetupView(*im));
 
@@ -398,12 +388,17 @@ void usage() {
         "          outside without crossing observed space. Off by default: it\n"
         "          also excludes a building interior whose walls were only ever\n"
         "          seen from one side, which is usually the space you wanted.\n"
-        "  --blind-cone auto|none|first|last\n"
+        "  --blind-cone auto|none|first|last|both\n"
         "          (carve) Which end of each raster holds the instrument's own\n"
-        "          blind cone, where no ray was fired. Default auto, which finds\n"
-        "          it from the geometry: the returns bordering the cone are the\n"
-        "          ground beside the mount, metres away, where those bordering\n"
-        "          sky are distant. That works whichever way up the scanner was.\n"
+        "          blind cone, where no ray was fired. Default auto, and every\n"
+        "          scan decides for itself: the band the cone leaves spans a fixed\n"
+        "          angle about the instrument's own downward axis, which is\n"
+        "          hardware rather than scene, where a band of sky runs to the\n"
+        "          pole instead. Where both ends of a raster are that size and\n"
+        "          the returns bordering them cannot say which is the mount,\n"
+        "          neither is believed. Works whichever way up the scanner was,\n"
+        "          and needs no other scan to agree with; `both` forces that last\n"
+        "          case for an operator who knows the instrument.\n"
         "  --threads <n>\n"
         "          (carve) Worker threads over the tile list. Default 0, the\n"
         "          machine's count. The answer is identical at any count.\n"
@@ -492,7 +487,8 @@ int main(int argc, char** argv) {
             else if (v == "none")  co.blindCone = rimg::BlindCone::None;
             else if (v == "first") co.blindCone = rimg::BlindCone::FirstRows;
             else if (v == "last")  co.blindCone = rimg::BlindCone::LastRows;
-            else { std::printf("--blind-cone must be auto, none, first or last\n"); return 2; }
+            else if (v == "both")  co.blindCone = rimg::BlindCone::BothEnds;
+            else { std::printf("--blind-cone must be auto, none, first, last or both\n"); return 2; }
             continue;
         }
         if (std::strcmp(argv[i], "--sky-radius") == 0 && i + 1 < argc) {

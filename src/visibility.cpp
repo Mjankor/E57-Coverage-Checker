@@ -637,20 +637,25 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         images.push_back(std::move(img));
     }
 
-    // The blind cone, decided once across every scan rather than scan by scan.
-    // It has to happen here, after all the images exist and before anything reads
-    // a cell, because the evidence is the corpus: a band unsampled at the same
-    // size in every scan is the instrument, and one that varies from 87 rows to
-    // 576 is the scene it was standing in. No single scan can tell those apart —
-    // on the job this was built against the per-scan test refused two and called
-    // two more inverted, and every one of those mistakes either clears a cone to
-    // the rated range straight through the ground or throws away the sky that
-    // clears the volume above the site.
+    // What the scans decided about their own blind cones. Each one decided as it
+    // was built, from its own raster — see rimg::markBlindCone — so nothing is
+    // marked or unmarked here and the images are only read.
+    //
+    // A corpus-wide vote used to run in this spot and override every scan, on the
+    // reasoning that a band unsampled at the same size in every scan is the
+    // instrument while one varying from 87 rows to 576 is the scene it stood in.
+    // The reasoning held; what it did when it failed did not. Where the vote found
+    // no band common to the corpus — the ordinary outcome, because the band at the
+    // other end is scene — it unmarked every scan's own cone, and a band left
+    // believed clears every ray in it to the rated range straight at the pole. One
+    // scan came out right and fifty came out with a cone through the roof and the
+    // floor at every setup. What a single scan has is its own instrument's cone
+    // angle, and that is all this ever needed.
     {
         std::vector<rimg::RangeImage*> raw;
         raw.reserve(images.size());
         for (auto& im : images) raw.push_back(im.get());
-        out.coneVerdict = rimg::markBlindConeAcrossCorpus(raw, ro);
+        out.coneVerdict = rimg::summariseBlindCones(raw, ro);
     }
 
     for (auto& img : images) {

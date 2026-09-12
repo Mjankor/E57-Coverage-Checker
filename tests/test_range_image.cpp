@@ -805,10 +805,20 @@ static void testBlindConeFoundGeometrically() {
                     continue;
                 }
                 // Range ramps from the ground beside the mount to the far side
-                // of the site as the beam flattens out.
+                // of the site as the beam flattens out: 0 beside the cone, 1
+                // beside the sky, whichever end each is at.
+                //
+                // Anchored on the rows that actually border the bands. The
+                // earlier form divided by the wrong span in the cone-at-the-end
+                // case, so the ramp ran PAST the mount and went negative, and a
+                // negative range wrapped through uint16_t into 650 m sitting
+                // right beside the tripod. The range test read that as the far
+                // end and still landed on the right answer, for the wrong reason.
+                const uint32_t rowFirst = coneAtFirst ? coneBand : skyBand;
+                const uint32_t rowLast  = im.rows - 1 - (coneAtFirst ? skyBand : coneBand);
                 const double u = coneAtFirst
-                    ? double(r - coneBand) / double(im.rows - coneBand - skyBand)
-                    : double(im.rows - skyBand - 1 - r) / double(im.rows - coneBand - skyBand);
+                    ? double(r - rowFirst) / double(rowLast - rowFirst)
+                    : double(rowLast - r)  / double(rowLast - rowFirst);
                 const double rng = groundRange + u * (skyBorderRange - groundRange);
                 cell = rimg::Cell{uint16_t(rng * 100.0), uint8_t(rimg::Status::Hit)};
             }
@@ -816,9 +826,20 @@ static void testBlindConeFoundGeometrically() {
         im.diag.nearestReturn = groundRange;
         im.diag.furthestReturn = skyBorderRange;
         im.diag.noReturns = uint64_t(coneBand + skyBand) * im.cols;
-        // Elevation rising with row, so row 0 is the nadir end of the sweep and
-        // the cone's axis can be read off the end of the measured table.
-        im.map = rimg::uniformMapping(im.rows, im.cols, -1.3, 0.023, 0.0, kTau / 200.0);
+        // Elevation rising with row in BOTH cases, so the sign of the mapping
+        // cannot be what decides which end is the instrument.
+        //
+        // The offset differs because the two cases are the same instrument: the
+        // cone spans 35.3 deg from its own pole and the sky band 40.6 deg from the
+        // other, and moving the cone to the far end of the raster moves where the
+        // sweep has to start for that to still be true. A producer that rewrites
+        // the frame to put world up along +Z, and reverses the row order with it,
+        // produces exactly this — the bands swap ends and the angles travel with
+        // them. Leaving the offset alone would describe an instrument whose cone
+        // is 27 deg wide going one way and 48 going the other, which is no
+        // instrument at all.
+        const double el0 = coneAtFirst ? -1.3 : -1.437;
+        im.map = rimg::uniformMapping(im.rows, im.cols, el0, 0.023, 0.0, kTau / 200.0);
         im.map.valid = true;
         return im;
     };
@@ -868,18 +889,31 @@ static void testBlindConeFoundGeometrically() {
     CHECK(tie.diag.borderRangeFirst > 0 && tie.diag.borderRangeLast > 0,
           "and the ranges it could not judge on");
 
-    // Still refused when NEITHER test has anything to say. Same scan, but told to
-    // expect a cone nowhere near either band's size — which is also the check that
-    // the expected angle is a parameter and does something.
+    // When NEITHER test has anything to say, the answer is not a guess and it is
+    // not a refusal either: BOTH bands are marked unsampled, so neither of them
+    // clears a cone at its pole. Same scan, told to expect a cone nowhere near
+    // either band's size — which is also the check that the expected angle is a
+    // parameter and does something.
+    //
+    // Refusing used to be the answer here, and refusing left both bands believed.
+    // That is not the neutral option it reads as: a believed band clears every ray
+    // in it to the rated range straight at the pole, because the elevation table is
+    // extrapolated across the band.
     {
         rimg::Options narrow = opt;
         narrow.blindConeFromNadirDeg = 80.0;
         narrow.blindConeAngleTolDeg  = 3.0;
         rimg::RangeImage none = build(true, 12.0, 14.0);
         rimg::markBlindCone(none, narrow);
-        CHECK(none.diag.blindConeRows == 0, "an unclear case is not resolved by a coin toss");
-        CHECK(none.diag.note.find("neither the ranges nor the angles") != std::string::npos,
+        CHECK(none.diag.blindConeRows == 15 && none.diag.blindConeRowsLast == 25,
+              "an unclear case believes neither band rather than picking one");
+        CHECK(none.statusAt(0, 0) == rimg::Status::OutsideFov &&
+              none.statusAt(none.rows - 1, 0) == rimg::Status::OutsideFov,
+              "so no ray in either band clears to the rated range");
+        CHECK(none.diag.note.find("nothing says which is the instrument") != std::string::npos,
               "and it is reported, with both kinds of evidence");
+        CHECK(none.diag.note.find("80.0") != std::string::npos,
+              "including the cone angle it was told to expect");
     }
 
     // Forced, for when the operator knows better than the geometry.
@@ -912,23 +946,36 @@ static void testBlindConeFoundGeometrically() {
     CHECK(holed.statusAt(45, 45) == rimg::Status::NoReturn, "and still clears");
 }
 
-// The corpus decides the blind cone, because no single scan reliably can.
+// Every scan decides its own blind cone, and a corpus decides nothing.
 //
 // This is modelled on the job it was built against: five setups, a band of
 // 590-591 rows unsampled at the start of the raster in every one of them, and a
 // band at the other end running from 87 to 576 rows depending on where the
-// instrument happened to be standing. One of those is fixed geometry and the other
-// is scene. The bordering-range test that a single scan has to rely on got two of
-// the five wrong in each direction — refusing two outright and calling two of the
-// others inverted — because a beam grazing an eave overhead is indistinguishable
-// from one grazing the mount.
-static void testBlindConeFromTheCorpus() {
-    std::printf("range image: the blind cone is decided across the corpus\n");
+// instrument happened to be standing. One of those is the instrument and the other
+// is scene, and the bordering ranges cannot tell them apart — on three of the five
+// the scene band's border is the NEARER of the two, which is a wall a metre from
+// the tripod.
+//
+// A corpus-wide vote used to settle it, by looking for the band that is the same
+// size in every scan. It worked on this job and failed on the next one, and it
+// failed in the direction that matters: where no band is common to the corpus —
+// the ordinary case — it unmarked every scan's own cone, and a band left believed
+// clears every ray in it to the rated range straight at the pole. One scan came
+// out right and fifty came out with a cone through the roof and the floor.
+//
+// The angle settles it per scan, with nothing but the scan. The instrument's cone
+// is a fixed half-angle about the instrument's own downward axis, so the band it
+// leaves measures forty-odd degrees from its pole in every scan ever taken with
+// that instrument; a band of sky runs to the pole and measures nine degrees, or
+// twenty-two, depending on how high the scene reached. That is the whole
+// discrimination and it needs no other scan to make it.
+static void testEachScanDecidesItsOwnCone() {
+    std::printf("range image: every scan decides its own blind cone\n");
 
-    // Builds one scan: a fixed cone band at the start, a scene band of the given
-    // size at the end, and returns in between at the given ranges. `coneBorder`
-    // and `skyBorder` are what the rows bordering each band measured, which is the
-    // single-scan evidence — and here it is deliberately misleading.
+    // Builds one scan: a cone band at the start, a scene band of the given size at
+    // the end, and returns in between at the given ranges. `coneBorder` and
+    // `sceneBorder` are what the rows bordering each band measured, and on this job
+    // they are deliberately misleading.
     auto makeScan = [](uint32_t coneBand, uint32_t sceneBand,
                        double coneBorder, double sceneBorder) {
         rimg::RangeImage im;
@@ -959,10 +1006,10 @@ static void testBlindConeFromTheCorpus() {
 
     rimg::Options opt;
 
-    // The five scans, with the bordering ranges the real ones had: the cone end
-    // around 2.1-3.2 m and the scene end anywhere from 0.59 m to 3.3 m. Three of
-    // the five have a scene border NEARER than the cone border, which is what sent
-    // the single-scan test the wrong way.
+    // The five scans, with the bands and the bordering ranges the real ones had:
+    // the cone end around 2.1-3.2 m and the scene end anywhere from 0.59 m to
+    // 3.3 m. Three of the five have a scene border NEARER than the cone border,
+    // which is what sent the bordering-range test the wrong way.
     const uint32_t cone[5]  = {590, 591, 591, 590, 591};
     const uint32_t scene[5] = {125, 576, 304,  87, 116};
     const double   cb[5]    = {2.21, 2.20, 2.17, 2.08, 3.20};
@@ -972,71 +1019,72 @@ static void testBlindConeFromTheCorpus() {
     corpus.reserve(5);
     for (int k = 0; k < 5; ++k) corpus.push_back(makeScan(cone[k], scene[k], cb[k], sb[k]));
 
-    // What each scan concludes on its own, which is what rimg::build leaves behind.
-    int aloneRight = 0;
+    // Each scan, on its own, with no other scan in the room.
+    int alone = 0, byAngle = 0;
     for (auto& im : corpus) {
         rimg::markBlindCone(im, opt);
-        if (im.diag.blindConeRows && im.diag.blindConeAtFirstRow) ++aloneRight;
+        if (im.diag.blindConeRows && im.diag.blindConeAtFirstRow) ++alone;
+        if (im.diag.coneByElevation) ++byAngle;
     }
-    CHECK(aloneRight < 5,
-          "scan by scan, the bordering-range test does not get all five right");
+    CHECK(alone == 5, "all five find the cone at the start of the raster, scan by scan");
+    CHECK(byAngle == 5, "and all five decide it by the angle the band spans about nadir");
 
-    std::vector<rimg::RangeImage*> raw;
-    for (auto& im : corpus) raw.push_back(&im);
-    const rimg::ConeVerdict v = rimg::markBlindConeAcrossCorpus(raw, opt);
-
-    CHECK(v.decided, "the corpus settles it");
-    CHECK(v.atFirstRow, "on the end whose band is the same in every scan");
-    CHECK(v.rowsMin == 590 && v.rowsMax == 591, "and reports the band it found");
-    CHECK(v.otherMin == 87 && v.otherMax == 576, "against the other end, which is scene");
-    CHECK(v.scans == 5, "over all five");
-    CHECK(v.corrected == size_t(5 - aloneRight),
-          "and it re-marked exactly the scans that had got it wrong alone");
-    CHECK(v.why.find("fixed geometry") != std::string::npos, "with the reason recorded");
-
-    // Every scan now has its cone at the start, clearing nothing, and its scene
-    // band at the other end still believed — which is the point: that band is the
-    // sky that clears the volume above the site.
-    int allRight = 0, skyKept = 0;
+    // Which is the point: nothing was marked at the far end of the four scans whose
+    // scene band is nothing like the cone's size, so the sky there still clears —
+    // and that is what carves the volume above the site.
+    int skyKept = 0, secondBand = 0;
     for (const auto& im : corpus) {
-        if (im.diag.blindConeRows && im.diag.blindConeAtFirstRow) ++allRight;
         if (im.statusAt(0, 0) == rimg::Status::OutsideFov &&
             im.statusAt(im.rows - 1, 0) == rimg::Status::NoReturn &&
             std::fabs(im.rangeAt(im.rows - 1, 0) - 45.0) < 0.02) ++skyKept;
+        if (im.diag.blindConeRowsLast) ++secondBand;
     }
-    CHECK(allRight == 5, "all five end up with the cone at the start");
-    CHECK(skyKept == 5, "and all five keep the band at the other end clearing");
+    // The exception is the scan whose scene band is 576 rows — 41 degrees from
+    // zenith, which IS the size of this instrument's cone. Its two bands cannot be
+    // told apart by angle, and its bordering ranges (2.20 m and 1.20 m) are not
+    // several times apart either, so NEITHER is believed and both are marked. That
+    // costs a cone of unknown space at one pole, which any other setup whose sweep
+    // covers that direction then clears. Believing the wrong one costs a cone of
+    // space reported as seen that the instrument never looked at.
+    CHECK(skyKept == 4, "four of the five keep the band at the other end clearing");
+    CHECK(secondBand == 1, "and the fifth, whose scene band is also cone-sized, marks both");
 
-    // Un-marking and re-marking has to be exact, or a corrected scan quietly ends
-    // up with a band that clears nothing at BOTH ends.
+    // No cell outside the marked bands was touched.
     uint64_t worstExtra = 0;
     for (const auto& im : corpus) {
         uint64_t outside = 0;
         for (const rimg::Cell& c : im.cells)
             if (rimg::Status(c.status) == rimg::Status::OutsideFov) ++outside;
         worstExtra = std::max(worstExtra,
-                              outside - uint64_t(im.diag.blindConeRows) * im.cols);
+                              outside - uint64_t(im.diag.blindConeRows +
+                                                 im.diag.blindConeRowsLast) * im.cols);
     }
-    CHECK(worstExtra == 0,
-          "no cell outside the cone was left unsampled by a re-marking");
+    CHECK(worstExtra == 0, "and nothing outside the marked bands was made unsampled");
 
-    // A corpus where both ends are consistent — scans from inside one room, the
-    // same ceiling band in each. It still does not pick an end, because there is
-    // no reason to prefer either; but "cannot choose" is no longer read as
-    // "believe both", which cleared a cone through the ceiling and the floor. A
-    // band the whole corpus shares is not a view of anything, and that is as true
-    // of two bands as of one, so both are marked unsampled.
+    // The summary reports that, and reaches no verdict of its own.
+    std::vector<rimg::RangeImage*> raw;
+    for (auto& im : corpus) raw.push_back(&im);
+    const rimg::ConeVerdict v = rimg::summariseBlindCones(raw, opt);
+    CHECK(v.scans == 5, "over all five");
+    CHECK(v.atFirst == 4 && v.bothEnds == 1 && v.atLast == 0 && v.undecided == 0,
+          "four at the start of the raster and one at both ends");
+    CHECK(v.byAngle == 5, "all five by angle");
+    CHECK(v.bandsBelieved == 4, "with four bands left believed as a view of the sky");
+
+    // Scans from inside one room, where the same band sits at each end of every
+    // raster: a mount one way and, at a constant height, a ceiling the other. Both
+    // bands are the size of the instrument's cone and their bordering ranges are
+    // 2.0 m and 2.1 m, so nothing separates them — and then neither is believed.
+    // This used to need the corpus to see it. It does not: one scan is enough,
+    // because both bands are in that one scan.
     std::vector<rimg::RangeImage> room;
     for (int k = 0; k < 4; ++k) room.push_back(makeScan(600, 610, 2.0, 2.1));
-    std::vector<rimg::RangeImage*> rawRoom;
-    for (auto& im : room) rawRoom.push_back(&im);
-    const rimg::ConeVerdict rv = rimg::markBlindConeAcrossCorpus(rawRoom, opt);
-    CHECK(rv.bothEnds, "two equally consistent ends are both the instrument");
-    CHECK(rv.why.find("both ends") != std::string::npos, "and the reason says which case");
-    // Which is the part that matters: neither band is left believed as sky.
+    for (auto& im : room) rimg::markBlindCone(im, opt);
     for (const auto& im : room) {
         CHECK(im.diag.blindConeRows > 0 && im.diag.blindConeRowsLast > 0,
               "both bands are marked unsampled");
+        CHECK(im.diag.blindConeAtFirstRow,
+              "with the mount reported at the low-elevation end, upright assumed");
         uint64_t believed = 0;
         for (uint32_t r = 0; r < im.diag.blindConeRows; ++r)
             for (uint32_t c = 0; c < im.cols; ++c)
@@ -1048,13 +1096,21 @@ static void testBlindConeFromTheCorpus() {
                     rimg::Status::NoReturn) ++believed;
         CHECK(believed == 0, "and no cell in either band clears to the rated range");
     }
+    std::vector<rimg::RangeImage*> rawRoom;
+    for (auto& im : room) rawRoom.push_back(&im);
+    const rimg::ConeVerdict rv = rimg::summariseBlindCones(rawRoom, opt);
+    CHECK(rv.bothEnds == 4 && rv.bandsBelieved == 0,
+          "and the summary says so: four scans with both ends unsampled, nothing believed");
 
-    // One scan has no corpus, so it falls back to its own geometry and says so.
+    // One scan on its own reaches exactly the same answer as one of five, because
+    // the evidence never came from the others.
     rimg::RangeImage single = makeScan(590, 125, 2.21, 3.30);
-    std::vector<rimg::RangeImage*> one{&single};
-    const rimg::ConeVerdict sv = rimg::markBlindConeAcrossCorpus(one, opt);
-    CHECK(!sv.decided && sv.scans == 1, "one scan cannot be settled by a corpus");
-    CHECK(sv.why.find("one scan") != std::string::npos, "and the report says so");
+    rimg::markBlindCone(single, opt);
+    CHECK(single.diag.blindConeRows == 590 && single.diag.blindConeAtFirstRow &&
+          single.diag.coneByElevation,
+          "one scan decides its cone the same way five do");
+    CHECK(single.statusAt(single.rows - 1, 0) == rimg::Status::NoReturn,
+          "and keeps its sky");
 }
 
 // A raster whose measured rows do not rise strictly, which must still be used.
@@ -1342,20 +1398,6 @@ static void testRangeImagesHaveIdentityThatIsNeverReused() {
     CHECK(e.uid == c.uid, "a copy shares the identity of what it copied");
 }
 
-// One odd scan in a corpus cannot overturn the blind-cone verdict.
-//
-// The cone is decided across the corpus, not per scan, because an instrument's
-// blind band is the same in every scan while an empty band caused by the scene is
-// not. That decision used a MIN and a MAX over every scan, and a min and a max can
-// only widen as scans are added — so one scan in fifty with an unusual leading
-// band, or a zero one, pushed the spread past the tolerance and undecided the
-// whole corpus.
-//
-// Undecided is not neutral. It unmarks every scan's cone, so each setup's blind
-// band becomes rays believed to have seen through to the rated range: a cone
-// carved through the floor under every setup. At thirty setups the corpus decided
-// and the answer was right; at fifty, one outlier cleared the building's interior
-// and the unobserved space vanished. That is what this pins.
 // The instrument's cone, identified by its ANGLE about nadir.
 //
 // A scanner cannot see its own mount, so a cone of a fixed half-angle about its
@@ -1364,10 +1406,15 @@ static void testRangeImagesHaveIdentityThatIsNeverReused() {
 // mount cone measures forty-odd from nadir. That is the discrimination, and it is
 // available in the instrument's OWN frame — no world up, no ground plane, no pose.
 //
-// It is tried where the bordering-range test gives up, not ahead of it. Where the
-// ranges are clearly separated they remain the better evidence, because they still
-// work on a scan whose frame puts the mount at +z with the elevation table
-// unchanged — a hanging mount, which no elevation can detect.
+// It LEADS, and the bordering ranges follow it, for two reasons. The angle is a
+// property of the hardware where the ranges are a property of the site — a wall a
+// metre from the instrument borders a band of sky more closely than the ground
+// borders the mount's cone, which is three scans in five on real data. And the
+// angle is measured from the band's own pole, so it reads the same for an inverted
+// mounting as for an upright one and never has to be told which way up anything is.
+//
+// The ranges still decide where the angle cannot: where BOTH bands are the cone's
+// size, and where neither is.
 static void testTheConeIsIdentifiedByItsAngle() {
     std::printf("range image: the cone is found by its angle about nadir\n");
 
@@ -1418,8 +1465,16 @@ static void testTheConeIsIdentifiedByItsAngle() {
         CHECK(im.statusAt(0, 0) == rimg::Status::OutsideFov, "and the cone clears nothing");
     }
 
-    // Both bands cone-sized: the angle cannot separate them, so upright is assumed
-    // and the mount is the low end. This is the tie-break, stated.
+    // Both bands cone-sized, and the returns bordering them at the same range, so
+    // nothing separates them. Then NEITHER is believed: both bands are marked
+    // unsampled, and the mount is merely REPORTED at the low end, the scanner
+    // assumed upright.
+    //
+    // Marking both is the point. Picking one and believing the other is not a near
+    // miss — the elevation table is extrapolated across an unsampled band, so a
+    // direction near the pole maps into it and every ray in the band clears to the
+    // rated range straight at the pole. That is a cone through the roof, or the
+    // floor, at every setup that lands here.
     {
         uint32_t lead = 0;
         while (lead < 60 && (90.0 + elOfRow(lead)) < 40.0) ++lead;
@@ -1429,20 +1484,58 @@ static void testTheConeIsIdentifiedByItsAngle() {
         rimg::markBlindCone(im, opt);
         CHECK(im.diag.coneByElevation, "still an angle decision");
         CHECK(im.diag.blindConeAtFirstRow, "upright assumed: the mount is the low end");
+        CHECK(im.diag.blindConeRows == lead && im.diag.blindConeRowsLast == trail,
+              "and BOTH bands are marked unsampled, not just the mount's");
+        CHECK(im.statusAt(0, 0) == rimg::Status::OutsideFov &&
+              im.statusAt(im.rows - 1, 0) == rimg::Status::OutsideFov,
+              "so neither end clears a cone at its pole");
         CHECK(im.diag.note.find("assumed upright") != std::string::npos,
               "and the assumption is stated rather than hidden");
+        CHECK(im.diag.note.find("NEITHER") != std::string::npos,
+              "along with why both bands are unsampled");
+    }
+
+    // The angle leads, and it leads even where the bordering ranges say the
+    // opposite. This is the case the corpus used to be needed for: a cone band of
+    // about 45 degrees at the low end whose border is FAR — the beam grazes the
+    // mount and reaches across the room — against a thin band of sky at the high
+    // end whose border is NEAR, a wall a metre from the instrument. Three of the
+    // five scans of the job this was measured against look like this, and the
+    // bordering-range test points the wrong way in every one of them.
+    {
+        uint32_t lead = 0;
+        while (lead < 60 && (90.0 + elOfRow(lead)) < 45.0) ++lead;
+        rimg::RangeImage im = scan(lead, 4, 3.0);
+        for (uint32_t r = lead; r < im.rows - 4; ++r) {
+            const double u = double(r - lead) / double(im.rows - 4 - lead - 1);
+            const double rng = 3.3 + u * (1.2 - 3.3);      // far beside the mount
+            for (uint32_t c = 0; c < im.cols; ++c)
+                im.cells[size_t(r) * im.cols + c] =
+                    rimg::Cell{uint16_t(rng * 100.0), uint8_t(rimg::Status::Hit)};
+        }
+        im.diag.nearestReturn = 1.2; im.diag.furthestReturn = 3.3;
+        rimg::markBlindCone(im, opt);
+        CHECK(im.diag.coneByElevation, "the angle decided");
+        CHECK(im.diag.blindConeAtFirstRow,
+              "and it put the cone at the low end, where the band is 45 deg wide");
+        CHECK(im.diag.borderRangeFirst > im.diag.borderRangeLast,
+              "though the returns bordering that band are the FARTHER of the two");
+        CHECK(im.statusAt(im.rows - 1, 0) == rimg::Status::NoReturn,
+              "and the band at the other end, which is not the cone's size, still clears");
     }
 
     // The expected angle is a parameter, and it decides. Told to expect a cone
     // neither band could be — 75 degrees, where this raster's bands are about 45
-    // and 13 — nothing is identified and the refusal is reported.
+    // and 13 — no band is identified as the cone, and with the bordering returns all
+    // at one range nothing separates the two bands either. Both are then marked, and
+    // the note says on what evidence.
     //
     // Note what a value BETWEEN them would do: set the expectation to 13 and the
     // thin band of sky at zenith becomes "the cone", because it really is that
-    // size. The default separates them because a mount cone is forty-odd degrees
-    // and sky runs to the pole, but the parameter is a statement about the
-    // instrument and a wrong one is believed. Which end it landed on is in the
-    // note for exactly that reason.
+    // size, and the band at the other end is then believed and clears. The default
+    // separates them because a mount cone is forty-odd degrees and sky runs to the
+    // pole, but the parameter is a statement about the instrument and a wrong one
+    // is acted on. Which end it landed on is in the note for exactly that reason.
     {
         uint32_t lead = 0;
         while (lead < 60 && (90.0 + elOfRow(lead)) < 45.0) ++lead;
@@ -1452,17 +1545,26 @@ static void testTheConeIsIdentifiedByItsAngle() {
         rimg::RangeImage im = scan(lead, 4, 3.0);
         rimg::markBlindCone(im, wide);
         CHECK(!im.diag.coneByElevation, "a band outside the expected angle is not the cone");
-        CHECK(im.diag.blindConeRows == 0, "so nothing is marked");
+        CHECK(im.diag.blindConeRows == lead && im.diag.blindConeRowsLast == 4,
+              "so neither band is believed instead of one being picked");
+        CHECK(im.diag.note.find("75.0") != std::string::npos,
+              "and the note carries the angle it was told to expect");
     }
 
-    // And where the ranges ARE separated, they still lead: the hanging mount whose
-    // elevation table is unchanged, which the angle would get wrong.
+    // Where NEITHER band is the size of the instrument's cone, the angle has
+    // nothing to say and the bordering ranges are all there is — and they can put
+    // the mount at the high end of the raster. Bands of 21 and 25 degrees against
+    // an expected 45 +/- 15: too small to be this instrument's cone, so whichever
+    // is the mount, the raster does not reach far enough past the last return to
+    // show it.
     {
-        rimg::RangeImage im = scan(25, 15, 3.0);
+        rimg::RangeImage im = scan(4, 13, 3.0);
+        CHECK(90.0 + elOfRow(4) < 30.0 && 90.0 - elOfRow(119 - 13) < 30.0,
+              "neither band is within the expected cone angle");
         // Rewrite the ranges so the high-end band borders close returns and the
         // low-end band borders far ones — a mount above, sky below.
-        for (uint32_t r = 25; r < im.rows - 15; ++r) {
-            const double u = double(r - 25) / double(im.rows - 40);
+        for (uint32_t r = 4; r < im.rows - 13; ++r) {
+            const double u = double(r - 4) / double(im.rows - 13 - 4 - 1);
             const double rng = 30.0 + u * (1.8 - 30.0);     // far at low, near at high
             for (uint32_t c = 0; c < im.cols; ++c)
                 im.cells[size_t(r) * im.cols + c] =
@@ -1473,93 +1575,17 @@ static void testTheConeIsIdentifiedByItsAngle() {
         CHECK(!im.diag.coneByElevation, "the ranges decided, not the angle");
         CHECK(!im.diag.blindConeAtFirstRow,
               "and they put the mount at the high end, where the close returns are");
-    }
-}
-
-static void testOneOddScanCannotOverturnTheConeVerdict() {
-    std::printf("range image: the cone verdict survives an outlier\n");
-
-    rimg::Options opt;                       // BlindCone::Auto, spread 0.10
-
-    // Thirty scans of one instrument: a fixed band of about 590 rows at the start,
-    // and a trailing band that varies with the scene, which is the real shape.
-    auto corpus = [](size_t n) {
-        std::vector<std::pair<uint32_t, uint32_t>> b;
-        for (size_t i = 0; i < n; ++i)
-            b.push_back({590u + uint32_t(i % 3), 80u + uint32_t((i * 37) % 500)});
-        return b;
-    };
-
-    {
-        const rimg::ConeVerdict v = rimg::decideBlindConeEnd(corpus(30), opt);
-        CHECK(v.decided, "thirty consistent scans decide");
-        CHECK(v.atFirstRow, "and put the instrument's cone at the start");
-    }
-
-    // Now fifty, and one of them is odd — a scan cropped so it has no empty
-    // leading rows at all. The old test disqualified the leading end outright on
-    // `leadMin > 0`.
-    {
-        auto b = corpus(50);
-        b[37].first = 0;
-        const rimg::ConeVerdict v = rimg::decideBlindConeEnd(b, opt);
-        CHECK(v.decided, "one scan with no leading band does not undecide the corpus");
-        CHECK(v.atFirstRow, "and the verdict is the same one");
-    }
-
-    // And one whose leading band is wildly wrong, which is what moved the max.
-    {
-        auto b = corpus(50);
-        b[11].first = 2;
-        b[29].first = 4000;
-        const rimg::ConeVerdict v = rimg::decideBlindConeEnd(b, opt);
-        CHECK(v.decided, "two wild leading bands do not undecide it either");
-        CHECK(v.atFirstRow, "same verdict");
-    }
-
-    // The judgement is still a judgement: when the leading band genuinely varies
-    // across most of the corpus, it is not the instrument and the corpus says so.
-    {
-        std::vector<std::pair<uint32_t, uint32_t>> b;
-        for (size_t i = 0; i < 50; ++i)
-            b.push_back({100u + uint32_t((i * 53) % 600), 80u + uint32_t((i * 37) % 500)});
-        const rimg::ConeVerdict v = rimg::decideBlindConeEnd(b, opt);
-        CHECK(!v.decided, "a leading band that really does vary is not fixed geometry");
-    }
-
-    // Both ends fixed is not a tie to be broken but an answer: scans from inside
-    // one room have the same ceiling band in every one, and a band the whole
-    // corpus shares is not scene. Both are marked unsampled rather than believed.
-    {
-        std::vector<std::pair<uint32_t, uint32_t>> b;
-        for (size_t i = 0; i < 50; ++i) b.push_back({590u, 120u});
-        const rimg::ConeVerdict v = rimg::decideBlindConeEnd(b, opt);
-        CHECK(v.bothEnds, "two equally fixed ends are both the instrument, not a tie");
-        CHECK(!v.why.empty(), "and it says so");
-    }
-
-    // A minority is a minority: a fifth of the corpus disagreeing is tolerated,
-    // half of it is not.
-    {
-        auto b = corpus(50);
-        for (int i = 0; i < 9; ++i) b[size_t(i) * 5].first = 3u;      // 9 of 50
-        CHECK(rimg::decideBlindConeEnd(b, opt).decided,
-              "nine scans in fifty disagreeing is still a fixed band");
-        auto c = corpus(50);
-        for (int i = 0; i < 25; ++i) c[size_t(i)].first = 3u;         // 25 of 50
-        CHECK(!rimg::decideBlindConeEnd(c, opt).decided,
-              "half of them disagreeing is not");
+        CHECK(im.diag.blindConeRowsLast == 0, "one band only, so one band is marked");
     }
 }
 
 int main() {
     testTheConeIsIdentifiedByItsAngle();
-    testOneOddScanCannotOverturnTheConeVerdict();
     testRangeImagesHaveIdentityThatIsNeverReused();
     std::printf("E57 Coverage Checker — range image tests\n\n");
     testInstrumentNotLevel();
     testWobblyRowsAreStillUsable();
-    testBlindConeFromTheCorpus();
+    testEachScanDecidesItsOwnCone();
     testGridPath();
     testPyramid();
     testSkyVersusDroppedReturns();
