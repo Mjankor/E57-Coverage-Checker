@@ -364,6 +364,28 @@
         return;
     }
     _camera.setPivotKeepingEye(r.world);
+
+    // Say WHERE, in the file's own coordinates, ready to paste into
+    // `e57cov probe`.
+    //
+    // The viewer could always centre on a point and never tell you which point.
+    // That matters because probe is the tool for "why is this space being
+    // cleared?" — it names, for every setup, the direction to a position, the
+    // raster cell that direction lands on, what the cell holds and the verdict —
+    // and it takes a world coordinate. Without one there was no way to get from
+    // something wrong on screen to the command that explains it.
+    //
+    // Points are stored as offsets from the store's origin, so the origin goes
+    // back on before this is of any use to anything outside the viewer.
+    if ([self.cloudDelegate respondsToSelector:@selector(cloudViewDidChangeView:)]) {
+        const double wx = double(r.world.x) + _origin[0];
+        const double wy = double(r.world.y) + _origin[1];
+        const double wz = double(r.world.z) + _origin[2];
+        [self.cloudDelegate cloudViewDidChangeView:
+            [NSString stringWithFormat:@"centred on %.3f %.3f %.3f   ·   "
+                                        @"e57cov probe %.3f %.3f %.3f <files>",
+                                       wx, wy, wz, wx, wy, wz]];
+    }
     [self viewChanged];
 }
 
