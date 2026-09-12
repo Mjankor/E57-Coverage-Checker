@@ -127,7 +127,9 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
     // being inferred from a count.
     if (!res.coneVerdict.why.empty())
         std::printf("blind cone: %s\n            %s\n",
-                    res.coneVerdict.decided
+                    res.coneVerdict.bothEnds
+                        ? "BOTH ends of each raster (neither believed as sky)"
+                        : res.coneVerdict.decided
                         ? (res.coneVerdict.atFirstRow ? "the START of each raster"
                                                       : "the END of each raster")
                         : "*** NOT IDENTIFIED — empty cells at both ends are believed ***",
@@ -254,7 +256,8 @@ int probePoint(const std::vector<std::string>& paths, const vis::Options& opt,
         for (auto& im : images) raw.push_back(im.get());
         const rimg::ConeVerdict v = rimg::markBlindConeAcrossCorpus(raw, ro);
         std::printf("blind cone: %s\n            %s\n\n",
-                    v.decided ? (v.atFirstRow ? "the START of each raster"
+                    v.bothEnds ? "BOTH ends of each raster (neither believed as sky)"
+                    : v.decided ? (v.atFirstRow ? "the START of each raster"
                                              : "the END of each raster")
                               : "not identified",
                     v.why.c_str());

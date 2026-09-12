@@ -51,12 +51,23 @@ enum class BlindCone {
     None,        // there is no blind cone; every empty cell is a no-return
     FirstRows,   // force: the band running off row 0
     LastRows,    // force: the band running off the last row
+    // Both bands unsampled. For a survey where the corpus finds a FIXED band at
+    // each end: a band that is the same in every scan is not the scene, and that
+    // is as true of two bands as of one. An instrument level in a building sees
+    // its own mount one way and, at a constant height, the ceiling the other.
+    BothEnds,
 };
 
 // How a corpus-wide decision came out, for reporting.
 struct ConeVerdict {
     bool     decided = false;      // a corpus-wide end was identified
     bool     atFirstRow = false;
+    // Both ends carry a band that is fixed across the corpus, so both are
+    // unsampled and `atFirstRow` says nothing. Reported separately because the
+    // alternative reading of "the corpus cannot choose an end" used to be
+    // "believe both", and believing a band that every scan shares clears a cone
+    // through whatever is on the other side of it.
+    bool     bothEnds = false;
     uint32_t rowsMin = 0, rowsMax = 0;    // the band's size across the corpus
     uint32_t otherMin = 0, otherMax = 0;  // and the other end's, which is scene
     size_t   scans = 0;
@@ -325,6 +336,9 @@ struct Diagnostics {
     uint64_t isolatedNoReturns = 0;   // by the optional neighbourhood filter
     uint64_t blindConeCells    = 0;   // the instrument's own blind cone
     uint32_t blindConeRows     = 0;
+    // A SECOND band, at the other end, also marked unsampled. Non-zero only for
+    // BlindCone::BothEnds — see that enumerator.
+    uint32_t blindConeRowsLast = 0;
     bool     blindConeAtFirstRow = false;
     // The evidence the decision was made on: the median range of the returns
     // bordering each candidate band, in metres. -1 where there was no band.

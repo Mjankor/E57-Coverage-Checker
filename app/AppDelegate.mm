@@ -1599,7 +1599,10 @@ const char *kindLabel(check::Kind k) {
         // nothing else on this line changes the picture as much. Undecided leaves
         // both ends believed, which carves a cone through the ground under every
         // setup — a warning, not a footnote.
-        if (!result->coneVerdict.decided)
+        if (result->coneVerdict.bothEnds)
+            warn = [warn stringByAppendingString:
+                    @"   ·   blind cone at BOTH ends — neither believed as sky"];
+        else if (!result->coneVerdict.decided)
             warn = [warn stringByAppendingString:
                     @"   ·   ⚠︎ blind cone NOT identified — empty cells at both ends "
                      "of the raster are believed"];

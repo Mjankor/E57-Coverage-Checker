@@ -1001,16 +1001,34 @@ static void testBlindConeFromTheCorpus() {
     CHECK(worstExtra == 0,
           "no cell outside the cone was left unsampled by a re-marking");
 
-    // A corpus where both ends are consistent — five scans from inside one room,
-    // the same ceiling band in each — is not something a corpus can settle, and it
-    // says so rather than picking one.
+    // A corpus where both ends are consistent — scans from inside one room, the
+    // same ceiling band in each. It still does not pick an end, because there is
+    // no reason to prefer either; but "cannot choose" is no longer read as
+    // "believe both", which cleared a cone through the ceiling and the floor. A
+    // band the whole corpus shares is not a view of anything, and that is as true
+    // of two bands as of one, so both are marked unsampled.
     std::vector<rimg::RangeImage> room;
     for (int k = 0; k < 4; ++k) room.push_back(makeScan(600, 610, 2.0, 2.1));
     std::vector<rimg::RangeImage*> rawRoom;
     for (auto& im : room) rawRoom.push_back(&im);
     const rimg::ConeVerdict rv = rimg::markBlindConeAcrossCorpus(rawRoom, opt);
-    CHECK(!rv.decided, "two equally consistent ends are not resolved by a coin toss");
+    CHECK(rv.bothEnds, "two equally consistent ends are both the instrument");
     CHECK(rv.why.find("both ends") != std::string::npos, "and the reason says which case");
+    // Which is the part that matters: neither band is left believed as sky.
+    for (const auto& im : room) {
+        CHECK(im.diag.blindConeRows > 0 && im.diag.blindConeRowsLast > 0,
+              "both bands are marked unsampled");
+        uint64_t believed = 0;
+        for (uint32_t r = 0; r < im.diag.blindConeRows; ++r)
+            for (uint32_t c = 0; c < im.cols; ++c)
+                if (rimg::Status(im.cells[size_t(r) * im.cols + c].status) ==
+                    rimg::Status::NoReturn) ++believed;
+        for (uint32_t i = 0; i < im.diag.blindConeRowsLast; ++i)
+            for (uint32_t c = 0; c < im.cols; ++c)
+                if (rimg::Status(im.cells[size_t(im.rows - 1 - i) * im.cols + c].status) ==
+                    rimg::Status::NoReturn) ++believed;
+        CHECK(believed == 0, "and no cell in either band clears to the rated range");
+    }
 
     // One scan has no corpus, so it falls back to its own geometry and says so.
     rimg::RangeImage single = makeScan(590, 125, 2.21, 3.30);
@@ -1370,13 +1388,15 @@ static void testOneOddScanCannotOverturnTheConeVerdict() {
         CHECK(!v.decided, "a leading band that really does vary is not fixed geometry");
     }
 
-    // Both ends fixed is still undecidable — five scans from inside one room have
-    // the same ceiling band in every one, and no corpus can break that tie.
+    // Both ends fixed is not a tie to be broken but an answer: scans from inside
+    // one room have the same ceiling band in every one, and a band the whole
+    // corpus shares is not scene. Both are marked unsampled rather than believed.
     {
         std::vector<std::pair<uint32_t, uint32_t>> b;
         for (size_t i = 0; i < 50; ++i) b.push_back({590u, 120u});
         const rimg::ConeVerdict v = rimg::decideBlindConeEnd(b, opt);
-        CHECK(!v.decided, "two equally fixed ends cannot be told apart");
+        CHECK(v.bothEnds, "two equally fixed ends are both the instrument, not a tie");
+        CHECK(!v.why.empty(), "and it says so");
     }
 
     // A minority is a minority: a fifth of the corpus disagreeing is tolerated,

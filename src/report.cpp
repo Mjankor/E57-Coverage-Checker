@@ -1208,7 +1208,8 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
         for (auto& im : images) raw.push_back(im.get());
         const rimg::ConeVerdict v = rimg::markBlindConeAcrossCorpus(raw, ro);
         o.add("blind cone: %s\n            %s\n\n",
-              v.decided ? (v.atFirstRow ? "the START of each raster" : "the END of each raster")
+              v.bothEnds ? "BOTH ends of each raster (neither believed as sky)"
+              : v.decided ? (v.atFirstRow ? "the START of each raster" : "the END of each raster")
                         : "not identified",
               v.why.c_str());
     }
@@ -1479,7 +1480,8 @@ int scanReport(const std::vector<std::string>& paths, const Options& opt, std::s
     ro.coneCorpusSpread = rimg::Options{}.coneCorpusSpread;
     const rimg::ConeVerdict cone = rimg::decideBlindConeEnd(bands, ro);
     o.add("blind cone: %s\n            %s\n",
-          cone.decided ? (cone.atFirstRow ? "the START of each raster"
+          cone.bothEnds ? "BOTH ends of each raster (neither believed as sky)"
+          : cone.decided ? (cone.atFirstRow ? "the START of each raster"
                                           : "the END of each raster")
                        : "*** not identified — see below ***",
           cone.why.c_str());
@@ -1488,7 +1490,8 @@ int scanReport(const std::vector<std::string>& paths, const Options& opt, std::s
     // Every file then reports against that decision rather than its own.
     Options scoped = opt;
     if (cone.decided)
-        scoped.blindCone = cone.atFirstRow ? rimg::BlindCone::FirstRows
+        scoped.blindCone = cone.bothEnds   ? rimg::BlindCone::BothEnds
+                         : cone.atFirstRow ? rimg::BlindCone::FirstRows
                                            : rimg::BlindCone::LastRows;
 
     int failures = 0;

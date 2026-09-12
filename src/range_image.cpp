@@ -725,6 +725,36 @@ void markBlindCone(RangeImage& im, const Options& opt) {
     uint32_t band = 0;
     std::string why;
 
+    if (opt.blindCone == BlindCone::BothEnds) {
+        // Both, which needs no comparison between them: the corpus already
+        // established that each is fixed geometry. Marked here and reported as
+        // one band plus a second, so unmarking can undo both.
+        uint64_t marked = 0;
+        auto markBand = [&](uint32_t bandRows, bool fromFirst) {
+            for (uint32_t i = 0; i < bandRows; ++i) {
+                const uint32_t r = fromFirst ? i : (im.rows - 1 - i);
+                Cell* row = &im.cells[size_t(r) * im.cols];
+                for (uint32_t c = 0; c < im.cols; ++c)
+                    if (Status(row[c].status) == Status::NoReturn) {
+                        row[c].status  = uint8_t(Status::OutsideFov);
+                        row[c].rangeCm = 0;
+                        ++marked;
+                    }
+            }
+        };
+        if (bandFirst + bandLast >= im.rows) return;
+        markBand(bandFirst, true);
+        markBand(bandLast, false);
+        im.diag.blindConeCells      = marked;
+        im.diag.blindConeRows       = bandFirst;
+        im.diag.blindConeAtFirstRow = true;
+        im.diag.blindConeRowsLast   = bandLast;
+        if (marked) {
+            im.diag.noReturns  -= std::min<uint64_t>(marked, im.diag.noReturns);
+            im.diag.outsideFov += marked;
+        }
+        return;
+    }
     if (opt.blindCone == BlindCone::FirstRows) {
         atFirst = true;  band = bandFirst;  why = "forced to the first rows";
     } else if (opt.blindCone == BlindCone::LastRows) {
@@ -816,24 +846,31 @@ void markBlindCone(RangeImage& im, const Options& opt) {
 // demoted inside the band would come back as a no-return here. The filter is off
 // by default, and a caller that wants both should run the corpus pass before it.)
 static void unmarkBlindCone(RangeImage& im, const Options& opt) {
-    if (im.diag.blindConeRows == 0 || im.rows == 0 || im.cols == 0) return;
+    if ((im.diag.blindConeRows == 0 && im.diag.blindConeRowsLast == 0) ||
+        im.rows == 0 || im.cols == 0) return;
     const uint16_t clearTo = uint16_t(std::min(opt.maxRange * 100.0, 65535.0));
     uint64_t restored = 0;
-    for (uint32_t i = 0; i < im.diag.blindConeRows; ++i) {
-        const uint32_t r = im.diag.blindConeAtFirstRow ? i : (im.rows - 1 - i);
-        Cell* row = &im.cells[size_t(r) * im.cols];
-        for (uint32_t c = 0; c < im.cols; ++c) {
-            if (Status(row[c].status) != Status::OutsideFov) continue;
-            row[c].status  = uint8_t(Status::NoReturn);
-            row[c].rangeCm = clearTo;
-            ++restored;
+    auto restore = [&](uint32_t bandRows, bool fromFirst) {
+        for (uint32_t i = 0; i < bandRows; ++i) {
+            const uint32_t r = fromFirst ? i : (im.rows - 1 - i);
+            Cell* row = &im.cells[size_t(r) * im.cols];
+            for (uint32_t c = 0; c < im.cols; ++c) {
+                if (Status(row[c].status) != Status::OutsideFov) continue;
+                row[c].status  = uint8_t(Status::NoReturn);
+                row[c].rangeCm = clearTo;
+                ++restored;
+            }
         }
-    }
+    };
+    restore(im.diag.blindConeRows, im.diag.blindConeAtFirstRow);
+    // A both-ends marking has a second band, at the other end.
+    restore(im.diag.blindConeRowsLast, !im.diag.blindConeAtFirstRow);
     im.diag.noReturns  += restored;
     im.diag.outsideFov -= std::min<uint64_t>(restored, im.diag.outsideFov);
-    im.diag.blindConeRows  = 0;
-    im.diag.blindConeCells = 0;
-    im.diag.hasConeAxis    = false;
+    im.diag.blindConeRows     = 0;
+    im.diag.blindConeRowsLast = 0;
+    im.diag.blindConeCells    = 0;
+    im.diag.hasConeAxis       = false;
 }
 
 ConeVerdict decideBlindConeEnd(
@@ -911,6 +948,29 @@ ConeVerdict decideBlindConeEnd(
     const bool trailFixed = trailMed > 0 && agreeing(trail, trailMed) >= need;
 
     char buf[560];
+    if (leadFixed && trailFixed) {
+        // Each end is the same in every scan, so neither is the scene. An
+        // instrument level inside a building sees its own mount one way and, at a
+        // constant height, the ceiling the other — two fixed bands, and no
+        // comparison between them can say which is "the" cone because both are.
+        // Treated as unsampled rather than tied: a band every scan shares is not
+        // a view of anything.
+        v.decided  = true;
+        v.bothEnds = true;
+        v.rowsMin  = leadMin;  v.rowsMax  = leadMax;
+        v.otherMin = trailMin; v.otherMax = trailMax;
+        std::snprintf(buf, sizeof(buf),
+                      "both ends of the raster carry a band that is fixed across %zu scans "
+                      "(leading %u rows median, %zu agree; trailing %u median, %zu agree), so "
+                      "both are the instrument rather than the scene and NEITHER is believed "
+                      "as a view of the sky. Believing them would clear a cone through "
+                      "whatever is on the other side — the roof and the floor, on a job "
+                      "scanned from inside throughout",
+                      v.scans, leadMed, agreeing(lead, leadMed),
+                      trailMed, agreeing(trail, trailMed));
+        v.why = buf;
+        return v;
+    }
     if (leadFixed == trailFixed) {
         // Neither end is consistent, or both are — five scans from inside one room
         // would have the same ceiling band in every one. Neither case is something
@@ -921,8 +981,7 @@ ConeVerdict decideBlindConeEnd(
                       "%u-%u seen; trailing %u median, %zu agree, %u-%u seen), so the "
                       "corpus cannot say which end is the instrument; each scan's own "
                       "bordering-range verdict stands",
-                      leadFixed ? "both ends of the raster are equally consistent"
-                                : "neither end of the raster is consistent",
+                      "neither end of the raster is consistent",
                       v.scans, leadMed, agreeing(lead, leadMed), leadMin, leadMax,
                       trailMed, agreeing(trail, trailMed), trailMin, trailMax);
         v.why = buf;
@@ -972,6 +1031,26 @@ ConeVerdict markBlindConeAcrossCorpus(const std::vector<RangeImage*>& images,
         usable.push_back(im);
     }
     ConeVerdict v = decideBlindConeEnd(bands, opt);
+    if (v.bothEnds) {
+        // Both bands are fixed across the corpus, so both are geometry and
+        // NEITHER is believed. This is the all-indoors case and it used to be the
+        // worst outcome available: "the corpus cannot choose an end" fell through
+        // to "believe both", which turned every setup's blind bands into rays
+        // that had seen through to the rated range — a cone cleared straight up
+        // through the roof and straight down through the floor, at every setup.
+        // On a building scanned from inside throughout, that removed the
+        // unobserved space above the ceiling and below the slab, which is exactly
+        // the space a coverage check is asked about.
+        Options forced = opt;
+        forced.blindCone = BlindCone::BothEnds;
+        for (RangeImage* im : usable) {
+            if (!im || im->rows == 0) continue;
+            unmarkBlindCone(*im, opt);        // undo whatever the scan guessed
+            markBlindCone(*im, forced);
+            ++v.corrected;
+        }
+        return v;
+    }
     if (!v.decided) {
         // The corpus looked and found no band that is the same in every scan.
         // That is not "no opinion": an instrument's blind cone IS the same in

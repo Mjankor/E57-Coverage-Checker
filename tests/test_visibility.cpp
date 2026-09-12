@@ -1516,6 +1516,84 @@ static void testANegativeMarginAsksAboutLess() {
     }
 }
 
+// An indoor corpus does not clear a cone through its own roof and floor.
+//
+// This is the end-to-end guard for the defect the cross-section showed: wedges of
+// space immediately above the ceiling and below the slab reported as OBSERVED,
+// which would need the scanner to see through both.
+//
+// The chain was: a survey conducted entirely inside a building has a fixed
+// unsampled band at each end of every raster — the instrument's own mount one
+// way, the ceiling at a constant height the other. The corpus test asked which
+// ONE end was fixed, found both, called that undecidable, and undecidable meant
+// "believe both" — every scan's blind bands became rays that had seen through to
+// the rated range. One cone up and one down per setup, and with enough setups the
+// space above the roof and below the floor is entirely cleared.
+//
+// Both bands are marked unsampled now. What this checks is the consequence: the
+// space beyond the ceiling stays unobserved.
+// roomScan with a fixed unsampled band at EACH end of the raster, which is what a
+// survey conducted entirely inside a building actually looks like: the
+// instrument's own mount blocks one end and, level in a room of constant height,
+// the ceiling band at the other is the same in every scan. The rows are declared
+// in indexBounds and simply carry no returns.
+static fixture::Scan bandedRoomScan(const char* name, double sx, double sy, double sz,
+                                    int leadBand, int trailBand) {
+    fixture::Scan sc = roomScan(name, sx, sy, sz);
+    const long long rows = kRows + leadBand + trailBand;
+    sc.rowMin = 0; sc.rowMax = rows - 1;
+    for (auto& f : sc.fields)
+        if (f.name == "rowIndex") { f.minimum = 0; f.maximum = rows - 1; }
+    // Shift every row index up by the leading band, leaving both bands empty.
+    for (double& r : sc.data[3]) r += double(leadBand);
+    return sc;
+}
+
+static void testAnIndoorCorpusCannotSeeThroughItsOwnRoof() {
+    std::printf("an indoor corpus does not clear through its roof or floor\n");
+
+    // Four setups, each with the same unsampled band at both ends.
+    const std::string path = tmpPath("indoorcone");
+    CHECK(fixture::write(path, {bandedRoomScan("a", -3.0,  2.0, 1.5, 40, 30),
+                                bandedRoomScan("b",  3.0,  2.0, 1.5, 40, 30),
+                                bandedRoomScan("c", -3.0, -2.0, 1.5, 41, 31),
+                                bandedRoomScan("d",  3.0, -2.0, 1.5, 40, 30)}, 512),
+          "fixture written");
+
+    vis::Options opt;
+    opt.voxelSize  = 0.25;
+    opt.maxRange   = 20.0;          // well past the room, so a believed cone reaches
+    opt.tileVoxels = 32;
+    opt.domain     = vis::DomainMode::MeasuredExtent;
+    opt.domainMargin = 4.0;         // ask about space beyond the ceiling and the floor
+    opt.solid      = true;          // every unobserved voxel, not just the frontier —
+                                    // a region entirely unknown has no frontier inside
+                                    // it, so the frontier cannot measure this
+    vis::Result r;
+    std::string err;
+    CHECK(vis::run({path}, opt, nullptr, r, err), err.empty() ? "ran" : err.c_str());
+    CHECK(r.setupsUsed == 4, "all four setups contributed");
+
+    // Both ends fixed across the corpus, so both are the instrument.
+    CHECK(r.coneVerdict.bothEnds,
+          "the corpus sees a fixed band at each end and calls both the instrument");
+
+    // The consequence, which is the whole point: space beyond the ceiling and
+    // below the floor is still unobserved. A believed band would have cleared a
+    // cone through both, straight up and straight down from every setup.
+    uint64_t aboveCeiling = 0, belowFloor = 0;
+    for (const lod::StorePoint& p : r.voxels) {
+        const double x = double(p.x) + r.origin[0];
+        const double y = double(p.y) + r.origin[1];
+        const double z = double(p.z) + r.origin[2];
+        if (std::fabs(x) > 4.0 || std::fabs(y) > 3.0) continue;   // over the setups
+        if (z > 3.5) ++aboveCeiling;
+        if (z < -0.5) ++belowFloor;
+    }
+    CHECK(aboveCeiling > 100, "space above the ceiling is still unobserved");
+    CHECK(belowFloor > 100, "and so is space below the floor");
+}
+
 int main() {
     testDefaultsAgreeWithTheLibrary();
     testVoxelHash();
@@ -1528,6 +1606,7 @@ int main() {
     testTheWrapSkinSharesTheVoxelsFrame();
     testACarverRunsOnEveryThreadAndAgrees();
     testANegativeMarginAsksAboutLess();
+    testAnIndoorCorpusCannotSeeThroughItsOwnRoof();
     testKeepingOnlyTheVoxelsInsideTheWrap();
     testKnownSceneFromFiveSetups();
     testDatumSetupWithNoTranslation();
