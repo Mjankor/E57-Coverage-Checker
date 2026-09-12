@@ -172,6 +172,24 @@ struct Options {
     // A tenth: one row in 591 is 0.2%, and the loosest thing that could still be
     // called fixed geometry is far inside 10%.
     double   coneCorpusSpread = 0.10;
+
+    // The instrument's unsampled cone, as a half-angle measured from NADIR, in
+    // degrees, and how far a measured band may sit from it and still be called
+    // that cone.
+    //
+    // This is the strongest signal available for which end of the raster is the
+    // instrument, and it is a property of the hardware rather than of the site: a
+    // scanner cannot see its own mount, so a fixed cone about its own downward
+    // axis is missing from every scan it ever takes. Elevation is measured in the
+    // instrument's OWN frame, so this needs no notion of world up, no ground
+    // plane and no pose — see markBlindCone.
+    //
+    // A parameter because it differs by model. Forty-five degrees is a common
+    // figure and the tolerance is deliberately loose: the point is to tell a cone
+    // about nadir from a band of sky at zenith, which differ by ninety degrees,
+    // not to measure the cone.
+    double   blindConeFromNadirDeg = 45.0;
+    double   blindConeAngleTolDeg  = 15.0;
 };
 
 constexpr double kTwoPi = 6.28318530717958648;
@@ -344,6 +362,21 @@ struct Diagnostics {
     // bordering each candidate band, in metres. -1 where there was no band.
     double   borderRangeFirst = -1.0;
     double   borderRangeLast  = -1.0;
+    // Each end's unsampled band as a half-angle from the pole it runs into,
+    // degrees, measured from the elevation of the last row that HAS returns —
+    // the rows inside a band have no returns, so their own elevations are
+    // interpolated and not evidence. -1 where there was no band.
+    double   bandAngleFirstDeg = -1.0;
+    double   bandAngleLastDeg  = -1.0;
+    // The end was identified from those angles rather than from the range of the
+    // returns bordering each band. The better signal, and the one to trust.
+    bool     coneByElevation = false;
+    // The pose puts this instrument's own up axis pointing downward in the file
+    // frame, so the setup looks inverted. REPORTED, not acted on: the mount is
+    // fixed at the instrument's own -z whatever the pose does with that frame, so
+    // this cannot move the cone for a scan stored scanner-local. It is here
+    // because a scan mounted the wrong way up is worth seeing.
+    bool     looksInvertedByPose = false;
     // The cone's axis in the FILE's frame, once the pose is applied — which is
     // to say, which way the instrument was actually pointing. Its z component
     // says whether this setup was upright or inverted, and that is worth seeing
