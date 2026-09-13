@@ -64,6 +64,12 @@
 - (void)frameAll;
 - (BOOL)hasStore;
 
+// The orbit pivot, in WORLD coordinates — the camera works against the store's
+// own origin, and everything outside this view speaks absolute metres. Clicking
+// in the view sets the pivot, so this is "the point I am looking at": what the
+// probe needs, and the one place in the app that already knows it.
+- (BOOL)pivotWorld:(double *)outXYZ;
+
 @property (nonatomic) float  pointSize;
 @property (nonatomic) size_t pointBudget;
 @property (nonatomic) BOOL   showClouds;

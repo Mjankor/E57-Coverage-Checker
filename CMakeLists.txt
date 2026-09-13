@@ -45,9 +45,12 @@ find_package(Threads REQUIRED)
 target_link_libraries(e57cov_core PUBLIC Threads::Threads)
 target_compile_options(e57cov_core PRIVATE -Wall -Wextra)
 
-add_executable(e57cov src/main.cpp)
-target_link_libraries(e57cov PRIVATE e57cov_core)
-target_compile_options(e57cov PRIVATE -Wall -Wextra)
+# No command-line target. Everything the tool does is in the app — the carve, the
+# scan report, the self-test, the probe and saving the result — and a second way in
+# was a second set of defaults to keep in step, which drifted: the CLI's help
+# advertised a domain, a margin and an early-out that had not been the defaults for
+# some time. The library and its tests still build anywhere, which is what keeps the
+# core honest off the target platform.
 
 enable_testing()
 add_executable(test_e57 tests/test_e57.cpp)

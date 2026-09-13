@@ -27,6 +27,8 @@ struct Options {
     // Passed through to the range image build, so the report describes the same
     // images a carve would use rather than a differently-configured set.
     rimg::BlindCone blindCone = rimg::BlindCone::Auto;
+    // The probe needs it for the surface margin; nothing else here does.
+    double   voxelSize          = 0.05;
     double   minRange           = rimg::Options{}.minRange;
     double   skyMinExtentDeg    = rimg::Options{}.skyMinExtentDeg;
     double   skyMinArcDeg       = rimg::Options{}.skyMinArcDeg;
@@ -40,6 +42,19 @@ int scanReport(const std::string& path, const Options& opt, std::string& out);
 
 // Every file in turn, with a heading naming the build that produced the report.
 int scanReport(const std::vector<std::string>& paths, const Options& opt, std::string& out);
+
+// WHY DID ONE POINT COME OUT THE WAY IT DID?
+//
+// Every setup in turn: how far away it is, which direction the point lies in, which
+// raster cell that direction falls in, what the scanner did there, and what that
+// setup therefore says about the point — then the combined verdict.
+//
+// The explanation for a voxel that came out unobserved when it should not have, or
+// cleared when it should not have. It reads the scans' own blind-cone decisions
+// rather than reaching its own: an explanation that disagrees with the run it is
+// explaining is worse than none.
+int probePoint(const std::vector<std::string>& paths, const Options& opt,
+               const double world[3], std::string& out);
 
 // Does the evidence path do what it claims, on this data?
 //

@@ -220,6 +220,15 @@
     [self setNeedsDisplay:YES];
 }
 
+- (BOOL)pivotWorld:(double *)outXYZ {
+    if (!outXYZ) return NO;
+    const m3::Vec3 p = _camera.pivot();
+    outXYZ[0] = double(p.x) + _origin[0];
+    outXYZ[1] = double(p.y) + _origin[1];
+    outXYZ[2] = double(p.z) + _origin[2];
+    return YES;
+}
+
 - (void)frameAll {
     [self updateViewport];
     if (!_tree.nodes.empty()) {

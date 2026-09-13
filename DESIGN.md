@@ -1,8 +1,10 @@
 # E57 Coverage Checker — design
 
-`e57cov` is a standalone macOS command-line tool. It reads a directory of
-structured E57 scans (~1000 files), builds a voxel representation of the space
-**observed** by the scanners, and reports the space that was **not** observed.
+**E57 Coverage Checker** is a macOS app. It reads a directory of structured E57
+scans (~1000 files), builds a voxel representation of the space **observed** by the
+scanners, and reports the space that was **not** observed. Everything it does is a
+menu item; there is no command-line tool, and the library beneath it builds and
+tests on any platform with a C++20 compiler.
 
 Target hardware: M4 Max, 64 GB unified memory.
 
@@ -44,11 +46,15 @@ documented where it is declared. Defaults:
 | parameter | default | meaning |
 |---|---|---|
 | `voxelSize` | 0.05 m | grid spacing |
-| `maxRange` | 45 m | how far a no-return ray clears — the scanner's rated maximum, past which a return is unlikely to be meaningful. `e57cov info --max-range` overrides it and reports each scan's furthest actual return |
+| `maxRange` | 45 m | how far a no-return ray clears — the scanner's rated maximum, past which a return is unlikely to be meaningful. the run sheet overrides it and the scan report gives each scan's furthest actual return |
 | `surfaceMargin` | `0.5 · voxelSize · √3` | half a voxel diagonal; keeps the surface voxel out of VISIBLE |
 | `maxVoidDepth` | 2.0 m (`40 · voxelSize`) | geodesic reach of the void dilation (§6) |
 | `minVoidVolume` | 0.125 m³ (1000 voxels) | components smaller than this are dropped as noise |
 | `brickDim` | 8 | voxels per brick edge |
+| `domainMargin` | −0.2 m | buffer round the shrinkwrap, **signed**: negative pulls the shell inside the walls so the space outside leaves the question |
+| `skyMinExtentDeg` | 25° | how far from the zenith an opening must reach to be sky (§4) |
+| `skyMinArcDeg` | 135° | and over how wide an arc of bearing it must reach that far |
+| `minRange` | 0.45 m | the instrument's rated minimum; inside it a surface returns nothing |
 
 ---
 
@@ -109,7 +115,7 @@ the half this section leans on.** See §4, *The carve is a scatter*. In short:
 (4096 × 2048 bins, `uint16` centimetre range + 2-bit status ≈ 17 MB/scan,
 × 1000 ≈ **17 GB**). That allows a clean split:
 
-### Phase 1 — `e57cov index`: E57 → range-image cache
+### Phase 1 — indexing: E57 → range-image cache
 
 Decode all scans once, in parallel across the performance cores, and write a
 compact cache. Purely I/O and CPU bound; this is where essentially all the wall
@@ -121,7 +127,7 @@ intensity and colour is roughly a 2× saving on decode, and E57's
 `CompressedVector` layout is one bytestream per field per packet, so unwanted
 fields are skipped without being unpacked.
 
-### Phase 2 — `e57cov carve`: cache → visibility grid
+### Phase 2 — the carve: cache → visibility grid
 
 `mmap` the cache, wrap it with `newBufferWithBytesNoCopy` (page-aligned, zero
 copy — the unified-memory payoff), run the GPU passes, write results.
@@ -186,7 +192,7 @@ Resolution order, as implemented in `src/range_image.cpp`:
    volume above the site then never clears. A scan offering nothing better is
    refused with a reason rather than quietly mishandled.
 
-`e57cov info` reports which path a file affords, the grid fill, the no-return
+The scan report says which path a file affords, the grid fill, the no-return
 count, and whether the raster is regular enough for exact lookups.
 
 ### What makes an opening at the zenith the sky
@@ -198,7 +204,7 @@ to clear space. Three tests, and a region has to pass all three:
 1. **Reach** — it opens at least `skyMinExtentDeg` (25°) from the instrument's own
    zenith, measured from the pole row's own elevation. An opening that wide about
    the pole is not a hole in a surface at any plausible distance.
-2. **Breadth** — it reaches that far over at least `skyMinArcDeg` (36°) **of
+2. **Breadth** — it reaches that far over at least `skyMinArcDeg` (135°) **of
    bearing**. Reaching the angle along one bearing is a spike, not an opening: a door
    frame's reveal is seen at a grazing angle all the way up, returns nothing, and
    leaves a narrow dead strip from the door to the ceiling. Joined to a small dead
@@ -209,7 +215,7 @@ to clear space. Three tests, and a region has to pass all three:
    The arc is **summed from each column's own azimuth width**, not counted as a share
    of the columns, because a count of columns is not an angle: neither axis of these
    rasters is uniform and a partial sweep does not cover a turn, so a tenth of the
-   columns can be 36° or 18°. Only columns the scan sampled contribute, so a scan is
+   columns can be 135° or 68°. Only columns the scan sampled contribute, so a scan is
    not charged for columns its file holds no data for. A sweep past a full turn looked
    at some bearings twice, so the sum is capped at 360 — which makes 360 ask for an
    opening all the way round on every instrument, not just on most of them.
@@ -232,6 +238,8 @@ Measured on the fixture raster (180 × 240, a 45° cap at the zenith):
 | verandah over half of it | 44.5° | 180° | 3.00 m | **sky** |
 | scanner hard under a ceiling | 44.5° | 360° | 0.50 m | not sky — border |
 | dead strip up a door frame | 89.7° | 12° | 3.00 m | not sky — breadth |
+
+(reach ≥ 25°, arc ≥ 135°, border outside 0.60 m)
 
 The last two both pass the reach, and the old single-angle test passed both.
 
@@ -579,15 +587,20 @@ usually truncates or overruns), and the Cartesian bounds match the file's own
 
 1. E57 reader → `(pose, range image, status mask)` for one scan. **Done.**
 2. Single-threaded CPU reference carve on a small grid. **Keep permanently.**
-   **Done** — `src/carve.{h,cpp}`, driven by `e57cov carve`. The outer loop is
+   **Done** — `src/carve.{h,cpp}`, driven by Processing ▸ Run Visibility Filter.
+   The outer loop is
    over space in tiles and the inner loop over the setups that reach each tile,
    which keeps the working set to one tile plus one range image while leaving
    the answer identical to any other partitioning of space. That invariance is
    asserted in `test_carve` and is what makes step 3 checkable at all.
-3. GPU gather kernel, flat, no hierarchy. Assert bit-exact against (2).
+3. GPU kernel, flat, no hierarchy. Assert bit-exact against (2). **Done for the
+   two gather methods** — `app/CarveGpu.mm`, within a measured float-vs-double
+   noise floor. The ray-march is CPU-only and inverting the kernel for it (one
+   thread per raster cell, atomics into the grid) is the next piece.
 4. Sparse bricks and, if profiling demands, HZB culling. Re-assert bit-exact —
    these are pure optimisations and must not change a single bit.
-5. Geodesic dilation, components, classification, export.
+5. Geodesic dilation, components, classification, export. **Export done** —
+   `src/ply.{h,cpp}`; classification partial.
 
 Steps 3–4 are where this class of tool goes wrong silently. The bit-exactness
 gate matters more than the profiling.

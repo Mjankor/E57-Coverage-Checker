@@ -29,6 +29,7 @@
 #include "../src/visibility.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -569,6 +570,10 @@ const char *kindLabel(check::Kind k) {
                         action:@selector(runVisibilityFilter:) keyEquivalent:@"r"];
     [procMenu addItemWithTitle:@"Scan Report…" action:@selector(scanReport:) keyEquivalent:@"i"];
     [procMenu addItemWithTitle:@"Evidence Self-Test…" action:@selector(selfTest:) keyEquivalent:@"t"];
+    // Why did ONE point come out the way it did? Every setup in turn: the direction,
+    // the raster cell, what the scanner did there, and what that setup therefore
+    // says. The explanation for a voxel that came out wrong.
+    [procMenu addItemWithTitle:@"Explain a Point…" action:@selector(explainPoint:) keyEquivalent:@"p"];
     [procMenu addItem:[NSMenuItem separatorItem]];
     // On by default. The carver is a "try" — every failure it can have comes
     // back as a declined tile that the CPU then carves — so the worst a machine
@@ -1028,6 +1033,7 @@ const char *kindLabel(check::Kind k) {
     if (item.action == @selector(clearCaches:))    return !_busy;
     // Nothing to save until something has been carved, and the shell only exists
     // when the run asked for one. Greyed rather than offered and then refused.
+    if (item.action == @selector(explainPoint:)) return !_busy && !_paths.empty();
     if (item.action == @selector(saveVoxels:))
         return !_busy && _lastRun && !_lastRun->voxels.empty();
     if (item.action == @selector(saveWrap:))
@@ -1072,6 +1078,88 @@ const char *kindLabel(check::Kind k) {
         _status.stringValue = ns(vis::saveSummary(*_lastRun, part, path));
     else
         _status.stringValue = [NSString stringWithFormat:@"Save failed: %s", err.c_str()];
+}
+
+// Explains one point, using the settings the sheet last ran at and the point the
+// view is looking at.
+//
+// Prefilled from the orbit pivot because clicking in the view already sets it —
+// "why is this bit wrong?" is asked by pointing at it, not by typing coordinates —
+// and editable because the interesting point is sometimes one with nothing drawn
+// at it.
+- (void)explainPoint:(id)sender {
+    (void)sender;
+    if (_busy) return;
+    if (_paths.empty()) {
+        _status.stringValue = @"Open some E57 scans first.";
+        return;
+    }
+
+    double p[3] = {0, 0, 0};
+    [_cloudView pivotWorld:p];
+
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 88)];
+    NSTextField *fields[3];
+    const char* names[3] = {"X", "Y", "Z"};
+    for (int i = 0; i < 3; ++i) {
+        const CGFloat y = 60 - i * 28;
+        [acc addSubview:[self labelWithText:ns(std::string(names[i]) + " (m)")
+                                      frame:NSMakeRect(0, y, 60, 20)]];
+        fields[i] = [self fieldWithValue:[NSString stringWithFormat:@"%.4f", p[i]]
+                                   frame:NSMakeRect(64, y - 3, 256, 22)];
+        [acc addSubview:fields[i]];
+    }
+
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = @"Explain a point";
+    a.informativeText =
+        @"What every setup says about one point in space, and why: the direction it "
+         "lies in, the raster cell that direction falls in, what the scanner did "
+         "there, and the verdict that follows.\n\nPrefilled with the point the view is "
+         "orbiting — click in the view to move it.";
+    a.accessoryView = acc;
+    [a addButtonWithTitle:@"Explain"];
+    [a addButtonWithTitle:@"Cancel"];
+    if ([a runModal] != NSAlertFirstButtonReturn) return;
+
+    double world[3];
+    for (int i = 0; i < 3; ++i) world[i] = fields[i].doubleValue;
+
+    report::Options ro;
+    ro.maxRange           = _visOptions.maxRange;
+    ro.voxelSize          = _visOptions.voxelSize;
+    ro.blindCone          = _visOptions.blindCone;
+    ro.minRange           = _visOptions.minRange;
+    ro.skyMinExtentDeg    = _visOptions.skyMinExtentDeg;
+    ro.skyMinArcDeg       = _visOptions.skyMinArcDeg;
+    ro.darkBorderFraction = _visOptions.darkBorderFraction;
+    ro.skyOnly            = _visOptions.skyOnly;
+
+    _busy = YES;
+    _spinner.hidden = NO;
+    [_spinner startAnimation:nil];
+    _status.stringValue = @"Reading the scans…";
+
+    auto paths = std::make_shared<std::vector<std::string>>(_paths);
+    auto at = std::make_shared<std::array<double, 3>>();
+    (*at)[0] = world[0]; (*at)[1] = world[1]; (*at)[2] = world[2];
+    __weak AppDelegate *weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      @autoreleasepool {
+        auto text = std::make_shared<std::string>();
+        report::probePoint(*paths, ro, at->data(), *text);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            AppDelegate *me = weakSelf;
+            if (!me) return;
+            me->_busy = NO;
+            [me->_spinner stopAnimation:nil];
+            me->_spinner.hidden = YES;
+            me->_status.stringValue = [NSString stringWithFormat:
+                @"Explained (%.3f, %.3f, %.3f).", (*at)[0], (*at)[1], (*at)[2]];
+            [me showReport:ns(*text) savedTo:nil];
+        });
+      }
+    });
 }
 
 - (void)saveVoxels:(id)sender {
@@ -1394,7 +1482,7 @@ const char *kindLabel(check::Kind k) {
     // labels now name a setting instead of explaining it, so they fit in 330 and
     // the sheet fits on a laptop screen — which the version that explained every
     // setting in its own text did not.
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 438)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 460)];
     // Label, value, and the explanation — which lives in a TOOLTIP rather than in
     // the sheet. Every one of these settings needs a paragraph to use well and
     // none of them needs it on screen at once: put them all in the sheet's own
@@ -1477,7 +1565,7 @@ const char *kindLabel(check::Kind k) {
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (int i = 0; i < 10; ++i) {
-        const CGFloat y = 410 - i * 28;
+        const CGFloat y = 432 - i * 28;
         NSTextField *l = [self labelWithText:rows[i].label frame:NSMakeRect(0, y, 330, 20)];
         l.toolTip = rows[i].tip;
         [acc addSubview:l];
@@ -1489,9 +1577,9 @@ const char *kindLabel(check::Kind k) {
 
     // WHICH FORMULATION OF THE CARVE. Here rather than buried, because the three
     // give different answers on the same data and the difference is the point.
-    NSTextField *methodLabel = [self labelWithText:@"Method" frame:NSMakeRect(0, 130, 60, 20)];
+    NSTextField *methodLabel = [self labelWithText:@"Method" frame:NSMakeRect(0, 152, 60, 20)];
     NSPopUpButton *method =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 127, 396, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 149, 396, 24) pullsDown:NO];
     [method addItemsWithTitles:@[@"March each scanner ray through the voxels it crosses",
                                  @"Sample the voxel's own footprint (17 rays)",
                                  @"One ray per voxel, through its centre (baseline)"]];
@@ -1521,9 +1609,9 @@ const char *kindLabel(check::Kind k) {
 
     // What region the question covers — the setting that changes the answer more
     // than any other, so it is a choice rather than a tick box.
-    NSTextField *regionLabel = [self labelWithText:@"Region" frame:NSMakeRect(0, 102, 60, 20)];
+    NSTextField *regionLabel = [self labelWithText:@"Region" frame:NSMakeRect(0, 124, 60, 20)];
     NSPopUpButton *region =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 99, 396, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 121, 396, 24) pullsDown:NO];
     [region addItemsWithTitles:@[@"Shrinkwrap of the returns (tightest)",
                                  @"Box around the surveyed extent",
                                  @"Everything in range of a setup"]];
@@ -1548,7 +1636,7 @@ const char *kindLabel(check::Kind k) {
     // the shell to be dropped, which a NEGATIVE buffer says better, as a distance
     // rather than as a switch. The tick box could only say whether; the number
     // says how far in to come.
-    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
+    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 96, 460, 20)];
     skyOnly.title = @"Clear only where the scan saw its own sky";
     skyOnly.toolTip =
         @"An empty cell is only evidence of empty space where the scan could name it "
@@ -1566,7 +1654,7 @@ const char *kindLabel(check::Kind k) {
     skyOnly.state = _visOptions.skyOnly ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:skyOnly];
 
-    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 460, 20)];
+    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
     firstHit.title = @"Stop at the first evidence";
     firstHit.toolTip =
         @"Much faster, and exact for the unobserved set — which is the set being "
@@ -1579,7 +1667,7 @@ const char *kindLabel(check::Kind k) {
                    ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:firstHit];
 
-    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 460, 20)];
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 460, 20)];
     solid.title = @"Show every unobserved voxel";
     solid.toolTip =
         @"Untick to draw only the frontier — where coverage stops — which is far "
@@ -1596,7 +1684,7 @@ const char *kindLabel(check::Kind k) {
     // belongs here: it only means anything when the region is the shrinkwrap, and
     // it is the difference between seeing the site and seeing a red mass in front
     // of it.
-    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 460, 20)];
+    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 460, 20)];
     insideWrap.title = @"Keep only unobserved voxels inside the shrinkwrap";
     insideWrap.toolTip =
         @"Drops the blanket of unobserved space that otherwise wraps the site out to "
@@ -1606,6 +1694,23 @@ const char *kindLabel(check::Kind k) {
     insideWrap.font = [NSFont systemFontOfSize:11];
     insideWrap.state = _intersectWrap ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:insideWrap];
+    // The connectivity pass. Off by default and the only control here that can
+    // remove a real finding, so it says what it costs rather than just what it does.
+    NSButton *classify = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 460, 20)];
+    classify.title = @"Keep only unobserved space enclosed by the survey";
+    classify.toolTip =
+        @"Drops unobserved space you can reach from outside the site without crossing "
+        @"anything a scanner observed — the open air around the building, which "
+        @"otherwise dominates the number.\n\nOFF by default, because it also excludes a "
+        @"building interior whose walls were only ever seen from one side, and that is "
+        @"usually the space you wanted. It needs one byte per voxel of the whole domain "
+        @"at once, connectivity not being answerable tile by tile, and says so rather "
+        @"than running out of memory.";
+    [classify setButtonType:NSButtonTypeSwitch];
+    classify.font = [NSFont systemFontOfSize:11];
+    classify.state = _visOptions.classifyVoids ? NSControlStateValueOn : NSControlStateValueOff;
+    [acc addSubview:classify];
+
     // Shading is not here. It is in the View menu, because it changes how the
     // answer is drawn rather than what the answer is, and it applies to a
     // finished carve without running another one.
@@ -1695,6 +1800,7 @@ const char *kindLabel(check::Kind k) {
     _intersectWrap   = (insideWrap.state == NSControlStateValueOn);
     const BOOL intersectWrap = _intersectWrap;
     opt.solid        = (solid.state == NSControlStateValueOn);
+    opt.classifyVoids = (classify.state == NSControlStateValueOn);
     opt.method       = methodOrder[std::clamp<NSInteger>(method.indexOfSelectedItem, 0, 2)];
     opt.earlyOut     = (firstHit.state == NSControlStateValueOn)
                      ? carve::EarlyOut::AnyEvidence : carve::EarlyOut::Saturated;

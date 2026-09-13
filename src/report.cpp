@@ -1588,4 +1588,115 @@ int scanReport(const std::vector<std::string>& paths, const Options& opt, std::s
     return failures;
 }
 
+int probePoint(const std::vector<std::string>& paths, const Options& opt,
+               const double world[3], std::string& out) {
+    Out o{out};
+    std::vector<std::unique_ptr<e57::Reader>> readers;
+    std::vector<std::unique_ptr<rimg::RangeImage>> images;
+    std::vector<carve::SetupView> setups;
+
+    rimg::Options ro;
+    ro.maxRange         = opt.maxRange;
+    ro.blindCone        = opt.blindCone;
+    ro.minRange         = opt.minRange;
+    ro.skyMinExtentDeg    = opt.skyMinExtentDeg;
+    ro.skyMinArcDeg       = opt.skyMinArcDeg;
+    ro.darkBorderFraction = opt.darkBorderFraction;
+    ro.skyOnly            = opt.skyOnly;
+
+    for (const std::string& path : paths) {
+        auto r = std::make_unique<e57::Reader>();
+        std::string err;
+        if (!r->open(path, err)) { o.add("%s: %s\n", path.c_str(), err.c_str()); return 1; }
+        for (size_t i = 0; i < r->scanCount(); ++i) {
+            auto img = std::make_unique<rimg::RangeImage>();
+            std::string rerr;
+            if (!rimg::build(*r, i, ro, *img, rerr)) continue;
+            images.push_back(std::move(img));
+        }
+        readers.push_back(std::move(r));
+    }
+    if (images.empty()) { o.add("no usable scans\n"); return 1; }
+
+    // What the scans decided about their own blind cones — read, not re-decided.
+    // This command exists to explain why a voxel came out the way it did, so it
+    // must not reach its own conclusion about which empty cells clear space: an
+    // explanation that disagrees with the run it is explaining is worse than none.
+    {
+        std::vector<rimg::RangeImage*> raw;
+        raw.reserve(images.size());
+        for (auto& im : images) raw.push_back(im.get());
+        const rimg::ConeVerdict v = rimg::summariseBlindCones(raw, ro);
+        o.add("blind cone: %s\n            %s\n\n",
+                    v.headline.c_str(), v.why.c_str());
+    }
+    for (auto& im : images) setups.push_back(carve::makeSetupView(*im));
+
+    carve::Params p;
+    p.voxelSize     = opt.voxelSize;
+    p.surfaceMargin = 0.5 * opt.voxelSize * 1.7320508075688772;
+    p.maxRange      = opt.maxRange;
+    // The probe explains ONE point, so it asks the per-direction question directly
+    // rather than running a carve. evidenceAt is that question, and under the march
+    // it is the centre ray alone — which is what this has always shown.
+    p.method        = carve::Method::CentreRay;
+
+    o.add("probe (%.3f, %.3f, %.3f)   voxel %.3f m   max range %.1f m\n\n",
+                world[0], world[1], world[2], p.voxelSize, p.maxRange);
+
+    uint8_t total = 0;
+    for (size_t i = 0; i < setups.size(); ++i) {
+        const carve::SetupView& s = setups[i];
+        const rimg::RangeImage& im = *s.image;
+
+        const double dx = world[0] - s.origin[0];
+        const double dy = world[1] - s.origin[1];
+        const double dz = world[2] - s.origin[2];
+        const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+
+        o.add("  setup %zu at (%.3f, %.3f, %.3f)   %.2f m away\n",
+                    i, s.origin[0], s.origin[1], s.origin[2], dist);
+        if (dist > p.maxRange) {
+            o.add("      out of range — contributes nothing\n\n");
+            continue;
+        }
+
+        double x = world[0], y = world[1], z = world[2];
+        s.worldToScanner.apply(x, y, z);
+        double az, el, r;
+        rimg::toSpherical(x, y, z, az, el, r);
+        o.add("      direction   az %7.3f rad (%7.2f deg)   el %7.3f rad (%7.2f deg)\n",
+                    az, az * 57.29577951308232, el, el * 57.29577951308232);
+        o.add("      raster      row %.2f of %u   col %.2f of %u\n",
+                    im.rowCoord(el), im.rows, im.colCoord(az), im.cols);
+
+        uint32_t row, col;
+        if (!im.cellOf(az, el, row, col)) {
+            o.add("      cell        NONE — this direction is off the raster%s\n",
+                        im.map.valid ? "" : " (the mapping was refused)");
+            o.add("      verdict     says nothing\n\n");
+            continue;
+        }
+        const rimg::Status st = im.statusAt(row, col);
+        const double surface  = im.rangeAt(row, col);
+        o.add("      cell        [%u, %u]  %s", row, col, rimg::statusName(st));
+        if (st == rimg::Status::Hit)      o.add("  surface at %.3f m", surface);
+        if (st == rimg::Status::NoReturn) o.add("  clears to %.3f m", surface);
+        o.add("\n");
+
+        const uint8_t bits = carve::evidenceAt(s, p, world[0], world[1], world[2]);
+        total |= bits;
+        o.add("      verdict     %s\n\n",
+                    (bits & carve::kVisible)  ? "VISIBLE — this setup saw through it"
+                  : (bits & carve::kOccupied) ? "OCCUPIED — a surface is measured here"
+                                              : "says nothing");
+    }
+
+    o.add("combined    : %s\n",
+                (total & carve::kVisible) ? "VISIBLE"
+              : (total & carve::kOccupied) ? "OCCUPIED"
+                                           : "UNOBSERVED — no setup said anything about it");
+    return 0;
+}
+
 } // namespace report
