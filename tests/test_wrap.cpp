@@ -628,8 +628,82 @@ static void testTheShellBridgesAnOpeningAndStaysOutside() {
     CHECK(narrow.bridgedCells == 0, "so there is no envelope to speak of");
 }
 
+// A COMPLEX SITE, judged one enclosed region at a time.
+//
+// A real site is not one building. It is a building, and a boundary wall with
+// nothing behind it, and a shed whose door stood open while the survey ran. A
+// negative buffer decided on one flood over the whole site made all three share a
+// verdict, and the verdict failed on the hardest of them — so a leak in the shed
+// took the question away from the building.
+//
+// Each is now assessed alone: deep enough to pull into and it is the question;
+// too thin or not enclosed and that surface keeps the ordinary skin. Every
+// surface is covered by one rule or the other, so the worst case is a region
+// asked about too generously rather than a site with no question at all.
+static void testEachEnclosedRegionIsJudgedOnItsOwn() {
+    std::printf("a complex site is judged one enclosed region at a time\n");
+
+    const double lo[3] = {-3, -3, 0}, hi[3] = {18, 8, 3};
+    wrap::Options opt;
+    opt.buffer   = -0.5;
+    opt.cell     = 0.1;
+    opt.spanGaps = 1.6;
+    wrap::Grid g;
+    std::string err;
+    CHECK(wrap::size(lo, hi, opt, g, err), err.empty() ? "sized" : err.c_str());
+
+    for (uint32_t z = 0; z < g.dim[2]; ++z)
+        for (uint32_t y = 0; y < g.dim[1]; ++y)
+            for (uint32_t x = 0; x < g.dim[0]; ++x) {
+                double c[3];
+                g.cellCentre(x, y, z, c);
+                bool mark = false;
+                // A closed building, 6 x 6 x 3.
+                if (c[0] > -0.05 && c[0] < 6.05 && c[1] > -0.05 && c[1] < 6.05 &&
+                    c[2] > -0.05 && c[2] < 3.05 &&
+                    (c[0] < 0.1 || c[0] > 5.9 || c[1] < 0.1 || c[1] > 5.9 ||
+                     c[2] < 0.1 || c[2] > 2.9)) mark = true;
+                // A freestanding wall, with nothing behind it.
+                if (std::fabs(c[0] - 9.0) < 0.06 && c[1] > -0.05 && c[1] < 6.05 &&
+                    c[2] > -0.05 && c[2] < 3.05) mark = true;
+                // A shed with a 2 m doorway — wider than the bridge, so it leaks.
+                if (c[0] > 11.95 && c[0] < 15.05 && c[1] > -0.05 && c[1] < 3.05 &&
+                    c[2] > -0.05 && c[2] < 3.05) {
+                    const bool face = c[0] < 12.1 || c[0] > 14.9 || c[1] < 0.1 ||
+                                      c[1] > 2.9 || c[2] < 0.1 || c[2] > 2.9;
+                    const bool door = c[0] > 14.9 && c[1] > 0.5 && c[1] < 2.5 && c[2] < 2.1;
+                    if (face && !door) mark = true;
+                }
+                if (mark) g.inDomain[g.index(x, y, z)] |= 1u;
+            }
+    const std::vector<double> setups = {3, 3, 1.5, 13.5, 1.5, 1.5};
+    wrap::build(opt, g, setups);
+
+    // The building: pulled in, and nothing outside it in the question.
+    CHECK(g.pulledInCells > 0, "something was deep enough to pull the boundary into");
+    CHECK(g.contains(3.0, 3.0, 1.5), "the building's air is the question");
+    CHECK(!g.contains(-1.5, 3.0, 1.5), "and no point outside its walls is");
+
+    // The freestanding wall: no interior, so it keeps the skin rather than losing
+    // its place in the question.
+    CHECK(g.skinnedSurfaces > 0, "the surfaces bounding no interior were counted");
+    CHECK(g.contains(9.3, 3.0, 1.5), "a wall with nothing behind it keeps its skin");
+    CHECK(!g.contains(10.5, 3.0, 1.5), "a buffer's width of it, and no more");
+
+    // The shed: the flood got in, which costs the shed its interior and nothing
+    // else. That is the whole point — it used to cost the building its question.
+    CHECK(g.sealLeaked, "the shed's doorway is wider than the bridge, so it leaked");
+    CHECK(g.contains(3.0, 3.0, 1.5), "and the building is still pulled in regardless");
+    CHECK(!g.contains(13.5, 1.5, 1.5),
+          "while the middle of the shed is beyond a skin's reach of its walls");
+
+    // Nothing is asked about outside the site at all.
+    CHECK(!g.contains(17.0, 7.0, 1.5), "open ground is not the question");
+}
+
 int main() {
     std::printf("E57 Coverage Checker — shrinkwrap tests\n\n");
+    testEachEnclosedRegionIsJudgedOnItsOwn();
     testTheShellBridgesAnOpeningAndStaysOutside();
     testDilationIsExactlyEuclidean();
     testOutsideTheGridIsOutsideTheQuestion();

@@ -13,11 +13,17 @@ namespace {
 // byte the finished answer lives in, so there is one array rather than three.
 constexpr uint8_t kOccupied = 1u << 0;   // holds at least one return
 constexpr uint8_t kInDomain = 1u << 1;   // within the buffer of an occupied cell
+constexpr uint8_t kSeed     = 1u << 2;   // scratch: what the skin is measured from
 constexpr uint8_t kOutside  = 1u << 3;   // the flood reached it
 constexpr uint8_t kBarrier  = 1u << 4;   // sealed: what the flood cannot cross
 // The watertight surface of the surveyed shell: the measured returns, plus the
 // cells that close the openings between them. See the envelope note in build().
 constexpr uint8_t kEnvelope = 1u << 5;
+// A region the survey encloses that is deep enough to pull the boundary into, and
+// the whole of the enclosed region it belongs to. See the per-region note in
+// build(): the negative buffer is decided one enclosed region at a time.
+constexpr uint8_t kCore     = 1u << 6;
+constexpr uint8_t kKeptIn   = 1u << 7;
 
 // WHAT STOPS THE INTERIOR-ONLY FLOOD, and how the outside is then peeled back.
 //
@@ -80,6 +86,56 @@ constexpr uint8_t kEnvelope = 1u << 5;
 // the setup test in build(), which asks whether the flood reached a cell an
 // instrument was standing in. Nothing that happened inside a building is outside
 // it.
+
+// Spreads `mark` through everything that is not `blocked`, from wherever `mark`
+// already is. The same span walk floodOutside uses, for the same reason: a region
+// can be tens of millions of cells and a stack of single cells over it is not
+// affordable where the spans covering it number in the thousands.
+void spreadThrough(Grid& g, uint8_t mark, uint8_t blocked) {
+    const uint32_t X = g.dim[0], Y = g.dim[1], Z = g.dim[2];
+    struct Span { uint32_t z, y, x0, x1; };
+    std::vector<Span> stack;
+
+    auto open = [&](uint32_t x, uint32_t y, uint32_t z) {
+        const uint8_t b = g.inDomain[g.index(x, y, z)];
+        return !(b & blocked) && !(b & mark);
+    };
+    auto fill = [&](uint32_t x, uint32_t y, uint32_t z) {
+        if (!open(x, y, z)) return;
+        uint32_t x0 = x, x1 = x;
+        while (x0 > 0 && open(x0 - 1, y, z)) --x0;
+        while (x1 + 1 < X && open(x1 + 1, y, z)) ++x1;
+        for (uint32_t i = x0; i <= x1; ++i) g.inDomain[g.index(i, y, z)] |= mark;
+        stack.push_back({z, y, x0, x1});
+    };
+
+    // Seeded from every run already marked, so the caller marks the seeds and this
+    // carries them as far as they reach.
+    for (uint32_t z = 0; z < Z; ++z)
+        for (uint32_t y = 0; y < Y; ++y)
+            for (uint32_t x = 0; x < X; ++x)
+                if (g.inDomain[g.index(x, y, z)] & mark) {
+                    uint32_t x1 = x;
+                    while (x1 + 1 < X && (g.inDomain[g.index(x1 + 1, y, z)] & mark)) ++x1;
+                    stack.push_back({z, y, x, x1});
+                    x = x1;
+                }
+
+    while (!stack.empty()) {
+        const Span s = stack.back();
+        stack.pop_back();
+        const int32_t dy[4] = {-1, 1, 0, 0};
+        const int32_t dz[4] = {0, 0, -1, 1};
+        for (int k = 0; k < 4; ++k) {
+            const int64_t ny = int64_t(s.y) + dy[k], nz = int64_t(s.z) + dz[k];
+            if (ny < 0 || nz < 0 || ny >= int64_t(Y) || nz >= int64_t(Z)) continue;
+            for (uint32_t x = s.x0; x <= s.x1; ++x)
+                fill(x, uint32_t(ny), uint32_t(nz));
+        }
+        // The run itself may reach further along x than the seed run did.
+        for (uint32_t x = s.x0; x <= s.x1; ++x) fill(x, s.y, s.z);
+    }
+}
 
 // Exact squared Euclidean distance transform, one axis at a time.
 //
@@ -561,24 +617,79 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
             grid.spanGaps = 2.0 * sealCells * grid.cell;
         }
 
-        if (grid.sealLeaked && pullIn) {
-            // Pulling in has nothing to fall back on: the domain IS what the flood
-            // did not reach, and a flood that got inside leaves almost nothing.
-            // So the whole region within the magnitude of a surface is used
-            // instead — the positive question, which is merely too generous —
-            // and the leak is reported.
-            for (size_t i = 0; i < grid.inDomain.size(); ++i)
-                if (d2[i] <= bufSq) grid.inDomain[i] |= kInDomain;
-        } else if (pullIn) {
-            // THE SHELL, PULLED IN. Everything the flood did not reach is what the
-            // survey encloses — its interior and the walls around it — and eroding
-            // that by the magnitude is keeping the cells further than it from the
-            // outside. The boundary then sits that far inside the outer face of
-            // the wall, so the wall and everything beyond it are out of the
-            // question and no point from outside can be in the answer.
+        if (pullIn) {
+            // THE SHELL, PULLED IN — ONE ENCLOSED REGION AT A TIME.
+            //
+            // Pulling the boundary inside the walls only means anything where
+            // there are walls with an inside. A real site is not one building: it
+            // is a building, and a boundary wall with nothing behind it, and a
+            // canopy, and a stretch of fence, and a lean-to whose door stood open
+            // while the survey ran. Deciding the whole site on one flood made all
+            // of those share a verdict — and the verdict failed on the hardest
+            // one, so a leak in a shed took the question away from the building.
+            //
+            // So each enclosed region is assessed on its own merits, which is the
+            // same rule the scans themselves get:
+            //
+            //   Deep enough to pull in — the erosion leaves a core — and that
+            //   region is the question, with the walls around it and everything
+            //   beyond them left out. This is the building.
+            //
+            //   Too thin, or not enclosed at all — a freestanding wall, a canopy,
+            //   a room the flood got into — and that surface keeps the ordinary
+            //   skin of the buffer's width. Not as tight as an interior, and the
+            //   right answer where there is no interior to be had.
+            //
+            // FAILING IS NOT AN OUTCOME. Every surface is covered by one rule or
+            // the other, so the worst case is a region asked about too generously
+            // rather than a site with no question at all.
             const std::vector<double> dOut = distanceTo(grid, kOutside);
             for (size_t i = 0; i < grid.inDomain.size(); ++i)
-                if (dOut[i] > bufSq) grid.inDomain[i] |= kInDomain;
+                if (!(grid.inDomain[i] & kOutside) && dOut[i] > bufSq)
+                    grid.inDomain[i] |= uint8_t(kCore | kKeptIn);
+            // Which enclosed regions those cores belong to: everything reachable
+            // from a core without crossing the outside.
+            spreadThrough(grid, kKeptIn, kOutside);
+
+            for (size_t i = 0; i < grid.inDomain.size(); ++i) {
+                const uint8_t b = grid.inDomain[i];
+                if (b & kCore) { grid.inDomain[i] = uint8_t(b | kInDomain); ++grid.pulledInCells; }
+            }
+
+            // The skin, for everything the pull-in did not speak for. Seeded from
+            // the surfaces that do NOT bound a region deep enough to pull into: a
+            // wall of the building has the building on one side and is left to the
+            // erosion, while a freestanding wall bounds nothing and keeps its skin.
+            uint64_t seeds = 0;
+            const int64_t X = grid.dim[0], Y = grid.dim[1], Z = grid.dim[2];
+            for (int64_t z = 0; z < Z; ++z)
+                for (int64_t y = 0; y < Y; ++y)
+                    for (int64_t x = 0; x < X; ++x) {
+                        const size_t i = grid.index(uint32_t(x), uint32_t(y), uint32_t(z));
+                        const uint8_t b = grid.inDomain[i];
+                        if (!(b & (kOccupied | kEnvelope))) continue;
+                        bool bounds = false;
+                        static const int64_t d[6][3] = {{1,0,0},{-1,0,0},{0,1,0},
+                                                        {0,-1,0},{0,0,1},{0,0,-1}};
+                        for (const auto& n : d) {
+                            const int64_t nx = x + n[0], ny = y + n[1], nz = z + n[2];
+                            if (nx < 0 || ny < 0 || nz < 0 || nx >= X || ny >= Y || nz >= Z)
+                                continue;
+                            if (grid.inDomain[grid.index(uint32_t(nx), uint32_t(ny),
+                                                         uint32_t(nz))] & kKeptIn) {
+                                bounds = true;
+                                break;
+                            }
+                        }
+                        if (!bounds) { grid.inDomain[i] |= kSeed; ++seeds; }
+                    }
+            grid.skinnedSurfaces = seeds;
+            if (seeds) {
+                const std::vector<double> dSkin = distanceTo(grid, kSeed);
+                for (size_t i = 0; i < grid.inDomain.size(); ++i)
+                    if (dSkin[i] <= bufSq) grid.inDomain[i] |= kInDomain;
+            }
+            for (uint8_t& b : grid.inDomain) b = uint8_t(b & ~kSeed);
         } else {
             // The skin, now measured from the envelope rather than from the bare
             // returns, so it crosses an opening instead of following it inward.
@@ -588,9 +699,7 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
                 for (size_t i = 0; i < grid.inDomain.size(); ++i)
                     if (dEnv[i] <= bufSq) grid.inDomain[i] |= kInDomain;
             }
-            if (grid.sealLeaked) {
-                // Nothing to drop and nothing to trust: the skin stands as it is.
-            } else if (opt.interiorOnly) {
+            if (!grid.sealLeaked && opt.interiorOnly) {
                 // A domain cell the flood reached is on the outside of the
                 // surveyed shell. Occupied cells are never dropped: they hold
                 // measured surface, and a surface is not unobserved space

@@ -98,6 +98,14 @@ struct Options {
     //   hand. It needs the flood that finds the outside, so it implies
     //   interiorOnly and does not need it set.
     //
+    //   DECIDED ONE ENCLOSED REGION AT A TIME. A site is not one building: it is a
+    //   building, a boundary wall with nothing behind it, a canopy, and a shed
+    //   whose door stood open while the survey ran. A region deep enough for the
+    //   erosion to leave a core is pulled in; a region too thin, or one the flood
+    //   got into, keeps the ordinary skin of the same width. So the answer never
+    //   fails — the worst case is a region asked about too generously — and a leak
+    //   in a shed can no longer take the question away from the building.
+    //
     // The magnitudes are not comparable across the sign: +2 asks about a two
     // metre skin around everything measured; -2 asks about a whole interior less
     // a two metre skin. Both are useful, and they are different questions.
@@ -192,11 +200,16 @@ struct Grid {
     uint64_t occupiedCells = 0;    // cells holding at least one return
     uint64_t domainCells   = 0;    // cells inside the wrap
     uint64_t droppedOutside = 0;   // cells the interior-only rule removed
-    // The interior-only flood came in through a hole in the survey and reached a
-    // cell an instrument was standing in. Nothing that happened inside a building
-    // is outside it, so this says the shell did not hold — and when it is set,
-    // nothing is dropped: a wrap that is merely too generous is worth having,
-    // where one that has deleted the interior is not.
+    // The flood came in through a hole in the survey and reached a cell an
+    // instrument was standing in. Nothing that happened inside a building is
+    // outside it, so this says a shell somewhere did not hold.
+    //
+    // NOT FATAL, under a negative buffer. It used to be: one leak anywhere took
+    // the pull-in away from the whole site, so a shed with its door open cost the
+    // building its question. Each enclosed region is now assessed on its own, and
+    // a region the flood got into simply keeps the ordinary skin while its
+    // neighbours are still pulled in. Read this as "somewhere here is more
+    // generous than it looks", not as a failure.
     bool     sealLeaked = false;
     double   seal = 0.0;           // the sealing radius actually used, in metres
     // The closing that bridged the openings, in metres, and the cells it added to
@@ -207,6 +220,13 @@ struct Grid {
     // The shell was pulled IN rather than grown out: the buffer was negative, so
     // the domain is what the survey encloses less that much. See Options::buffer.
     bool     pulledIn = false;
+    // What the per-region assessment decided, under a negative buffer. Cells in
+    // regions deep enough to pull the boundary into, and the surfaces that bound
+    // no such region and kept the ordinary skin instead — a freestanding wall, a
+    // canopy, a room the flood got into. Both together cover the site: a region
+    // asked about too generously is the worst case, never no question at all.
+    uint64_t pulledInCells = 0;
+    uint64_t skinnedSurfaces = 0;
     bool     coarsened = false;    // the cell size grew to fit the budget
     bool     interiorOnly = false; // which rule was applied
     double   buffer = 0.0;

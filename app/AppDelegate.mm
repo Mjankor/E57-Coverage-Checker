@@ -1700,13 +1700,14 @@ const char *kindLabel(check::Kind k) {
                     (unsigned long long)result->wrapGrid.bridgedCells];
         if (result->domain.kind == carve::Domain::Kind::Wrap && result->wrapGrid.pulledIn)
             warn = [warn stringByAppendingFormat:
+                    @"   ·   pulled in %.2f m: %llu cells inside the shells that were deep "
+                     "enough, and %llu surfaces that bound none kept the ordinary skin%s",
+                    std::fabs(result->wrapGrid.buffer),
+                    (unsigned long long)result->wrapGrid.pulledInCells,
+                    (unsigned long long)result->wrapGrid.skinnedSurfaces,
                     result->wrapGrid.sealLeaked
-                        ? @"   ·   ⚠︎ THE SHELL LEAKED: the flood reached a setup, so the "
-                           "boundary could not be pulled %.2f m in and the skin around every "
-                           "surface was used instead. Widen the opening the shell may bridge."
-                        : @"   ·   the boundary sits %.2f m inside the outer face of the shell, "
-                           "so nothing beyond it is in the question",
-                    std::fabs(result->wrapGrid.buffer)];
+                        ? " — one of them was a shell the flood got into, so widen the opening "
+                          "the shell may bridge if it should have held" : ""];
         else if (result->domain.kind == carve::Domain::Kind::Wrap &&
                  result->wrapGrid.interiorOnly && !result->wrapGrid.sealLeaked)
             warn = [warn stringByAppendingFormat:

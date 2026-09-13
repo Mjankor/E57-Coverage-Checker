@@ -178,11 +178,13 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
             std::printf("            openings up to %.2f m bridged, %llu cells added to the "
                         "envelope\n", g.spanGaps, (unsigned long long)g.bridgedCells);
         if (g.pulledIn)
-            std::printf("            the boundary sits %.2f m inside the outer face of the "
-                        "shell,\n            so nothing beyond it is in the question%s\n",
-                        std::fabs(g.buffer),
-                        g.sealLeaked ? " — BUT THE SHELL LEAKED, so the skin around every"
-                                       " surface was used instead" : "");
+            std::printf("            pulled in %.2f m: %llu cells inside the shells deep enough "
+                        "for it,\n            and %llu surfaces bounding none of them kept the "
+                        "ordinary skin%s\n",
+                        std::fabs(g.buffer), (unsigned long long)g.pulledInCells,
+                        (unsigned long long)g.skinnedSurfaces,
+                        g.sealLeaked ? " —\n            one shell was one the flood got into"
+                                     : "");
         else if (g.interiorOnly && !g.sealLeaked)
             std::printf("            %llu cells dropped as outside the surveyed shell\n",
                         (unsigned long long)g.droppedOutside);
