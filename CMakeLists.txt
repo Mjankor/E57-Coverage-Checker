@@ -20,6 +20,7 @@ add_library(e57cov_core STATIC
   src/lod.cpp
   src/point_store.cpp
   src/indexer.cpp
+  src/ply.cpp
   src/range_image.cpp
   src/carve.cpp
   src/report.cpp
@@ -73,6 +74,11 @@ add_executable(test_range_image tests/test_range_image.cpp)
 target_link_libraries(test_range_image PRIVATE e57cov_core)
 target_compile_options(test_range_image PRIVATE -Wall -Wextra)
 add_test(NAME range_image COMMAND test_range_image)
+
+add_executable(test_ply tests/test_ply.cpp)
+target_link_libraries(test_ply PRIVATE e57cov_core)
+target_compile_options(test_ply PRIVATE -Wall -Wextra)
+add_test(NAME ply COMMAND test_ply)
 
 add_executable(test_carve tests/test_carve.cpp)
 target_link_libraries(test_carve PRIVATE e57cov_core)

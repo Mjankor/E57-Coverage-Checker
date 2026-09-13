@@ -172,6 +172,14 @@ const char *kindLabel(check::Kind k) {
     std::vector<std::string> _paths;
     // Carried between runs so the sheet reopens with what was last used.
     vis::Options         _visOptions;
+    // The last finished run, kept so it can be SAVED. A carve that takes minutes
+    // and then exists only as pixels is not a deliverable, and re-running it to
+    // write a file would be re-deriving an answer already in memory.
+    //
+    // The options are kept beside it because the saved file's header describes the
+    // run, and _visOptions moves on as soon as the sheet is used again.
+    std::shared_ptr<vis::Result> _lastRun;
+    vis::Options                 _lastRunOptions;
     BOOL                 _useGpu;
     BOOL                 _verifyGpu;
     BOOL                 _busy;
@@ -533,6 +541,16 @@ const char *kindLabel(check::Kind k) {
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"Cancel" action:@selector(cancelIndexing:) keyEquivalent:@"."];
     [fileMenu addItemWithTitle:@"Close All" action:@selector(closeAll:) keyEquivalent:@"w"];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+    // OUT. A carve that takes minutes and can only be looked at is not a
+    // deliverable — the answer has to land in whatever the surveyor already uses.
+    [fileMenu addItemWithTitle:@"Save Unobserved Voxels…"
+                        action:@selector(saveVoxels:) keyEquivalent:@"s"];
+    // The shell is worth saving beside them: it decides what the whole answer
+    // covers while being invisible in it, so a shell that went wrong looks exactly
+    // like a survey that missed other space.
+    [fileMenu addItemWithTitle:@"Save Shrinkwrap Shell…"
+                        action:@selector(saveWrap:) keyEquivalent:@"S"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     // The way out of a cache that is wrong. An index is keyed by the corpus and
     // reused on sight, so anything that leaves a store behind without finishing it
@@ -1008,7 +1026,66 @@ const char *kindLabel(check::Kind k) {
     // needs something open to reindex.
     if (item.action == @selector(reindexCurrent:)) return !_busy && !_paths.empty();
     if (item.action == @selector(clearCaches:))    return !_busy;
+    // Nothing to save until something has been carved, and the shell only exists
+    // when the run asked for one. Greyed rather than offered and then refused.
+    if (item.action == @selector(saveVoxels:))
+        return !_busy && _lastRun && !_lastRun->voxels.empty();
+    if (item.action == @selector(saveWrap:))
+        return !_busy && _lastRun && !_lastRun->wrapSkin.empty();
     return YES;
+}
+
+// --- getting the answer out -------------------------------------------------
+
+- (void)savePart:(vis::SavePart)part
+         suggest:(NSString *)stem
+           title:(NSString *)title {
+    if (!_lastRun) {
+        _status.stringValue = @"Run the visibility filter first — there is nothing to save yet.";
+        return;
+    }
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.title = title;
+    // The same shape the open panel uses — allowedFileTypes is deprecated.
+    UTType *plyType = [UTType typeWithFilenameExtension:@"ply"];
+    if (plyType) panel.allowedContentTypes = @[plyType];
+    panel.nameFieldStringValue = [stem stringByAppendingPathExtension:@"ply"];
+    // Said here as well as in the file, because the cap is the one thing that can
+    // make a saved cloud quietly incomplete and the moment of saving is when it
+    // matters.
+    if (part == vis::SavePart::UnobservedVoxels && _lastRun->keptFraction < 1.0)
+        panel.message = [NSString stringWithFormat:
+            @"This run drew a %.1f%% sample of %llu qualifying voxels, so that is what "
+             "will be saved. Raise the drawn-voxel cap and run again to save them all.",
+            100.0 * _lastRun->keptFraction, (unsigned long long)_lastRun->qualified];
+
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+    NSString *chosen = panel.URL.path;
+    // The writer emits PLY whatever the name says, so the name had better say PLY:
+    // a file called "voxels" opens in nothing.
+    if (![chosen.pathExtension.lowercaseString isEqualToString:@"ply"])
+        chosen = [chosen stringByAppendingPathExtension:@"ply"];
+    const std::string path = chosen.UTF8String;
+
+    std::string err;
+    if (vis::save(*_lastRun, _lastRunOptions, part, path, err))
+        _status.stringValue = ns(vis::saveSummary(*_lastRun, part, path));
+    else
+        _status.stringValue = [NSString stringWithFormat:@"Save failed: %s", err.c_str()];
+}
+
+- (void)saveVoxels:(id)sender {
+    (void)sender;
+    [self savePart:vis::SavePart::UnobservedVoxels
+           suggest:@"unobserved-voxels"
+             title:@"Save the unobserved voxels"];
+}
+
+- (void)saveWrap:(id)sender {
+    (void)sender;
+    [self savePart:vis::SavePart::Shrinkwrap
+           suggest:@"shrinkwrap-shell"
+             title:@"Save the shrinkwrap shell"];
 }
 
 - (void)toggleGpu:(id)sender {
@@ -1977,6 +2054,8 @@ const char *kindLabel(check::Kind k) {
         dispatch_async(dispatch_get_main_queue(), ^{
             AppDelegate *me = weakSelf;
             if (!me) return;
+            me->_lastRun = result;
+            me->_lastRunOptions = opt;
             [me->_cloudView setVoxelResult:*result];
             me->_voxelToggle.state = NSControlStateValueOn;
             [me styleLayerToggle:me->_voxelToggle];

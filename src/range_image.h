@@ -165,12 +165,13 @@ struct Options {
     // opening at the zenith makes the angle right around, 360; a strip up a door
     // frame makes it over about one degree.
     //
-    // Thirty-six degrees: wide enough that a slot between a canopy and a parapet
-    // still counts — the reason the old comment here said the angle was needed in
-    // only one direction — and narrow enough that nothing the edge of one surface
-    // produces does. 0 switches the breadth test off and leaves the single-angle
-    // test alone; 360 asks for an opening all the way round.
-    double   skyMinArcDeg = 36.0;
+    // A hundred and thirty-five degrees, which is more than a third of the way
+    // round: the figure came from running the test against real indoor scans, where
+    // a slot between a canopy and a parapet is still comfortably wider than this and
+    // nothing the edge of one surface produces comes close. 0 switches the breadth
+    // test off and leaves the single-angle test alone; 360 asks for an opening all
+    // the way round.
+    double   skyMinArcDeg = 135.0;
     // How wide a run of returns the sky fill may step over. A branch, a cable, a
     // flagpole: each returns along a line a couple of degrees wide with open sky
     // both sides, and a fill that stopped at one would report a dozen small

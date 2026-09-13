@@ -17,6 +17,7 @@
 		E57C00000000000000000041 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
 		E57C00000000000000000042 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
 		E57C00000000000000000043 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000410 /* ply.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000400 /* ply.cpp */; };
 		E57C00000000000000000044 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
 		E57C00000000000000000045 /* voids.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* voids.cpp */; };
 		E57C00000000000000000300 /* wrap.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000201 /* wrap.cpp */; };
@@ -33,6 +34,7 @@
 		E57C00000000000000000056 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
 		E57C00000000000000000057 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
 		E57C00000000000000000058 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000411 /* ply.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000400 /* ply.cpp */; };
 		E57C00000000000000000059 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
 		E57C0000000000000000005A /* voids.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* voids.cpp */; };
 		E57C00000000000000000301 /* wrap.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000201 /* wrap.cpp */; };
@@ -49,6 +51,7 @@
 		E57C0000000000000000006B /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
 		E57C0000000000000000006C /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
 		E57C0000000000000000006D /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000412 /* ply.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000400 /* ply.cpp */; };
 		E57C0000000000000000006E /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
 		E57C0000000000000000006F /* voids.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* voids.cpp */; };
 		E57C00000000000000000302 /* wrap.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000201 /* wrap.cpp */; };
@@ -65,6 +68,7 @@
 		E57C00000000000000000080 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
 		E57C00000000000000000081 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
 		E57C00000000000000000082 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000413 /* ply.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000400 /* ply.cpp */; };
 		E57C00000000000000000083 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
 		E57C00000000000000000084 /* voids.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* voids.cpp */; };
 		E57C00000000000000000303 /* wrap.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000201 /* wrap.cpp */; };
@@ -81,6 +85,7 @@
 		E57C00000000000000000095 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
 		E57C00000000000000000096 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
 		E57C00000000000000000097 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000414 /* ply.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000400 /* ply.cpp */; };
 		E57C00000000000000000098 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
 		E57C00000000000000000099 /* voids.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* voids.cpp */; };
 		E57C00000000000000000304 /* wrap.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000201 /* wrap.cpp */; };
@@ -97,6 +102,7 @@
 		E57C000000000000000000AA /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
 		E57C000000000000000000AB /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
 		E57C000000000000000000AC /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000415 /* ply.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000400 /* ply.cpp */; };
 		E57C000000000000000000AD /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
 		E57C000000000000000000AE /* voids.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* voids.cpp */; };
 		E57C00000000000000000305 /* wrap.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000201 /* wrap.cpp */; };
@@ -113,6 +119,7 @@
 		E57C000000000000000000BF /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
 		E57C000000000000000000C0 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
 		E57C000000000000000000C1 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000416 /* ply.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000400 /* ply.cpp */; };
 		E57C000000000000000000C2 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
 		E57C000000000000000000C3 /* voids.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* voids.cpp */; };
 		E57C00000000000000000306 /* wrap.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000201 /* wrap.cpp */; };
@@ -129,6 +136,7 @@
 		E57C000000000000000000D4 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
 		E57C000000000000000000D5 /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
 		E57C000000000000000000D6 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000417 /* ply.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000400 /* ply.cpp */; };
 		E57C000000000000000000D7 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
 		E57C000000000000000000D8 /* voids.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* voids.cpp */; };
 		E57C00000000000000000307 /* wrap.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000201 /* wrap.cpp */; };
@@ -145,6 +153,7 @@
 		E57C000000000000000000E9 /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
 		E57C000000000000000000EA /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
 		E57C000000000000000000EB /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000418 /* ply.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000400 /* ply.cpp */; };
 		E57C000000000000000000EC /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
 		E57C000000000000000000ED /* voids.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* voids.cpp */; };
 		E57C00000000000000000308 /* wrap.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000201 /* wrap.cpp */; };
@@ -161,6 +170,7 @@
 		E57C000000000000000000FE /* point_store.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000011 /* point_store.cpp */; };
 		E57C000000000000000000FF /* indexer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000013 /* indexer.cpp */; };
 		E57C00000000000000000100 /* range_image.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000015 /* range_image.cpp */; };
+		E57C00000000000000000419 /* ply.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000400 /* ply.cpp */; };
 		E57C00000000000000000101 /* carve.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000017 /* carve.cpp */; };
 		E57C00000000000000000102 /* voids.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C0000000000000000001D /* voids.cpp */; };
 		E57C00000000000000000309 /* wrap.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E57C00000000000000000201 /* wrap.cpp */; };
@@ -194,6 +204,8 @@
 		E57C00000000000000000013 /* indexer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = indexer.cpp; sourceTree = "<group>"; };
 		E57C00000000000000000014 /* range_image.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = range_image.h; sourceTree = "<group>"; };
 		E57C00000000000000000015 /* range_image.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = range_image.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000400 /* ply.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = ply.cpp; sourceTree = "<group>"; };
+		E57C00000000000000000401 /* ply.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = ply.h; sourceTree = "<group>"; };
 		E57C00000000000000000016 /* carve.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = carve.h; sourceTree = "<group>"; };
 		E57C00000000000000000017 /* carve.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = carve.cpp; sourceTree = "<group>"; };
 		E57C00000000000000000018 /* visibility.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = visibility.h; sourceTree = "<group>"; };
@@ -275,6 +287,8 @@
 				E57C00000000000000000013 /* indexer.cpp */,
 				E57C00000000000000000014 /* range_image.h */,
 				E57C00000000000000000015 /* range_image.cpp */,
+				E57C00000000000000000400 /* ply.cpp */,
+				E57C00000000000000000401 /* ply.h */,
 				E57C00000000000000000016 /* carve.h */,
 				E57C00000000000000000017 /* carve.cpp */,
 				E57C00000000000000000018 /* visibility.h */,
@@ -586,6 +600,7 @@
 				E57C00000000000000000041 /* point_store.cpp in Sources */,
 				E57C00000000000000000042 /* indexer.cpp in Sources */,
 				E57C00000000000000000043 /* range_image.cpp in Sources */,
+				E57C00000000000000000410 /* ply.cpp in Sources */,
 				E57C00000000000000000044 /* carve.cpp in Sources */,
 				E57C00000000000000000045 /* voids.cpp in Sources */,
 				E57C00000000000000000300 /* wrap.cpp in Sources */,
@@ -609,6 +624,7 @@
 				E57C00000000000000000056 /* point_store.cpp in Sources */,
 				E57C00000000000000000057 /* indexer.cpp in Sources */,
 				E57C00000000000000000058 /* range_image.cpp in Sources */,
+				E57C00000000000000000411 /* ply.cpp in Sources */,
 				E57C00000000000000000059 /* carve.cpp in Sources */,
 				E57C0000000000000000005A /* voids.cpp in Sources */,
 				E57C00000000000000000301 /* wrap.cpp in Sources */,
@@ -632,6 +648,7 @@
 				E57C0000000000000000006B /* point_store.cpp in Sources */,
 				E57C0000000000000000006C /* indexer.cpp in Sources */,
 				E57C0000000000000000006D /* range_image.cpp in Sources */,
+				E57C00000000000000000412 /* ply.cpp in Sources */,
 				E57C0000000000000000006E /* carve.cpp in Sources */,
 				E57C0000000000000000006F /* voids.cpp in Sources */,
 				E57C00000000000000000302 /* wrap.cpp in Sources */,
@@ -655,6 +672,7 @@
 				E57C00000000000000000080 /* point_store.cpp in Sources */,
 				E57C00000000000000000081 /* indexer.cpp in Sources */,
 				E57C00000000000000000082 /* range_image.cpp in Sources */,
+				E57C00000000000000000413 /* ply.cpp in Sources */,
 				E57C00000000000000000083 /* carve.cpp in Sources */,
 				E57C00000000000000000084 /* voids.cpp in Sources */,
 				E57C00000000000000000303 /* wrap.cpp in Sources */,
@@ -678,6 +696,7 @@
 				E57C00000000000000000095 /* point_store.cpp in Sources */,
 				E57C00000000000000000096 /* indexer.cpp in Sources */,
 				E57C00000000000000000097 /* range_image.cpp in Sources */,
+				E57C00000000000000000414 /* ply.cpp in Sources */,
 				E57C00000000000000000098 /* carve.cpp in Sources */,
 				E57C00000000000000000099 /* voids.cpp in Sources */,
 				E57C00000000000000000304 /* wrap.cpp in Sources */,
@@ -701,6 +720,7 @@
 				E57C000000000000000000AA /* point_store.cpp in Sources */,
 				E57C000000000000000000AB /* indexer.cpp in Sources */,
 				E57C000000000000000000AC /* range_image.cpp in Sources */,
+				E57C00000000000000000415 /* ply.cpp in Sources */,
 				E57C000000000000000000AD /* carve.cpp in Sources */,
 				E57C000000000000000000AE /* voids.cpp in Sources */,
 				E57C00000000000000000305 /* wrap.cpp in Sources */,
@@ -724,6 +744,7 @@
 				E57C000000000000000000BF /* point_store.cpp in Sources */,
 				E57C000000000000000000C0 /* indexer.cpp in Sources */,
 				E57C000000000000000000C1 /* range_image.cpp in Sources */,
+				E57C00000000000000000416 /* ply.cpp in Sources */,
 				E57C000000000000000000C2 /* carve.cpp in Sources */,
 				E57C000000000000000000C3 /* voids.cpp in Sources */,
 				E57C00000000000000000306 /* wrap.cpp in Sources */,
@@ -747,6 +768,7 @@
 				E57C000000000000000000D4 /* point_store.cpp in Sources */,
 				E57C000000000000000000D5 /* indexer.cpp in Sources */,
 				E57C000000000000000000D6 /* range_image.cpp in Sources */,
+				E57C00000000000000000417 /* ply.cpp in Sources */,
 				E57C000000000000000000D7 /* carve.cpp in Sources */,
 				E57C000000000000000000D8 /* voids.cpp in Sources */,
 				E57C00000000000000000307 /* wrap.cpp in Sources */,
@@ -770,6 +792,7 @@
 				E57C000000000000000000E9 /* point_store.cpp in Sources */,
 				E57C000000000000000000EA /* indexer.cpp in Sources */,
 				E57C000000000000000000EB /* range_image.cpp in Sources */,
+				E57C00000000000000000418 /* ply.cpp in Sources */,
 				E57C000000000000000000EC /* carve.cpp in Sources */,
 				E57C000000000000000000ED /* voids.cpp in Sources */,
 				E57C00000000000000000308 /* wrap.cpp in Sources */,
@@ -793,6 +816,7 @@
 				E57C000000000000000000FE /* point_store.cpp in Sources */,
 				E57C000000000000000000FF /* indexer.cpp in Sources */,
 				E57C00000000000000000100 /* range_image.cpp in Sources */,
+				E57C00000000000000000419 /* ply.cpp in Sources */,
 				E57C00000000000000000101 /* carve.cpp in Sources */,
 				E57C00000000000000000102 /* voids.cpp in Sources */,
 				E57C00000000000000000309 /* wrap.cpp in Sources */,

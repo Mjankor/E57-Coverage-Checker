@@ -1,6 +1,8 @@
 #include "visibility.h"
 
 #include "e57.h"
+#include "ply.h"
+#include "version.h"
 #include "wrap.h"
 
 #include <algorithm>
@@ -1313,6 +1315,88 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         note += out.cancelled ? "cancelled part way; " : "stopped at the tile limit; ";
     out.note = note;
     return true;
+}
+
+// --- getting the answer back out --------------------------------------------
+
+namespace {
+
+const std::vector<lod::StorePoint>& partPoints(const Result& r, SavePart part) {
+    return part == SavePart::Shrinkwrap ? r.wrapSkin : r.voxels;
+}
+
+const char* partName(SavePart part) {
+    return part == SavePart::Shrinkwrap ? "shrinkwrap shell" : "unobserved voxels";
+}
+
+} // namespace
+
+bool save(const Result& r, const Options& opt, SavePart part,
+          const std::string& path, std::string& err) {
+    const std::vector<lod::StorePoint>& pts = partPoints(r, part);
+    if (pts.empty()) {
+        err = std::string("this run produced no ") + partName(part) + " to save";
+        return false;
+    }
+
+    // What made the file. Every setting here is one that changes what counts as
+    // observed, so a cloud saved with one set of them and read back beside a cloud
+    // saved with another is otherwise indistinguishable — and these runs are
+    // parameter sweeps by their nature.
+    ply::Note note;
+    auto add = [&](const std::string& line) { note.comments.push_back(line); };
+    add("e57cov " + std::string(ver::describe()));
+    add(std::string("contents: ") + partName(part) +
+        ", one point per voxel centre, colours as drawn");
+    add(fmt("voxel size %.4f m; coordinates are absolute metres in the scans' own frame",
+            r.voxelSize));
+    add(fmt("max range %.2f m; instrument min range %.2f m", opt.maxRange, opt.minRange));
+    add(fmt("sky: opening >= %.0f deg from the zenith over >= %.0f deg of bearing",
+            opt.skyMinExtentDeg, opt.skyMinArcDeg));
+    add(std::string("only the sky clears: ") + (opt.skyOnly ? "yes" : "no"));
+    add(std::string("carve method: ") +
+        (opt.method == carve::Method::RayMarch      ? "march each ray"
+       : opt.method == carve::Method::VoxelFootprint ? "voxel footprint (17 rays)"
+                                                     : "one ray per voxel centre"));
+    add(fmt("region: %s, buffer %.3f m, bridging openings to %.2f m",
+            opt.domain == DomainMode::Shrinkwrap     ? "shrinkwrap"
+          : opt.domain == DomainMode::MeasuredExtent ? "surveyed extent box"
+                                                     : "range spheres",
+            opt.domainMargin, opt.wrapSpanGaps));
+    add(fmt("%llu setups used; %.3f m^3 unobserved of %.3f m^3 reported on",
+            (unsigned long long)r.setupsUsed, r.unknownVolume(), r.reportedVolume));
+
+    // SAID OUT LOUD WHEN IT IS A SAMPLE. The display cap thins the drawn set, and
+    // the saved set is the drawn set — so without this the file is a thinned cloud
+    // that looks exactly like a complete one, which is the worst thing a saved
+    // deliverable can be.
+    if (part == SavePart::UnobservedVoxels) {
+        if (r.keptFraction < 1.0)
+            add(fmt("*** SAMPLED: %llu of %llu qualifying voxels, %.1f%% — raise the "
+                    "drawn-voxel cap to save them all ***",
+                    (unsigned long long)pts.size(), (unsigned long long)r.qualified,
+                    100.0 * r.keptFraction));
+        else
+            add(fmt("complete: all %llu qualifying voxels", (unsigned long long)pts.size()));
+        if (r.partial)
+            add(r.cancelled ? "*** the run was cancelled part way ***"
+                            : "*** the run stopped at the tile limit ***");
+    } else if (r.wrapSkinCells > pts.size()) {
+        add(fmt("*** SAMPLED: %llu of %llu shell cells ***",
+                (unsigned long long)pts.size(), (unsigned long long)r.wrapSkinCells));
+    }
+
+    return ply::writePoints(path, pts, r.origin, note, err);
+}
+
+std::string saveSummary(const Result& r, SavePart part, const std::string& path) {
+    const std::vector<lod::StorePoint>& pts = partPoints(r, part);
+    std::string s = fmt("Saved %llu points (%s) to %s",
+                        (unsigned long long)pts.size(), partName(part), path.c_str());
+    if (part == SavePart::UnobservedVoxels && r.keptFraction < 1.0)
+        s += fmt(" — a %.1f%% sample of %llu; raise the drawn-voxel cap to save them all",
+                 100.0 * r.keptFraction, (unsigned long long)r.qualified);
+    return s + ".";
 }
 
 } // namespace vis

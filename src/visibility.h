@@ -170,7 +170,7 @@ struct Options {
     //
     // Half a metre by default, which is a tight question: it asks about the space
     // close to what was measured and nothing else.
-    double   domainMargin = 0.5;
+    double   domainMargin = -0.2;
 
     // The instrument's rated MINIMUM range, in metres, passed through to
     // rimg::Options. A surface inside it returns nothing, and believing that
@@ -457,6 +457,33 @@ struct Result {
 // structured scan, or an unreadable file.
 bool run(const std::vector<std::string>& paths, const Options& opt,
          const Progress& progress, Result& out, std::string& err);
+
+// GETTING THE ANSWER BACK OUT.
+//
+// Which of a run's two point sets to write. The unobserved voxels are the
+// deliverable; the shell is what decided the question they were asked inside, and
+// a run where the shell went wrong looks, in the voxels alone, exactly like a
+// survey that missed different space — so it has to be saveable too.
+enum class SavePart {
+    UnobservedVoxels,
+    Shrinkwrap,
+};
+
+// Writes one of them as a PLY, with a header describing the run that produced it
+// — the build, the settings that decide what an empty cell means, the voxel size,
+// the counts, and whether the set was sampled to fit the display cap.
+//
+// The saved set is what the run produced, which for the voxels is what the cap
+// let through: a run that sampled draws a sample and saves the same sample, and
+// the header says so in as many words rather than handing over a thinned cloud
+// that looks complete. Raise "voxels drawn at most" to save the lot.
+//
+// False with a reason when there is nothing to write or the file cannot be made.
+bool save(const Result& r, const Options& opt, SavePart part,
+          const std::string& path, std::string& err);
+
+// The one-line summary of what a save wrote, for a status line.
+std::string saveSummary(const Result& r, SavePart part, const std::string& path);
 
 // Re-expresses the voxels against a different origin, which is what the viewer
 // needs: the point store picks its own origin and the two have to agree or the

@@ -1362,8 +1362,14 @@ static void testKeepingOnlyTheVoxelsInsideTheWrap() {
                                        int64_t(std::llround(p.z * 1000))};
         if (!was.count(k)) ++strangers;
         now.insert(k);
-        if (!box.wrapGrid.contains(double(p.x) + box.origin[0], double(p.y) + box.origin[1],
-                                   double(p.z) + box.origin[2])) ++outside;
+        // containsReported, not contains: they are the same wrap under a positive
+        // buffer and they are NOT under a negative one, which is now the default.
+        // The carve is asked about the union of both questions so the sign cannot
+        // change a verdict; the REPORTED subset is where the sign has its say, and
+        // it is what the filter promises — see keepVoxelsInsideWrap.
+        if (!box.wrapGrid.containsReported(double(p.x) + box.origin[0],
+                                           double(p.y) + box.origin[1],
+                                           double(p.z) + box.origin[2])) ++outside;
     }
     CHECK(strangers == 0, "no voxel is invented, only dropped");
     CHECK(outside == 0, "every survivor is inside the wrap");
@@ -1374,17 +1380,44 @@ static void testKeepingOnlyTheVoxelsInsideTheWrap() {
                                        int64_t(std::llround(p.y * 1000)),
                                        int64_t(std::llround(p.z * 1000))};
         if (now.count(k)) continue;
-        if (box.wrapGrid.contains(double(p.x) + box.origin[0], double(p.y) + box.origin[1],
-                                  double(p.z) + box.origin[2])) ++wronglyDropped;
+        if (box.wrapGrid.containsReported(double(p.x) + box.origin[0],
+                                          double(p.y) + box.origin[1],
+                                          double(p.z) + box.origin[2])) ++wronglyDropped;
     }
     CHECK(wronglyDropped == 0, "and nothing inside the wrap was dropped");
 
-    // A run already carved over the wrap is unchanged by this, its voxels being
-    // inside the wrap by construction.
+    // A run already carved over the wrap is unchanged by this — but ONLY where the
+    // buffer is positive, and that is worth pinning rather than assuming, because
+    // the default buffer is now negative.
+    //
+    // A positive buffer asks one question and reports on it, so the run's voxels are
+    // inside the wrap by construction and the filter has nothing to drop. A negative
+    // one asks about the UNION of the two questions, so that the sign cannot change
+    // a verdict, and reports on the subset inside the pulled-in shell — so a wrap
+    // run legitimately holds voxels the filter then drops. Both directions, since a
+    // filter that dropped nothing under a negative buffer would be silently failing
+    // to do the thing the negative buffer exists for.
     {
-        vis::Result again = wrapRun;
-        const size_t n = again.voxels.size();
-        CHECK(vis::keepVoxelsInsideWrap(again) == n, "a wrap run is already inside its wrap");
+        vis::Options popt = wopt;
+        popt.domainMargin = 0.5;
+        vis::Result pos;
+        CHECK(vis::run({path}, popt, nullptr, pos, err), "a positive-buffer wrap run");
+        const size_t n = pos.voxels.size();
+        CHECK(n > 0, "which produced voxels");
+        CHECK(vis::keepVoxelsInsideWrap(pos) == n,
+              "a positive-buffer wrap run is already inside its own wrap");
+    }
+    {
+        vis::Options nopt = wopt;
+        nopt.domainMargin = -0.2;
+        vis::Result neg;
+        CHECK(vis::run({path}, nopt, nullptr, neg, err), "a negative-buffer wrap run");
+        const size_t n = neg.voxels.size();
+        CHECK(n > 0, "which produced voxels");
+        const uint64_t kept2 = vis::keepVoxelsInsideWrap(neg);
+        CHECK(kept2 <= n, "the filter only ever drops");
+        CHECK(kept2 < n,
+              "and a negative buffer really does report on less than it carved");
     }
 
     // And a Result with no wrap keeps everything, there being nothing to intersect.

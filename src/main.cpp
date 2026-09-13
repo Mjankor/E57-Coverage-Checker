@@ -83,7 +83,8 @@ int info(const std::vector<std::string>& paths, bool verifyCrc, double maxRange,
 // domain size is printed before it starts and --max-tiles stops it after a
 // sample.
 
-int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) {
+int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt,
+                const std::string& saveVoxels, const std::string& saveWrap) {
     const auto start = std::chrono::steady_clock::now();
     uint64_t lastTiles = 0;
 
@@ -270,7 +271,20 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
                     "containing a building the third dominates, so read `unknown` as\n"
                     "\"everything nobody looked at\" rather than as a finding.\n");
     }
-    return 0;
+
+    // And out. A run whose answer cannot leave the process is not much of an
+    // answer, so a failure to write one is a failure of the command.
+    int rc = 0;
+    struct Out { const std::string& path; vis::SavePart part; };
+    for (const Out& o : {Out{saveVoxels, vis::SavePart::UnobservedVoxels},
+                         Out{saveWrap,   vis::SavePart::Shrinkwrap}}) {
+        if (o.path.empty()) continue;
+        std::string werr;
+        if (vis::save(res, opt, o.part, o.path, werr))
+            std::printf("%s\n", vis::saveSummary(res, o.part, o.path).c_str());
+        else { std::printf("save failed: %s\n", werr.c_str()); rc = 1; }
+    }
+    return rc;
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +469,20 @@ void usage() {
         "          fan out through it to the rated range. Zones of empty cells\n"
         "          whose bordering returns sit at nearly this range are read as\n"
         "          too close and establish nothing. 0 switches the test off.\n"
+        "  --save-voxels <file.ply>\n"
+        "          (carve) Write the unobserved voxels, one point per voxel\n"
+        "          centre, as a binary PLY that CloudCompare, Recap, Cyclone,\n"
+        "          MeshLab and Blender all open. Coordinates are absolute\n"
+        "          doubles, so a georeferenced site keeps its precision and\n"
+        "          needs no shift agreed out of band. The header records the\n"
+        "          build and every setting that decides what counts as\n"
+        "          observed, and says so outright if the drawn-voxel cap\n"
+        "          sampled the set rather than keeping all of it.\n"
+        "  --save-wrap <file.ply>\n"
+        "          (carve) The same, for the shrinkwrap shell. Worth keeping\n"
+        "          beside the voxels: the shell decides what the whole answer\n"
+        "          covers while being invisible in it, so a shell that went\n"
+        "          wrong looks exactly like a survey that missed other space.\n"
         "  --sky-extent <deg>\n"
         "          (carve) How far from a scan's own zenith an opening has to\n"
         "          reach before it is the sky. Default 25. Reach it and the\n"
@@ -550,6 +578,7 @@ int main(int argc, char** argv) {
 
     bool                     crc = false;
     vis::Options             co;
+    std::string              saveVoxels, saveWrap;   // --save-voxels / --save-wrap
     std::vector<std::string> paths;
     for (int i = 2; i < argc; ++i) {
         if (std::strcmp(argv[i], "--crc") == 0) { crc = true; continue; }
@@ -589,6 +618,14 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--min-range") == 0 && i + 1 < argc) {
             co.minRange = std::strtod(argv[++i], nullptr);
             if (co.minRange < 0.0) { std::printf("--min-range cannot be negative\n"); return 2; }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--save-voxels") == 0 && i + 1 < argc) {
+            saveVoxels = argv[++i];
+            continue;
+        }
+        if (std::strcmp(argv[i], "--save-wrap") == 0 && i + 1 < argc) {
+            saveWrap = argv[++i];
             continue;
         }
         if (std::strcmp(argv[i], "--sky-extent") == 0 && i + 1 < argc) {
@@ -683,7 +720,7 @@ int main(int argc, char** argv) {
         const std::vector<std::string> files(paths.begin() + 3, paths.end());
         return probePoint(files, co, world);
     }
-    if (cmd == "carve") return carveCorpus(paths, co);
+    if (cmd == "carve") return carveCorpus(paths, co, saveVoxels, saveWrap);
     if (cmd == "selftest") {
         report::Options ro;
         ro.maxRange         = co.maxRange;

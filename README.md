@@ -249,6 +249,38 @@ command line tool on a path is indistinguishable from a current one.
 Every report names the build that produced it. If the revision at the top is not
 the one you just built, nothing below it is worth reading.
 
+## Getting the answer out
+
+A carve that takes minutes and exists only as pixels is not a deliverable, so
+both of its point sets can be written to a file something else opens:
+
+```sh
+e57cov carve --save-voxels missed.ply --save-wrap shell.ply /path/to/*.e57
+```
+
+and in the app, **File ▸ Save Unobserved Voxels…** (⌘S) and **File ▸ Save
+Shrinkwrap Shell…** (⇧⌘S).
+
+The format is binary PLY, which CloudCompare, Recap, Cyclone, MeshLab and Blender
+all read without a plugin. **Coordinates are doubles**, which matters: a
+georeferenced site sits at UTM magnitudes where float32 resolves about a metre, so
+the file carries absolute position at full precision and needs no shift agreed out
+of band. One point per voxel centre, coloured as drawn.
+
+The header records the build and every setting that decides what counts as
+observed — the sky angle and arc, the minimum range, the carve method, the region
+and its buffer — because these runs are parameter sweeps by nature and two clouds
+saved from different settings are otherwise indistinguishable.
+
+It also says, in as many words, when the set is **sampled**. The drawn-voxel cap
+thins what is displayed and the saved set is the displayed set, so a capped run
+would otherwise hand over a thinned cloud that looks exactly like a complete one.
+Raise the cap and run again to save the lot.
+
+Saving the shell is worth doing beside the voxels: it decides what the whole
+answer covers while being invisible in that answer, so a shell that went wrong
+looks, in the voxels alone, exactly like a survey that missed different space.
+
 ## Explaining one point — `e57cov probe`
 
 ```sh
@@ -327,6 +359,7 @@ src/indexer.{h,cpp}         corpus survey and bounded-memory build
 src/range_image.{h,cpp}     structured scan -> range image (visibility stage 1)
 src/carve.{h,cpp}           tiled visibility carve, CPU reference (stage 2)
 src/visibility.{h,cpp}      the carve as a job: files in, drawable voxels out
+src/ply.{h,cpp}             writing the answer back out as a point cloud
 app/CarveGpu.{h,mm}         the carve as a Metal gather kernel (unrun)
 src/camera.{h,cpp}          orbit camera
 src/picker.{h,cpp}          screen-space point picking (orbit centre)
@@ -338,6 +371,7 @@ tests/test_e57.cpp          reader round-trip tests
 tests/test_viewer.cpp       camera, classifier, picker, decimation tests
 tests/test_lod.cpp          octree, selection, store tests
 tests/test_indexer.cpp      survey and build tests
+tests/test_ply.cpp          point writer tests (CMake only — no Xcode target yet)
 tests/test_range_image.cpp  range image tests
 tests/test_carve.cpp        visibility carve tests
 tests/test_visibility.cpp   frontier reduction, display sampling, tiling invariance
