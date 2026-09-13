@@ -1557,6 +1557,115 @@ static void testANegativeMarginAsksAboutLess() {
     }
 }
 
+// THE SIGN OF THE MARGIN CHANGES WHICH VOXELS ARE ASKED ABOUT, AND NOTHING ELSE.
+//
+// A positive margin is a skin around the measured surfaces; a negative one is the
+// region the survey encloses, pulled in. They are different regions, so they
+// report different volumes and different fractions, and the pictures look nothing
+// alike — which is exactly what makes a carve that had changed hard to tell from
+// a carve that had not.
+//
+// So it is asserted rather than argued: every voxel that BOTH domains contain
+// gets the same verdict under both. carve::evidenceAt reads the range image and
+// the setup pose and nothing else, the domain is consulted once per voxel to skip
+// it, and this is the test that keeps it that way. It is the property the GPU
+// carver broke by being handed a wrap as "unbounded".
+static void testTheMarginsSignChangesTheQuestionNotTheAnswer() {
+    std::printf("the margin's sign changes which voxels are asked about, not the answer\n");
+
+    const std::string path = tmpPath("sign");
+    CHECK(fixture::write(path, {roomScan("west", -3.0, 2.0, 1.5),
+                                roomScan("east",  3.0, 2.0, 1.5)}, 512),
+          "fixture written");
+
+    vis::Options base;
+    base.voxelSize  = 0.2;
+    base.maxRange   = 12.0;
+    base.tileVoxels = 32;
+    base.domain     = vis::DomainMode::Shrinkwrap;
+    base.wrapCell   = 0.2;
+    base.wrapSpanGaps = 2.0;
+    base.solid      = true;                 // the volume, not its frontier
+    base.earlyOut   = carve::EarlyOut::Saturated;
+    base.displayCap = 1ull << 40;           // no sampling: every voxel comes back
+
+    std::string err;
+    vis::Options pos = base;
+    pos.domainMargin = 0.5;
+    vis::Result rpos;
+    CHECK(vis::run({path}, pos, nullptr, rpos, err), err.empty() ? "ran" : err.c_str());
+
+    vis::Options neg = base;
+    neg.domainMargin = -0.5;
+    vis::Result rneg;
+    CHECK(vis::run({path}, neg, nullptr, rneg, err), err.empty() ? "ran" : err.c_str());
+
+    CHECK(rpos.keptFraction > 0.999 && rneg.keptFraction > 0.999,
+          "neither run was sampled, so the voxel lists are complete");
+    CHECK(!rpos.wrapGrid.pulledIn && rneg.wrapGrid.pulledIn, "one skin, one pull-in");
+    CHECK(rpos.voxels.size() > 0 && rneg.voxels.size() > 0, "and both found something");
+
+    // The unobserved sets, as world positions on the voxel lattice.
+    auto keyed = [](const vis::Result& r) {
+        std::set<std::array<int64_t, 3>> out;
+        for (const lod::StorePoint& p : r.voxels)
+            out.insert({int64_t(std::llround((double(p.x) + r.origin[0]) * 1000.0)),
+                        int64_t(std::llround((double(p.y) + r.origin[1]) * 1000.0)),
+                        int64_t(std::llround((double(p.z) + r.origin[2]) * 1000.0))});
+        return out;
+    };
+    const std::set<std::array<int64_t, 3>> unPos = keyed(rpos);
+    const std::set<std::array<int64_t, 3>> unNeg = keyed(rneg);
+
+    // A voxel unobserved under one margin, and inside the OTHER margin's domain,
+    // has to be unobserved there too. Both directions, because one of them
+    // disagreeing is a carve that read the domain.
+    uint64_t both = 0, disagree = 0;
+    for (const auto& k : unPos) {
+        const double w[3] = {double(k[0]) / 1000.0, double(k[1]) / 1000.0,
+                             double(k[2]) / 1000.0};
+        if (!rneg.wrapGrid.contains(w[0], w[1], w[2])) continue;
+        ++both;
+        if (!unNeg.count(k)) ++disagree;
+    }
+    for (const auto& k : unNeg) {
+        const double w[3] = {double(k[0]) / 1000.0, double(k[1]) / 1000.0,
+                             double(k[2]) / 1000.0};
+        if (!rpos.wrapGrid.contains(w[0], w[1], w[2])) continue;
+        ++both;
+        if (!unPos.count(k)) ++disagree;
+    }
+    CHECK(both > 100, "the two domains genuinely overlap");
+    CHECK(disagree == 0, "and every voxel in both is unobserved in both, or in neither");
+    // NOTHING IS ASKED ABOUT OUTSIDE THE DOMAIN, under either sign. The volume the
+    // carve says it reached has to be the volume the wrap says it covers: a
+    // reachable set larger than the domain is the signature of a carver that
+    // ignored it, which is what the GPU one did when it was handed a wrap as
+    // "unbounded" — 57.8 M unobserved voxels against 5.9 M inside the wrap.
+    {
+        const double vox = base.voxelSize * base.voxelSize * base.voxelSize;
+        const double posReach = double(rpos.stats.reachable) * vox;
+        const double negReach = double(rneg.stats.reachable) * vox;
+        CHECK(std::fabs(posReach - rpos.wrapGrid.volume()) < 0.02 * rpos.wrapGrid.volume(),
+              "the skin's reachable volume is the skin's own volume");
+        CHECK(std::fabs(negReach - rneg.wrapGrid.volume()) < 0.02 * rneg.wrapGrid.volume(),
+              "and the pull-in's is the pull-in's");
+
+        // And the two FRACTIONS differ sharply without a single verdict differing,
+        // which is the whole reason this is worth a test. A positive skin is half
+        // space BEHIND the surfaces, which nothing can ever observe, so its
+        // unobserved share is high; a pull-in is the air a room was scanned from,
+        // so its share is low. Measured here: 34% against 3%. The pictures differ
+        // for the same reason and not because anything was carved differently —
+        // the skin's unobserved voxels are behind the walls where nobody looks,
+        // and the pull-in's are in the middle of the room where everybody does.
+        const double posPct = 100.0 * double(rpos.stats.unknown) / double(rpos.stats.reachable);
+        const double negPct = 100.0 * double(rneg.stats.unknown) / double(rneg.stats.reachable);
+        CHECK(posPct > negPct + 10.0,
+              "the skin reports a far higher unobserved share than the pull-in");
+    }
+}
+
 // A setup parked inside its own minimum range of a wall does not carve through it.
 //
 // This is the end-to-end guard for what the fans were: a stairwell scan with the
@@ -1771,6 +1880,7 @@ int main() {
     testTheWrapSkinSharesTheVoxelsFrame();
     testACarverRunsOnEveryThreadAndAgrees();
     testANegativeMarginAsksAboutLess();
+    testTheMarginsSignChangesTheQuestionNotTheAnswer();
     testASetupAgainstAWallDoesNotCarveThroughIt();
     testAnIndoorCorpusCannotSeeThroughItsOwnRoof();
     testKeepingOnlyTheVoxelsInsideTheWrap();
