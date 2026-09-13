@@ -400,6 +400,10 @@ bool indexMapping(Mapping& m);
 
 struct Diagnostics {
     bool     usedGrid = false;          // grid path rather than angular fallback
+    // Columns whose bearings the sweep had already looked at once, folded into
+    // their partner so a lookup cannot answer with the wrong one of the pair.
+    // See mergeDoubleCoveredColumns.
+    uint64_t doubleCoveredCols = 0;
     uint64_t hits = 0;
     uint64_t noReturns = 0;
     uint64_t outsideFov = 0;
@@ -817,6 +821,10 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
 uint64_t filterDarkBorderedZones(RangeImage& im, const std::vector<float>& intensity,
                                  const std::vector<uint8_t>& sky, const Options& opt);
 void markBlindCone(RangeImage& im, const Options& opt);
+// Folds together the columns of a sweep that ran past a full turn, so a bearing
+// looked at twice answers with the nearer of the two surfaces rather than with
+// whichever of the pair won a vote. Returns the number of columns merged.
+uint64_t mergeDoubleCoveredColumns(RangeImage& im);
 
 const char* statusName(Status s);
 
