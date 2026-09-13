@@ -1347,12 +1347,14 @@ const char *kindLabel(check::Kind k) {
         {@"Sky opening at the zenith, at least (deg, 0 = never)",
                                 [NSString stringWithFormat:@"%g",
                                  _visOptions.skyMinExtentDeg]},
-        // What share of the returns bordering an empty patch has to be near the
-        // bottom of THIS scan's own intensity spread before the patch is
-        // disbelieved — a surface too dark to answer reads as empty space, and
-        // clearing it carves through it. Sky is exempt, so raising this does not
-        // cost the sky. 0 switches the test off; 1 disbelieves almost nothing.
-        {@"Dark border share that stops a clear (0–1)",
+        // OFF, and shipped off: at 0.01, 0.25 and 1.0 on real scans this was
+        // either doing nothing or refusing to carve plainly visible space, and a
+        // test that cannot be moved off those two outcomes by its own parameter is
+        // not measuring what it claims to. E57 intensity is quantised, clipped,
+        // and scaled by range and incidence with no calibration to say which. Left
+        // on the sheet because the machinery is sound and a scan with trustworthy
+        // intensity can still use it; a quarter is what it ran at.
+        {@"Dark border share that stops a clear (0–1, 0 = off)",
                                 [NSString stringWithFormat:@"%g",
                                  _visOptions.darkBorderFraction]},
     };
@@ -1432,13 +1434,18 @@ const char *kindLabel(check::Kind k) {
         @"The instrument minimum range matters more than it looks: a surface closer than "
         @"that returns nothing, and an empty cell that is really a wall at arm's length "
         @"would otherwise clear space straight through it, out to the maximum range.\n\n"
-        @"The last two settings decide what else an empty cell is allowed to mean. The "
-        @"sky opening is how far the gap at a scan's own zenith has to reach before it "
-        @"counts as open air and clears — in one direction only, so branches and a "
-        @"verandah down one side do not disqualify it. The dark border share stops a "
-        @"clear where the returns around the gap are near the bottom of that scan's own "
-        @"intensity spread, which is what a surface too dark to answer looks like; the "
-        @"sky is exempt from it. Set the share to 0 to switch that test off.\n\n"
+        @"The sky opening decides what a gap at a scan's own zenith means. Reach that "
+        @"far from the zenith and it is open air and clears; fall short of it and the "
+        @"gap is a hole in whatever the instrument was under — a rooflight, a dark patch "
+        @"of ceiling — and it clears nothing. The angle only has to be reached in one "
+        @"direction, so a branch across it or a verandah down one side does not "
+        @"disqualify it.\n\n"
+        @"The dark border share is OFF. It stopped a clear where the returns around a "
+        @"gap were near the bottom of that scan's own intensity spread, but E57 "
+        @"intensity is quantised, clipped and scaled by range and incidence angle, and "
+        @"on real scans the setting either did nothing or refused to carve plainly "
+        @"visible space. Left here for a scan whose intensity is worth trusting: a "
+        @"quarter is what it ran at.\n\n"
         @"Every unobserved voxel is drawn. Untick that below to draw only the frontier "
         @"— where coverage stops — which is far cheaper and looks the same from outside, "
         @"except where a region's own boundary was never observed either: the blind cone "
@@ -1694,11 +1701,18 @@ const char *kindLabel(check::Kind k) {
         // what this answer rests on — with the two thresholds that produced them,
         // because these are the settings being tried and a count means nothing
         // without the number it was counted against.
-        if (result->setupsWithSky || result->setupsWithDarkZones)
+        if (result->setupsWithSky || result->setupsZenithClosed)
             warn = [warn stringByAppendingFormat:
-                    @"   ·   %llu setup(s) named their own sky (opening ≥ %g°); %llu had "
-                     "%llu cells bordered by returns too weak to believe (≥ %g%% dark)",
+                    @"   ·   %llu setup(s) named their own sky (opening ≥ %g°); on %llu the "
+                     "opening fell short and %llu cells were demoted as a hole in a roof "
+                     "rather than a view of the sky",
                     (unsigned long long)result->setupsWithSky, opt.skyMinExtentDeg,
+                    (unsigned long long)result->setupsZenithClosed,
+                    (unsigned long long)result->zenithDemotedCells];
+        if (result->setupsWithDarkZones)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   %llu setup(s) had %llu cells bordered by returns too weak to "
+                     "believe (≥ %g%% dark)",
                     (unsigned long long)result->setupsWithDarkZones,
                     (unsigned long long)result->darkCells,
                     100.0 * opt.darkBorderFraction];

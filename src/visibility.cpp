@@ -696,6 +696,10 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
             out.largestZoneElHiDeg       = img->diag.largestZoneElHiDeg;
         }
         if (img->diag.skyFound) ++out.setupsWithSky;
+        if (img->diag.zenithDemoted) {
+            ++out.setupsZenithClosed;
+            out.zenithDemotedCells += img->diag.zenithDemoted;
+        }
         if (!img->diag.hasIntensity) ++out.setupsWithoutIntensity;
         if (img->diag.darkZones) {
             ++out.setupsWithDarkZones;

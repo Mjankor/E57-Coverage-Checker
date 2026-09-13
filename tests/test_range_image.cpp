@@ -398,6 +398,12 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
     };
 
     rimg::Options opt;            // 25 degrees of opening, a 2 degree bridge
+    // The intensity test ships OFF — see Options::darkBorderFraction — so the
+    // cases below that exercise it turn it on explicitly, at the quarter it ran
+    // at. Tested rather than deleted: the machinery is still reachable from the
+    // run sheet and has to keep working for a scan whose intensity is worth
+    // trusting.
+    opt.darkBorderFraction = 0.25;
 
     // 60 rows of sky is 45 degrees from the zenith: sky.
     {
@@ -412,8 +418,9 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
     }
 
     // 20 rows is 15 degrees: an opening, but not the sky. A hole in a ceiling, a
-    // rooflight, a missing tile — whatever it is, it is not identified as sky and
-    // the dark test is free to judge it.
+    // rooflight, a missing tile — and whatever it is, it is not a view of the sky,
+    // so it clears nothing. Believed, every cell of it would have cleared a ray to
+    // the rated range straight up through a roof.
     {
         rimg::RangeImage im = build(20, false, false);
         std::vector<uint8_t> sky;
@@ -423,6 +430,30 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
         uint64_t protectedCells = 0;
         for (uint8_t v : sky) protectedCells += v;
         CHECK(protectedCells == 0, "and nothing is protected");
+        CHECK(rep.demotedCells >= 20 * im.cols, "the whole opening is demoted");
+        CHECK(im.statusAt(im.rows - 1, 0) == rimg::Status::OutsideFov,
+              "the cell at the zenith itself clears nothing");
+        CHECK(im.statusAt(im.rows - 20, 0) == rimg::Status::OutsideFov,
+              "and so does the rim the openness test had eroded off it");
+        CHECK(im.statusAt(im.rows - 40, 0) == rimg::Status::Hit,
+              "while the ceiling around it is untouched");
+    }
+
+    // Only at the pole. A patch the same size in the middle of a wall is not this
+    // test's business: it is judged by its border like any other, and this rule
+    // must not reach it.
+    {
+        rimg::RangeImage im = build(0, false, false);          // returns at the pole
+        for (uint32_t r = 80; r < 100; ++r)
+            for (uint32_t c = 100; c < 130; ++c)
+                im.cells[size_t(r) * im.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(!rep.reachedPole, "there is no opening at the zenith to judge");
+        CHECK(rep.demotedCells == 0, "so nothing is demoted");
+        CHECK(im.statusAt(90, 115) == rimg::Status::NoReturn,
+              "and a patch elsewhere still clears");
     }
 
     // A branch across it. One region still, because the fill steps over a run of

@@ -304,11 +304,13 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                         // dark-border test on an indoor scan.
                         o.add("      sky       : the opening at this instrument's own zenith "
                                     "reaches only %.0f deg\n                  across %llu cells, "
-                                    "against the %.0f deg asked for, so nothing here\n           "
-                                    "       is named as sky and every empty cell is judged on "
-                                    "its own\n",
+                                    "against the %.0f deg asked for, so it is a hole in\n        "
+                                    "          whatever this instrument was under and not a view "
+                                    "of the sky:\n                  %llu cells demoted, clearing "
+                                    "nothing\n",
                                     img.diag.skyExtentDeg,
-                                    (unsigned long long)img.diag.skyCells, ro.skyMinExtentDeg);
+                                    (unsigned long long)img.diag.skyCells, ro.skyMinExtentDeg,
+                                    (unsigned long long)img.diag.zenithDemoted);
                     } else {
                         o.add("      sky       : nothing at this instrument's own zenith is open "
                                     "— the cells there\n                  are returns, or empty "
@@ -324,10 +326,31 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                     "clear nothing.\n",
                                     (unsigned long long)img.diag.darkCells, img.diag.darkZones,
                                     100.0 * img.diag.darkBorderShare);
+                    } else if (ro.darkBorderFraction <= 0.0) {
+                        o.add("      dark      : the intensity test is off, so no empty cell is "
+                                    "disbelieved for\n                  the strength of the "
+                                    "returns around it — what an opening at\n                  "
+                                    "the zenith means is decided by the sky check alone\n");
                     } else if (!img.diag.hasIntensity) {
                         o.add("      dark      : no intensity field in this file, so a surface "
                                     "too dark to answer\n                  cannot be told from "
                                     "a ray that saw nothing\n");
+                    }
+                    // What "very low" came out as on this scan's own distribution,
+                    // printed whether or not anything was demoted. A quantised or
+                    // clipped intensity puts an atom on the threshold, and the
+                    // share it really selects is the difference between a test
+                    // that judges a border and one that demotes the whole scan.
+                    if (img.diag.hasIntensity && img.diag.darkWeakShare >= 0.0) {
+                        o.add("      weak      : \"very low\" is %.4g and below on this scan, "
+                                    "which is %.1f%% of its\n                  returns — asked "
+                                    "for the weakest %.0f%%%s\n",
+                                    double(img.diag.darkThreshold),
+                                    100.0 * img.diag.darkWeakShare,
+                                    100.0 * ro.darkPercentile,
+                                    img.diag.darkWeakShare <= 0.0
+                                        ? "; this scan's intensity cannot resolve"
+                                          " it, so the test said nothing" : "");
                     }
                     if (img.diag.tooCloseZones) {
                         o.add("      too close : %llu empty cells in %u zone(s) are the "

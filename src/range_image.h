@@ -158,10 +158,22 @@ struct Options {
     //
     // What share of the returns bordering a zone has to be among the weakest in
     // the scan before the zone is read as a surface the instrument could not
-    // measure rather than as a ray that saw nothing. A quarter: a zone bordered by
-    // ordinary material sits near the scan's own rate, and one bordered by
-    // something black does not.
-    double   darkBorderFraction = 0.25;
+    // measure rather than as a ray that saw nothing.
+    //
+    // OFF. Tried at 0.01, 0.25 and 1.0 on real scans, and at every setting it was
+    // either doing nothing or refusing to carve plainly visible space with strong
+    // returns in it — a test that cannot be moved off those two outcomes by its own
+    // parameter is not measuring what it claims to. Intensity in E57 is whatever
+    // the vendor and the instrument settings made it: quantised, clipped, scaled by
+    // range and by incidence angle, and carrying no calibration to say which of
+    // those produced a low number. A surface too dark to return is real, but this
+    // is not the evidence that identifies it.
+    //
+    // The machinery is kept and the run sheet still carries the setting, so it can
+    // be switched on for a scan whose intensity is worth trusting. A quarter was
+    // the value it ran at. See filterDarkBorderedZones, and the `weak :` line in
+    // the scan report, which says what "very low" actually selects once it is on.
+    double   darkBorderFraction = 0.0;
     // Which returns count as weak: the bottom tenth of THIS scan's intensities.
     // A fraction of the scan's own distribution rather than a value, because
     // intensity in E57 means whatever the vendor and the instrument settings made
@@ -406,6 +418,11 @@ struct Diagnostics {
     uint64_t darkCells = 0;
     double   darkBorderShare = -1.0;
     float    darkThreshold   = 0.0f;   // this scan's own weak-return level
+    // What share of this scan's returns that threshold actually selects. Asked for
+    // darkPercentile; a quantised or clipped intensity puts an atom on the value
+    // and selects far more, which is the difference between a test that judges a
+    // border and one that demotes the whole scan. -1 where it was never computed.
+    double   darkWeakShare   = -1.0;
     // The sky, where this scan could name it: the region reaching its own zenith
     // and opening past Options::skyMinExtentDeg. See identifySky.
     //
@@ -415,6 +432,9 @@ struct Diagnostics {
     bool     skyFound = false;
     uint64_t skyCells = 0;
     double   skyExtentDeg = 0.0;
+    // And what it cost the opening at the pole to fall short of the angle: those
+    // cells are a hole in a roof, not a view of the sky, so they clear nothing.
+    uint64_t zenithDemoted = 0;
     // The median bordering range of the nearest such zone, in metres, which is the
     // evidence the decision was made on. -1 where no zone was found.
     double   tooCloseBorderRange = -1.0;
@@ -713,12 +733,17 @@ ConeVerdict summariseBlindCones(const std::vector<RangeImage*>& images,
 
 // What the sky came out as for one scan. See identifySky.
 struct SkyReport {
+    bool     poleInSweep = false;   // this instrument's sweep reaches its own zenith
     bool     reachedPole = false;   // the pole itself holds no returns
     bool     isSky = false;         // and the region there opens past skyMinExtentDeg
     bool     poleAtFirstRow = false;
     bool     fromCone = false;      // the pole was taken as the end away from the cone
     uint64_t cells = 0;
     double   extentDeg = 0.0;       // how far from the pole the region reaches
+    // Cells demoted because the opening at the pole was NOT sky. An opening there
+    // is a view of the sky and clears, or it is a hole in whatever the instrument
+    // was under and establishes nothing; there is no third thing for it to be.
+    uint64_t demotedCells = 0;
 };
 
 // One zone of no-returns that survived the build and is therefore believed: every

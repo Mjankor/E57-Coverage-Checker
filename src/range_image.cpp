@@ -939,11 +939,14 @@ void filterNoReturnsTooClose(RangeImage& im, const Options& opt) {
 // opening and not evidence against one, so they leave the window rather than
 // filling it.
 //
-// What it does NOT do is clear anything on its own. Every cell it finds was
-// already going to clear; what the answer is for is the dark-border test below,
-// which has to leave the sky alone — the returns bordering a patch of sky are
-// eaves and branches and parapets seen against it, which is exactly the low
-// intensity that test looks for.
+// THE VERDICT AT THE POLE IS BINDING, both ways. Sky clears, and is exempt from
+// the dark-border test below — the returns bordering a patch of sky are eaves and
+// branches and parapets seen against it, which is exactly the low intensity that
+// test looks for. An opening at the pole that falls SHORT of the angle is not left
+// to clear by elimination: it is a hole in whatever the instrument was under, and
+// it establishes nothing. There is no third thing for an opening at the zenith to
+// be, and the expensive mistake is the one that clears a ray to the rated range
+// through a roof.
 SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& sky) {
     SkyReport rep;
     sky.assign(im.cells.size(), 0);
@@ -958,11 +961,35 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
     rep.poleAtFirstRow = skyAtFirst;
     rep.fromCone       = im.diag.blindConeRows != 0;
 
-    // How far a row sits from that pole.
-    const bool poleIsLow = (skyAtFirst == firstIsLow);
+    // How far a row sits from that pole — from the POLE ROW'S OWN elevation, not
+    // from a nominal 90 degrees.
+    //
+    // markBlindCone measures a band as 90 minus its bordering elevation, and that
+    // is right there: an unsampled band runs from its last sampled row out to the
+    // pole, and the directions past that row are outside the field of view. This
+    // region is the opposite — it is built from cells the instrument sampled — so
+    // its extent is how far it reaches across the rows it actually holds. On an
+    // instrument whose sweep stops short of the zenith the difference is the whole
+    // answer: a sweep ending at +60 would start every region 30 degrees from the
+    // pole and call any no-return touching the top row sky. Here the top row is at
+    // +89.91, so it changes this scan by a tenth of a degree and the reading by a
+    // great deal.
+    const uint32_t poleRow0 = skyAtFirst ? 0u : uint32_t(im.rows - 1);
+    const double poleEl = im.map.elByRow[poleRow0] * kDeg;
+
+    // AND ONLY IF THIS INSTRUMENT LOOKS AT THE ZENITH AT ALL. The question is
+    // whether the cap of `skyMinExtentDeg` about the pole is open, and an
+    // instrument whose sweep stops further than that short of the pole has not
+    // sampled a single direction inside that cap: it cannot answer, and the row
+    // where its raster happens to stop is not the zenith. Claiming otherwise would
+    // measure the opening from a pole the scan never looked at — the same mistake
+    // as believing an unsampled band, which clears a cone through whatever is
+    // there. A terrestrial scanner reaches +89.9 and is judged; a sweep ending at
+    // +27.7 is not.
+    rep.poleInSweep = (90.0 - std::fabs(poleEl)) <= opt.skyMinExtentDeg;
+    if (!rep.poleInSweep) return rep;
     auto fromPole = [&](uint32_t r) {
-        const double el = im.map.elByRow[r] * kDeg;
-        return poleIsLow ? (90.0 + el) : (90.0 - el);
+        return std::fabs(im.map.elByRow[r] * kDeg - poleEl);
     };
 
     // How many cells a bridge may span, in each direction, from the measured step.
@@ -976,7 +1003,7 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
                          ? int(std::ceil(opt.skyBridgeDeg / azStepDeg)) : 0;
 
     const int64_t cols = int64_t(im.cols), rows = int64_t(im.rows);
-    const uint32_t poleRow = skyAtFirst ? 0u : uint32_t(im.rows - 1);
+    const uint32_t poleRow = poleRow0;
 
     // Which cells sit in surroundings that are mostly empty, over the bridge's own
     // window: (2*bridgeRows+1) by (2*bridgeCols+1), azimuth wrapping and the row
@@ -1100,7 +1127,71 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
     rep.cells     = cells;
     rep.extentDeg = extent;
     rep.isSky     = extent >= opt.skyMinExtentDeg;
-    if (!rep.isSky) sky.assign(im.cells.size(), 0);        // found nothing to protect
+    if (rep.isSky) return rep;
+
+    // SHORT OF THE ANGLE, SO IT CLEARS NOTHING. The test at the pole decides
+    // whether the opening there is a view of the sky, and if it is not then the
+    // only other thing it can be is a hole in whatever the instrument was under —
+    // a rooflight, a dark patch of ceiling, an open hatch two metres up. Believed,
+    // each of those cells clears a ray to the rated range straight through a roof.
+    // So the region is demoted rather than merely left unprotected: an opening at
+    // the zenith is sky and clears, or it is not and it establishes nothing.
+    //
+    // Dilated back by the window the openness test eroded it with, over no-returns
+    // only, so the patch is demoted to its own edge rather than leaving a ring of
+    // rim cells clearing around it. Separable again, and only on this path.
+    if (cells == 0) { sky.assign(im.cells.size(), 0); return rep; }
+    std::vector<uint8_t> region;
+    region.swap(sky);                      // the region found; it protects nothing
+    sky.assign(im.cells.size(), 0);
+    std::vector<uint8_t> rowNear(im.cells.size(), 0), patch(im.cells.size(), 0);
+    for (int64_t r = 0; r < rows; ++r) {
+        const size_t base = size_t(r) * size_t(cols);
+        int32_t live = 0;
+        auto at = [&](int64_t c) -> uint8_t {
+            c += cols * (c < 0 ? 1 : 0);
+            c -= cols * (c >= cols ? 1 : 0);
+            return region[base + size_t(c)];
+        };
+        for (int64_t c = -bridgeCols; c <= bridgeCols; ++c) live += at(c);
+        for (int64_t c = 0; c < cols; ++c) {
+            rowNear[base + size_t(c)] = uint8_t(live > 0);
+            live -= at(c - bridgeCols);
+            live += at(c + bridgeCols + 1);
+        }
+    }
+    uint64_t demoted = 0;
+    {
+        // Down the columns the same way — a window that slides a row at a time,
+        // counting how many of the rows in reach are near the region. Asking each
+        // cell to look up and down over its own window instead measured 15 ms more
+        // on the 1250 x 2640 raster, for the same answer to the cell.
+        std::vector<int32_t> colLive(size_t(cols), 0);
+        auto stepRow = [&](int64_t r, int32_t s) {
+            if (r < 0 || r >= rows) return;
+            const size_t base = size_t(r) * size_t(cols);
+            for (int64_t c = 0; c < cols; ++c) colLive[size_t(c)] += s * rowNear[base + size_t(c)];
+        };
+        for (int64_t r = -bridgeRows; r <= bridgeRows; ++r) stepRow(r, 1);
+        for (int64_t r = 0; r < rows; ++r) {
+            const size_t base = size_t(r) * size_t(cols);
+            for (int64_t c = 0; c < cols; ++c) {
+                if (!colLive[size_t(c)]) continue;
+                if (Status(im.cells[base + size_t(c)].status) != Status::NoReturn) continue;
+                patch[base + size_t(c)] = 1;
+                ++demoted;
+            }
+            stepRow(r - bridgeRows, -1);
+            stepRow(r + bridgeRows + 1, 1);
+        }
+    }
+    for (size_t i = 0; i < patch.size(); ++i)
+        if (patch[i]) { im.cells[i].status = uint8_t(Status::OutsideFov); im.cells[i].rangeCm = 0; }
+    rep.demotedCells = demoted;
+    if (demoted) {
+        im.diag.noReturns  -= std::min<uint64_t>(demoted, im.diag.noReturns);
+        im.diag.outsideFov += demoted;
+    }
     return rep;
 }
 
@@ -1146,6 +1237,34 @@ uint64_t filterDarkBorderedZones(RangeImage& im, const std::vector<float>& inten
     const float weak = seen[k];
     im.diag.darkThreshold = weak;
 
+    // WHAT THAT THRESHOLD ACTUALLY SELECTS, which is not the tenth it was asked
+    // for whenever the distribution has an atom on it. Instruments quantise
+    // intensity, clip it at the bottom, or write a floor value for every return
+    // below some level; a tenth of the way up such a distribution lands ON that
+    // value, and "at or below the weakest tenth" then takes every return sharing
+    // it — a third of the scan, half of it — at which point an ordinary border is
+    // a quarter weak by arithmetic alone and every zone in the scan is demoted.
+    // That is exactly what a scan that stopped carving looks like.
+    //
+    // So the share is measured rather than assumed. Past twice what was asked for,
+    // the value is an atom and not a tail, and the comparison goes strict: the
+    // weakest returns are then the ones BELOW it. If that leaves nothing, this
+    // scan's intensity cannot resolve a weakest tenth at all and the test says
+    // nothing rather than guessing — a distribution with one value in the bottom
+    // decile is not evidence about any particular border.
+    uint64_t atOrBelow = 0, below = 0;
+    for (float v : seen) { atOrBelow += (v <= weak); below += (v < weak); }
+    const double asked = opt.darkPercentile;
+    bool strict = false;
+    double effective = double(atOrBelow) / double(seen.size());
+    if (effective > 2.0 * asked) {
+        strict = true;
+        effective = double(below) / double(seen.size());
+    }
+    im.diag.darkWeakShare = effective;
+    if (effective <= 0.0) return 0;
+    auto isWeak = [&](float v) { return strict ? (v < weak) : (v <= weak); };
+
     const int64_t cols = int64_t(im.cols), rows = int64_t(im.rows);
     const size_t n = im.cells.size();
     std::vector<uint64_t> visited((n + 63) / 64, 0);
@@ -1180,7 +1299,7 @@ uint64_t filterDarkBorderedZones(RangeImage& im, const std::vector<float>& inten
                 const size_t j = nb[a];
                 const Status st = Status(im.cells[j].status);
                 if (st == Status::Hit) {
-                    if (intensity[j] >= 0.0f) { ++border; if (intensity[j] <= weak) ++dark; }
+                    if (intensity[j] >= 0.0f) { ++border; if (isWeak(intensity[j])) ++dark; }
                     continue;
                 }
                 if (st != Status::NoReturn || taken(j)) continue;
@@ -2352,6 +2471,7 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         // being open is the reading that says the fill is percolating.
         out.diag.skyCells     = rep.cells;
         out.diag.skyExtentDeg = rep.extentDeg;
+        out.diag.zenithDemoted = rep.demotedCells;
         filterDarkBorderedZones(out, cellIntensity, sky, opt);
     }
     // And what is left believed, for the report and the status line. Here rather

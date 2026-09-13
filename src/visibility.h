@@ -323,6 +323,11 @@ struct Result {
     // returns were too weak to believe. See rimg::identifySky and
     // rimg::filterDarkBorderedZones.
     uint64_t     setupsWithSky = 0;
+    // And setups where the opening at the zenith fell SHORT of the angle, so it is
+    // a hole in whatever the instrument was under and clears nothing. The active
+    // half of the sky check on an indoor job, where there is no sky to find.
+    uint64_t     setupsZenithClosed = 0;
+    uint64_t     zenithDemotedCells = 0;
     uint64_t     setupsWithDarkZones = 0;
     uint64_t     darkCells = 0;
     uint64_t     setupsWithoutIntensity = 0;
