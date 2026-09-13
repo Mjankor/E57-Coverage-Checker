@@ -114,7 +114,13 @@ struct Options {
     // Which formulation of the carve to run — see carve::Method. RayMarch is the
     // specified one and the default; the two gathers are kept so the three can be
     // run against each other on real data.
-    carve::Method method = carve::Method{};
+    //
+    // Taken from carve::Params rather than written out, and NOT `carve::Method{}`:
+    // that default-constructs to the first enumerator, which is CentreRay — the one
+    // that leaves a third of a room unobserved — so the app would have shipped
+    // running the method the other two exist to replace, while every test that built
+    // a carve::Params directly got RayMarch and agreed with itself.
+    carve::Method method = carve::Params{}.method;
 
     // The tightest region, and the one that makes the fraction mean something.
     DomainMode domain = DomainMode::Shrinkwrap;

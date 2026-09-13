@@ -147,7 +147,8 @@ private:
 
     std::vector<Cell> cells_;
     BuildOptions      opt_;
-    uint8_t           baseLevel_ = 0;
+    // No baseLevel_ here: the constructor's baseLevel is the root cell's own
+    // level, cells_[0].node.level, and a second copy of it was never read.
     size_t            inserted_ = 0;
     size_t            overflowed_ = 0;
     OverflowFn        overflow_;

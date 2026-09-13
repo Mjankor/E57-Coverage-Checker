@@ -52,7 +52,7 @@ Aabb cubeAround(const Aabb& box) {
 // Builder
 
 Builder::Builder(const Aabb& bounds, const BuildOptions& opt, uint8_t baseLevel)
-    : opt_(opt), baseLevel_(baseLevel) {
+    : opt_(opt) {
     if (opt_.gridResolution == 0) opt_.gridResolution = 1;
     Cell root;
     root.node.level  = baseLevel;

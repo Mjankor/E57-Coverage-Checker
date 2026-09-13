@@ -156,9 +156,22 @@ static void testDefaultsAgreeWithTheLibrary() {
 
     const vis::Options v;
     const rimg::Options r;
+    const carve::Params c;
     CHECK(v.blindCone == r.blindCone, "the blind cone policy matches");
     CHECK(v.maxRange == r.maxRange, "as does the rated range");
     CHECK(v.minRange == r.minRange, "and the instrument's minimum range");
+    CHECK(v.skyMinExtentDeg == r.skyMinExtentDeg, "and what makes an opening the sky");
+    CHECK(v.skyMinArcShare == r.skyMinArcShare, "over how much of the way around it");
+
+    // And the carve's. This one WAS wrong: vis::Options wrote its default as
+    // `carve::Method{}`, which default-constructs to the first enumerator —
+    // CentreRay, the method that leaves a third of a room unobserved — so every run
+    // through the job used it, while every test that built a carve::Params directly
+    // got RayMarch and agreed with itself. A default written out by hand in the
+    // second place is the whole of the failure mode this test exists for.
+    CHECK(v.method == c.method, "and which formulation of the carve runs");
+    CHECK(v.method == carve::Method::RayMarch,
+          "which is the march, not the single ray the other two replaced");
 }
 
 static void testVoxelHash() {

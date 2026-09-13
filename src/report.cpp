@@ -231,6 +231,7 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                 ro.blindCone        = opt.blindCone;
                 ro.minRange         = opt.minRange;
                 ro.skyMinExtentDeg    = opt.skyMinExtentDeg;
+                ro.skyMinArcShare     = opt.skyMinArcShare;
                 ro.darkBorderFraction = opt.darkBorderFraction;
                 ro.skyOnly            = opt.skyOnly;
                 std::string rerr;
@@ -1285,6 +1286,7 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
     ro.blindCone        = opt.blindCone;
     ro.minRange         = opt.minRange;
     ro.skyMinExtentDeg    = opt.skyMinExtentDeg;
+    ro.skyMinArcShare     = opt.skyMinArcShare;
     ro.darkBorderFraction = opt.darkBorderFraction;
     ro.skyOnly            = opt.skyOnly;
 
@@ -1438,7 +1440,7 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
             if (ask(r, c, rho) == want) ++t.ok;
         };
 
-        uint64_t nHit = 0, nHitTested = 0, nEmpty = 0, nUnsampled = 0, skipped = 0;
+        uint64_t nHit = 0, nEmpty = 0, nUnsampled = 0, skipped = 0;
 
         uint64_t i = 0;
         for (uint32_t r = 0; r < im.rows; ++r) {
@@ -1480,7 +1482,6 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
                 // the rated range and the setting, not the surface, decides.
                 ++nHit;
                 if (d < 2.0 || d > opt.maxRange - 2.0) { ++skipped; continue; }
-                ++nHitTested;
                 probe(r, c, 0.5 * d, carve::kVisible,  near_);
                 probe(r, c, d,       carve::kOccupied, on);
                 probe(r, c, d + 1.0, 0,                beyond);

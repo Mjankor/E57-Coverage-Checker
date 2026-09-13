@@ -57,6 +57,13 @@ int info(const std::vector<std::string>& paths, bool verifyCrc, double maxRange,
     ro.maxRange         = maxRange;
     ro.blindCone        = co.blindCone;
     ro.minRange         = co.minRange;
+    // And the rest of what decides what an empty cell means. Without these the
+    // report built its images at the library defaults and then described them as
+    // though they were the carve's, which is the one thing report.h says it is for.
+    ro.skyMinExtentDeg    = co.skyMinExtentDeg;
+    ro.skyMinArcShare     = co.skyMinArcShare;
+    ro.darkBorderFraction = co.darkBorderFraction;
+    ro.skyOnly            = co.skyOnly;
     std::string text;
     const int failures = report::scanReport(paths, ro, text);
     std::fputs(text.c_str(), stdout);
@@ -681,6 +688,10 @@ int main(int argc, char** argv) {
         ro.maxRange         = co.maxRange;
         ro.blindCone        = co.blindCone;
         ro.minRange         = co.minRange;
+        ro.skyMinExtentDeg    = co.skyMinExtentDeg;
+        ro.skyMinArcShare     = co.skyMinArcShare;
+        ro.darkBorderFraction = co.darkBorderFraction;
+        ro.skyOnly            = co.skyOnly;
         std::string text;
         const int failures = report::selfTest(paths, ro, text);
         std::fputs(text.c_str(), stdout);
