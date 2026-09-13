@@ -297,6 +297,23 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                     "outdoor scan\n",
                                     img.diag.skyExtentDeg,
                                     (unsigned long long)img.diag.skyCells);
+                    } else if (img.diag.skyCells) {
+                        // Said out loud, because "no sky" and "the sky ran away
+                        // with the whole raster" look identical from the outside
+                        // and the second one is what silently disarmed the
+                        // dark-border test on an indoor scan.
+                        o.add("      sky       : the opening at this instrument's own zenith "
+                                    "reaches only %.0f deg\n                  across %llu cells, "
+                                    "against the %.0f deg asked for, so nothing here\n           "
+                                    "       is named as sky and every empty cell is judged on "
+                                    "its own\n",
+                                    img.diag.skyExtentDeg,
+                                    (unsigned long long)img.diag.skyCells, ro.skyMinExtentDeg);
+                    } else {
+                        o.add("      sky       : nothing at this instrument's own zenith is open "
+                                    "— the cells there\n                  are returns, or empty "
+                                    "cells with returns all around them, which\n                "
+                                    "  is a speckled surface and not a view of the sky\n");
                     }
                     if (img.diag.darkZones) {
                         o.add("      dark      : %llu empty cells in %u zone(s) are bordered by "

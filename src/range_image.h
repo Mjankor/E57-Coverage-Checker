@@ -408,6 +408,10 @@ struct Diagnostics {
     float    darkThreshold   = 0.0f;   // this scan's own weak-return level
     // The sky, where this scan could name it: the region reaching its own zenith
     // and opening past Options::skyMinExtentDeg. See identifySky.
+    //
+    // The cells and the extent describe the region WHETHER OR NOT it was believed,
+    // so a rejected one can still be read — an opening that covered most of the
+    // raster and was thrown out is the reading that says the fill percolated.
     bool     skyFound = false;
     uint64_t skyCells = 0;
     double   skyExtentDeg = 0.0;

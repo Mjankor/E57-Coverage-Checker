@@ -463,6 +463,46 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
         CHECK(!rep.reachedPole, "and there is no sky there in this raster");
     }
 
+    // An INTERIOR, speckled with single empty cells — grazing incidence, dark
+    // trim, a glazed panel — and nothing open anywhere. Every speck is within a
+    // bridge of the next, so a fill that only asked "is there an empty cell within
+    // reach" walks the lattice from the zenith to the floor and calls the whole
+    // raster sky. This is the 50-scan defect, in miniature: 603356 of 606824
+    // no-returns named as one opening reaching 135 degrees, on a scan taken inside
+    // a building.
+    {
+        // Every third row and every third column, the pole row among them — a
+        // speck is within one bridge of the next in both directions, which is the
+        // whole of what the old fill asked for.
+        rimg::RangeImage im = build(0, false, false);          // a closed room
+        for (uint32_t r = 2; r < im.rows; r += 3)
+            for (uint32_t c = 0; c < im.cols; c += 3)
+                im.cells[size_t(r) * im.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(!rep.isSky, "a speckled interior is not an opening to the sky");
+        uint64_t protectedCells = 0;
+        for (uint8_t v : sky) protectedCells += v;
+        CHECK(protectedCells == 0, "and none of it is protected from the dark test");
+
+        // The same specks, with genuine sky above them. The sky is still found —
+        // what the openness test removes is the lattice, not the opening — and it
+        // does not leak down the lattice into the room.
+        // The lattice runs right up to the sky's own edge, so the fill has every
+        // chance to step off the opening and down into the room.
+        rimg::RangeImage both = build(60, false, false);
+        for (uint32_t r = 2; r < both.rows - 60; r += 3)
+            for (uint32_t c = 0; c < both.cols; c += 3)
+                both.cells[size_t(r) * both.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+        std::vector<uint8_t> sky2;
+        const rimg::SkyReport rep2 = rimg::identifySky(both, opt, sky2);
+        CHECK(rep2.isSky, "the opening above them is still the sky");
+        CHECK(rep2.cells < 70 * both.cols,
+              "and the sky stops at the room rather than running down the specks");
+    }
+
     // --- and the dark border ------------------------------------------------
     //
     // One zone, bordered by returns of which a third are among the weakest in the
