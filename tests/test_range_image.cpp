@@ -1043,61 +1043,6 @@ static void testNoReturnsInsideTheMinimumRange() {
 // inside a building is sent to a row holding sky and gets cleared to maxRange.
 // That is sky uncarved and building interiors carved away, which is exactly what
 // the field reported.
-// A sweep past a full turn looks at some bearings twice, and the raster holds two
-// answers for one ray out of the instrument. A lookup can only give one of them,
-// and which one is decided by a vote of the points that fell in the bin — a coin
-// toss. Answer with the far one where the near one saw a wall and the carve runs a
-// slab of cleared space through that wall, from the ceiling down through the floor.
-static void testABearingLookedAtTwiceAnswersWithTheNearerSurface() {
-    std::printf("range image: a bearing looked at twice keeps the nearer surface\n");
-
-    // 370 degrees over 370 columns: one degree a column, and the last ten columns
-    // repeat the bearings of the first ten.
-    rimg::RangeImage im;
-    im.rows = 40; im.cols = 370;
-    im.cells.assign(im.cellCount(), rimg::Cell{});
-    for (size_t i = 0; i < im.cells.size(); ++i)
-        im.cells[i] = rimg::Cell{800, uint8_t(rimg::Status::Hit)};    // a room at 8 m
-    im.map = rimg::uniformMapping(im.rows, im.cols, -45.0 * kPi / 180.0,
-                                  (90.0 / 39.0) * kPi / 180.0,
-                                  0.0, (1.0) * kPi / 180.0);
-    im.map.valid = true;
-
-    // On the FIRST pass those ten bearings saw something close — a column, a
-    // person, the corner of a sofa — at 2 m. On the second they saw past it.
-    for (uint32_t c = 0; c < 10; ++c)
-        for (uint32_t r = 10; r < 30; ++r)
-            im.cells[size_t(r) * im.cols + c] = rimg::Cell{200, uint8_t(rimg::Status::Hit)};
-    // And on the second pass one of them came back empty.
-    for (uint32_t r = 10; r < 30; ++r)
-        im.cells[size_t(r) * im.cols + 361] = rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
-
-    const uint64_t merged = rimg::mergeDoubleCoveredColumns(im);
-    CHECK(merged >= 9 && merged <= 11, "the repeated columns are found from the table");
-
-    // Both cells of a pair now answer with the near surface, so it does not matter
-    // which one the index picked.
-    CHECK(im.statusAt(20, 0) == rimg::Status::Hit, "the near return survives");
-    CHECK_NEAR(im.rangeAt(20, 0), 2.0, 1e-6, "at its own range");
-    CHECK(im.statusAt(20, 360) == rimg::Status::Hit,
-          "and the far cell at the same bearing now holds it too");
-    CHECK_NEAR(im.rangeAt(20, 360), 2.0, 1e-6, "rather than the 8 m it measured");
-    // A return beats an empty: something was there, whichever pass saw it.
-    CHECK(im.statusAt(20, 361) == rimg::Status::Hit, "an empty does not erase a return");
-    CHECK_NEAR(im.rangeAt(20, 361), 2.0, 1e-6, "and the return is the near one");
-    // Outside the overlap nothing is touched.
-    CHECK_NEAR(im.rangeAt(20, 180), 8.0, 1e-6, "a bearing seen once is left alone");
-
-    // A sweep inside one turn has no pairs at all.
-    rimg::RangeImage one;
-    one.rows = 40; one.cols = 360;
-    one.cells.assign(one.cellCount(), rimg::Cell{800, uint8_t(rimg::Status::Hit)});
-    one.map = rimg::uniformMapping(one.rows, one.cols, -45.0 * kPi / 180.0,
-                                   (90.0 / 39.0) * kPi / 180.0, 0.0, kTau / 360.0);
-    one.map.valid = true;
-    CHECK(rimg::mergeDoubleCoveredColumns(one) == 0, "one turn has nothing to fold");
-}
-
 static void testDoubleCoveredMirrorIsRefused() {
     std::printf("range image: a double-covered mirror sweep is refused\n");
 
@@ -2227,7 +2172,6 @@ int main() {
     testNoReturnsInsideTheMinimumRange();
     testTheSkyIsNamedAndTheDarkIsNotBelieved();
     testBlindConeFoundGeometrically();
-    testABearingLookedAtTwiceAnswersWithTheNearerSurface();
     testDoubleCoveredMirrorIsRefused();
     testOrdinaryRasterRoundTrips();
     testSweepPastATurnAndNonUniformRows();

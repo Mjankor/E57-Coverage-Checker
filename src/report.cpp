@@ -426,11 +426,7 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                              std::max(1e-12, std::fabs(img.map.dAzPerCol));
                         o.add("                  the sweep runs %.0f columns past a full turn, "
                                     "so those bearings\n                  were looked at twice; "
-                                    "%llu column(s) folded together, the nearer\n               "
-                                    "   surface of each pair kept — a lookup can only answer "
-                                    "with one\n                  of the two, and which one was "
-                                    "decided by a vote of the points\n",
-                                    extra, (unsigned long long)img.diag.doubleCoveredCols);
+                                    "one of each pair answers a lookup\n", extra);
                     }
                     // How far a straight line would have been from the measured
                     // tables. Reported, and no longer used: the tables are.

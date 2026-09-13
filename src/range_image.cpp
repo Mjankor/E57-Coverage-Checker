@@ -1363,106 +1363,6 @@ uint64_t filterDarkBorderedZones(RangeImage& im, const std::vector<float>& inten
     return demoted;
 }
 
-// Folds together the columns that look the same way.
-//
-// A sweep that runs past a full turn looks at some bearings TWICE. The scans here
-// run 363.8 to 369.7 degrees, so the last 60 to 70 columns repeat the bearings of
-// the first 60 to 70, and the raster holds two cells for each of those directions
-// — two ranges, measured seconds or minutes apart, for the same ray out of the
-// instrument.
-//
-// A lookup can only answer with one of them. Which one is decided by a majority
-// vote of the points that fell in that azimuth bin, and with both columns voting
-// in the same bin the winner is whichever arrived in surplus: a coin toss, bin by
-// bin. The other cell is then unreachable, and every ray at that bearing is
-// answered by a cell that may have been looking at something else entirely.
-//
-// That is a carve through a solid surface, and a narrow one: the wedge is a couple
-// of degrees of azimuth and the whole height of the sweep, so it comes out as a
-// vertical slab of cleared space running from the ceiling down through the floor,
-// through whatever furniture is in the way. Two of them, side by side, is one
-// setup's wedge answered by two different columns.
-//
-// So the pair is merged before anything reads it, and merged conservatively:
-//
-//   Two returns          the NEARER survives. The same rule as binning down — a
-//                        cell says how far a ray got before something stopped it,
-//                        and of two answers for one ray the nearer is the one that
-//                        stops the carve soonest.
-//   A return and an empty the return. Something was there.
-//   Two empties          empty.
-//   Anything unsampled   the other one. A direction the instrument did not look at
-//                        in one pass says nothing about the pass that did.
-//
-// The merged answer is written to BOTH cells, so it no longer matters which one
-// the index picked. Partners are found through the measured table rather than by
-// assuming a uniform step — the nearest column to this one's bearing less a full
-// turn — because the raster these live on is not uniform in the first place.
-uint64_t mergeDoubleCoveredColumns(RangeImage& im) {
-    if (im.cols < 2 || im.rows == 0 || im.map.azByCol.size() != im.cols) return 0;
-    const double kTwoPi = 6.283185307179586;
-    const std::vector<double>& az = im.map.azByCol;
-
-    // Which way the sweep runs, and whether it covers more than a turn at all.
-    const double span = az.back() - az.front();
-    if (std::fabs(span) <= kTwoPi) return 0;
-    const bool rising = span > 0.0;
-
-    uint64_t merged = 0;
-    for (uint32_t p = 0; p < im.cols; ++p) {
-        // The bearing a full turn back from this one, and the column nearest it.
-        const double want = az[p] - (rising ? kTwoPi : -kTwoPi);
-        if (rising ? (want < az.front()) : (want > az.front())) continue;
-        uint32_t lo = 0, hi = p;
-        while (lo + 1 < hi) {
-            const uint32_t mid = lo + (hi - lo) / 2;
-            const bool before = rising ? (az[mid] <= want) : (az[mid] >= want);
-            (before ? lo : hi) = mid;
-        }
-        const uint32_t c = (std::fabs(az[lo] - want) <= std::fabs(az[hi] - want)) ? lo : hi;
-        if (c >= p) continue;
-        ++merged;
-
-        for (uint32_t r = 0; r < im.rows; ++r) {
-            Cell& a = im.cells[size_t(r) * im.cols + c];
-            Cell& b = im.cells[size_t(r) * im.cols + p];
-            const Status sa = Status(a.status), sb = Status(b.status);
-            if (sa == sb && a.rangeCm == b.rangeCm) continue;
-            Cell keep;
-            if (sa == Status::Hit && sb == Status::Hit) {
-                keep = (a.rangeCm <= b.rangeCm) ? a : b;
-            } else if (sa == Status::Hit) {
-                keep = a;
-            } else if (sb == Status::Hit) {
-                keep = b;
-            } else if (sa == Status::NoReturn) {
-                keep = a;
-            } else if (sb == Status::NoReturn) {
-                keep = b;
-            } else {
-                continue;                       // both unsampled: nothing to say
-            }
-            // The tallies follow the cells. A merge can turn an empty cell into a
-            // return — the other pass saw something there — and a count that did
-            // not move with it would describe a raster that no longer exists.
-            auto tally = [&](Status was, Status now) {
-                if (was == now) return;
-                if (was == Status::Hit)        --im.diag.hits;
-                else if (was == Status::NoReturn) --im.diag.noReturns;
-                else                            --im.diag.outsideFov;
-                if (now == Status::Hit)        ++im.diag.hits;
-                else if (now == Status::NoReturn) ++im.diag.noReturns;
-                else                            ++im.diag.outsideFov;
-            };
-            tally(sa, Status(keep.status));
-            tally(sb, Status(keep.status));
-            a = keep;
-            b = keep;
-        }
-    }
-    return merged;
-}
-
 // Finds and marks the instrument's blind cone, from this scan and nothing else.
 //
 // The cone is an unsampled band running off one end of the raster, and which end
@@ -2580,11 +2480,6 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         out.cells[i].rangeCm = uint16_t(std::min(opt.maxRange * 100.0, 65535.0));
         ++out.diag.noReturns;
     }
-    // Bearings this sweep looked at TWICE, folded together before anything reads
-    // them. See mergeDoubleCoveredColumns: a lookup can only answer with one of
-    // the pair, and the one it picks is decided by a majority vote of the points
-    // that fell in the bin, which is a coin toss.
-    out.diag.doubleCoveredCols = mergeDoubleCoveredColumns(out);
     // The blind cone under the tripod: never sampled, so it establishes nothing.
     // Everything else empty is a ray that was fired and came back with nothing,
     // and clears along its path — whatever it passed through on the way.
