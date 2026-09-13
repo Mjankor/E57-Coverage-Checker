@@ -518,7 +518,7 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
         const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
         CHECK(rep.reachedPole, "the zenith holds no returns");
         CHECK(rep.extentDeg > 40.0, "and the opening is wide enough to be the sky");
-        CHECK(rep.arcShare > 0.9, "at every bearing, so the breadth test passes too");
+        CHECK(rep.arcDeg > 350.0, "right around, so the breadth test passes too");
         CHECK(rep.borderMedianM > 0.4 && rep.borderMedianM < 0.6,
               "but the instrument measured half a metre all around it");
         CHECK(rep.borderTooClose, "which is inside the minimum range");
@@ -553,7 +553,7 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
     // with it.
     //
     // The reach is per bearing, so eight columns of 240 make the angle and 232 do
-    // not: three per cent of the way around the pole, against the tenth required.
+    // not: twelve degrees of bearing, against the thirty-six asked for.
     {
         rimg::RangeImage im = build(15, false, false);     // 11 degrees at the zenith
         for (uint32_t r = 60; r < im.rows; ++r)
@@ -565,8 +565,10 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
         CHECK(rep.reachedPole, "the zenith spot is still an opening");
         CHECK(rep.extentDeg > 80.0,
               "and the strip takes the region's reach right down to the horizon");
-        CHECK(rep.arcShare > 0.0 && rep.arcShare < 0.06,
-              "but it makes that reach at a handful of bearings");
+        // Eight columns of 240 over a turn: twelve degrees of bearing, against the
+        // thirty-six asked for.
+        CHECK(rep.arcDeg > 10.0 && rep.arcDeg < 14.0,
+              "but it makes that reach over only twelve degrees of bearing");
         CHECK(!rep.isSky, "so the region is not the sky");
         uint64_t protectedCells = 0;
         for (uint8_t v : sky) protectedCells += v;
@@ -589,7 +591,7 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
                 im.cells[size_t(r) * im.cols + c] =
                     rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
         rimg::Options loose = opt;
-        loose.skyMinArcShare = 0.0;
+        loose.skyMinArcDeg = 0.0;
         std::vector<uint8_t> sky;
         const rimg::SkyReport rep = rimg::identifySky(im, loose, sky);
         CHECK(rep.isSky, "one bearing reaching the angle was the whole of the old test");

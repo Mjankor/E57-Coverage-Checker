@@ -732,7 +732,7 @@ const char *kindLabel(check::Kind k) {
     ro.blindCone        = _visOptions.blindCone;
     ro.minRange         = _visOptions.minRange;
     ro.skyMinExtentDeg    = _visOptions.skyMinExtentDeg;
-    ro.skyMinArcShare     = _visOptions.skyMinArcShare;
+    ro.skyMinArcDeg       = _visOptions.skyMinArcDeg;
     ro.darkBorderFraction = _visOptions.darkBorderFraction;
 
     auto paths = std::make_shared<std::vector<std::string>>(_paths);
@@ -796,7 +796,7 @@ const char *kindLabel(check::Kind k) {
     ro.blindCone        = _visOptions.blindCone;
     ro.minRange         = _visOptions.minRange;
     ro.skyMinExtentDeg    = _visOptions.skyMinExtentDeg;
-    ro.skyMinArcShare     = _visOptions.skyMinArcShare;
+    ro.skyMinArcDeg       = _visOptions.skyMinArcDeg;
     ro.darkBorderFraction = _visOptions.darkBorderFraction;
 
     auto paths = std::make_shared<std::vector<std::string>>(_paths);
@@ -1377,18 +1377,18 @@ const char *kindLabel(check::Kind k) {
          @"clears nothing.\n\nA gap whose own border is inside the instrument's "
          @"minimum range never counts, whatever angle it reaches: that is a ceiling "
          @"the scanner is parked too close to see, not a view of the sky."},
-        {@"…over this share of the bearings (0–1, 0 = any one)",
-         [NSString stringWithFormat:@"%g", _visOptions.skyMinArcShare],
-         @"The other half of the angle above: how much of the way around the zenith "
-         @"has to reach it.\n\nReaching the angle at a single bearing is a spike, not "
-         @"an opening. A door frame's reveal is seen at a grazing angle all the way "
-         @"up, returns nothing, and leaves a narrow dead strip from the door to the "
-         @"ceiling; joined to a small dead spot at the zenith it carried the whole "
+        {@"…over this arc of bearing (deg, 0 = one bearing)",
+         [NSString stringWithFormat:@"%g", _visOptions.skyMinArcDeg],
+         @"The other half of the angle above: how far AROUND the zenith it has to "
+         @"reach that far.\n\nReaching the angle along a single bearing is a spike, "
+         @"not an opening. A door frame's reveal is seen at a grazing angle all the "
+         @"way up, returns nothing, and leaves a narrow dead strip from the door to "
+         @"the ceiling; joined to a small dead spot at the zenith it carried the whole "
          @"region past the angle, and a pencil of space cleared to the rated range "
-         @"straight up the frame.\n\nA real opening reaches the angle at nearly every "
-         @"bearing. A tenth is 36 degrees of bearing — wide enough that a slot "
-         @"between a canopy and a parapet still counts, narrow enough that the edge of "
-         @"one surface does not. 0 restores the single-bearing test."},
+         @"straight up the frame — over about a degree of bearing.\n\nA real opening "
+         @"reaches the angle right around: 360. Thirty-six degrees is wide enough that "
+         @"a slot between a canopy and a parapet still counts, narrow enough that the "
+         @"edge of one surface does not. 0 restores the single-bearing test."},
         {@"Dark border share that stops a clear (0–1, 0 = off)",
          [NSString stringWithFormat:@"%g", _visOptions.darkBorderFraction],
          @"OFF, and shipped off. It stopped a clear where the returns around a gap "
@@ -1586,12 +1586,12 @@ const char *kindLabel(check::Kind k) {
              "nothing) to 50. A door is 0.9, a window 1.5, a shopfront 3.";
         return;
     }
-    if (!(skyDeg >= 0.0) || skyDeg >= 180.0 || !(skyArc >= 0.0) || skyArc > 1.0 ||
+    if (!(skyDeg >= 0.0) || skyDeg >= 180.0 || !(skyArc >= 0.0) || skyArc > 360.0 ||
         !(darkSh >= 0.0) || darkSh > 1.0) {
         _status.stringValue =
-            @"The sky opening must be between 0 and 180 degrees, and the share of "
-             "bearings that must reach it and the dark border share both between 0 "
-             "and 1. Zero switches a test off: no opening is then named as sky, one "
+            @"The sky opening must be between 0 and 180 degrees, the arc of bearing "
+             "that must reach it between 0 and 360, and the dark border share between "
+             "0 and 1. Zero switches a test off: no opening is then named as sky, one "
              "bearing reaching the angle is enough, and no border is too dark to "
              "believe.";
         return;
@@ -1603,7 +1603,7 @@ const char *kindLabel(check::Kind k) {
     opt.minRange     = minRng;
     opt.wrapSpanGaps = bridge;
     opt.skyMinExtentDeg    = skyDeg;
-    opt.skyMinArcShare     = skyArc;
+    opt.skyMinArcDeg       = skyArc;
     opt.darkBorderFraction = darkSh;
     if (drawnM > 0.0)
         opt.displayCap = uint64_t(std::min(drawnM, 512.0) * 1048576.0);

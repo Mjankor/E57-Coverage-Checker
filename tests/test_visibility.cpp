@@ -161,7 +161,7 @@ static void testDefaultsAgreeWithTheLibrary() {
     CHECK(v.maxRange == r.maxRange, "as does the rated range");
     CHECK(v.minRange == r.minRange, "and the instrument's minimum range");
     CHECK(v.skyMinExtentDeg == r.skyMinExtentDeg, "and what makes an opening the sky");
-    CHECK(v.skyMinArcShare == r.skyMinArcShare, "over how much of the way around it");
+    CHECK(v.skyMinArcDeg == r.skyMinArcDeg, "and over how wide an arc of bearing");
 
     // And the carve's. This one WAS wrong: vis::Options wrote its default as
     // `carve::Method{}`, which default-constructs to the first enumerator —

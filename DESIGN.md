@@ -198,16 +198,21 @@ to clear space. Three tests, and a region has to pass all three:
 1. **Reach** — it opens at least `skyMinExtentDeg` (25°) from the instrument's own
    zenith, measured from the pole row's own elevation. An opening that wide about
    the pole is not a hole in a surface at any plausible distance.
-2. **Breadth** — it reaches that far over at least `skyMinArcShare` (0.10) of the
-   bearings the scan sampled. Reaching the angle at one bearing is a spike, not an
-   opening: a door frame's reveal is seen at a grazing angle all the way up, returns
-   nothing, and leaves a narrow dead strip from the door to the ceiling. Joined to a
-   small dead spot at the zenith — which alone would be demoted for being too small
-   — that strip carried the region's furthest reach past the angle, and the whole of
-   it then cleared: a pencil of space to the rated range straight up the frame. A
-   real opening makes the angle at nearly every bearing; a strip makes it at a
-   handful. The denominator is the bearings the scan sampled, not every column, so a
-   scan is not charged for columns its file holds no data for.
+2. **Breadth** — it reaches that far over at least `skyMinArcDeg` (36°) **of
+   bearing**. Reaching the angle along one bearing is a spike, not an opening: a door
+   frame's reveal is seen at a grazing angle all the way up, returns nothing, and
+   leaves a narrow dead strip from the door to the ceiling. Joined to a small dead
+   spot at the zenith — which alone would be demoted for being too small — that strip
+   carried the region's furthest reach past the angle, and the whole of it then
+   cleared: a pencil of space to the rated range straight up the frame.
+
+   The arc is **summed from each column's own azimuth width**, not counted as a share
+   of the columns, because a count of columns is not an angle: neither axis of these
+   rasters is uniform and a partial sweep does not cover a turn, so a tenth of the
+   columns can be 36° or 18°. Only columns the scan sampled contribute, so a scan is
+   not charged for columns its file holds no data for. A sweep past a full turn looked
+   at some bearings twice, so the sum is capped at 360 — which makes 360 ask for an
+   opening all the way round on every instrument, not just on most of them.
 3. **Border** — more than half of what the instrument measured around it lies
    OUTSIDE the minimum range. A scanner set up hard under a ceiling sees none of it,
    because all of it is inside the minimum range, so the zenith comes back empty and
@@ -218,6 +223,18 @@ to clear space. Three tests, and a region has to pass all three:
    bordered by eaves and branches metres off. The median, not the nearest: a scanner
    on open ground half a metre under a beam is bordered close along the beam and far
    everywhere else, and that is still sky.
+
+Measured on the fixture raster (180 × 240, a 45° cap at the zenith):
+
+| | reach | arc | border | |
+|---|---|---|---|---|
+| open cap | 44.5° | 360° | 3.00 m | **sky** |
+| verandah over half of it | 44.5° | 180° | 3.00 m | **sky** |
+| scanner hard under a ceiling | 44.5° | 360° | 0.50 m | not sky — border |
+| dead strip up a door frame | 89.7° | 12° | 3.00 m | not sky — breadth |
+
+The last two both pass the reach, and the old single-angle test passed both.
+
 
 Failing any of the three demotes the region rather than merely leaving it
 unprotected, because there is no third thing it can be: an opening at the zenith is

@@ -145,7 +145,7 @@ struct Options {
     // identification off, which leaves the dark-border test with nothing to
     // exempt and takes the sky out of every outdoor scan, so do not.
     double   skyMinExtentDeg = 25.0;
-    // AND OVER HOW MUCH OF THE WAY AROUND THE POLE it has to reach that far.
+    // AND OVER HOW WIDE AN ARC OF BEARING it has to reach that far.
     //
     // Reaching skyMinExtentDeg at a single bearing is not an opening, it is a
     // spike, and real scans are full of them. A door frame's reveal is seen at a
@@ -157,15 +157,20 @@ struct Options {
     // the zenith spot with it. This is what the single-angle test could not see,
     // because one cell at twenty-five degrees satisfied it.
     //
-    // So the reach is measured per bearing, and the region has to make the angle
-    // over this share of the bearings the scan sampled. A real opening at the
-    // zenith makes it at every one; a strip makes it at a handful. A tenth, which
-    // is 36 degrees of bearing: wide enough that a slot between a canopy and a
-    // parapet still counts — the reason the old comment here said the angle was
-    // needed in only one direction — and narrow enough that nothing the edge of one
-    // surface produces does. 0 switches the breadth test off and leaves the
-    // single-angle test alone.
-    double   skyMinArcShare = 0.10;
+    // So the reach is measured per bearing, and the bearings that make the angle
+    // have to add up to this much of the way around. In DEGREES of bearing, summed
+    // from each column's own azimuth width, because a count of columns is not an
+    // angle: neither axis of these rasters is uniform and a partial sweep does not
+    // cover a turn, so a tenth of the columns can be 36 degrees or 18. A real
+    // opening at the zenith makes the angle right around, 360; a strip up a door
+    // frame makes it over about one degree.
+    //
+    // Thirty-six degrees: wide enough that a slot between a canopy and a parapet
+    // still counts — the reason the old comment here said the angle was needed in
+    // only one direction — and narrow enough that nothing the edge of one surface
+    // produces does. 0 switches the breadth test off and leaves the single-angle
+    // test alone; 360 asks for an opening all the way round.
+    double   skyMinArcDeg = 36.0;
     // How wide a run of returns the sky fill may step over. A branch, a cable, a
     // flagpole: each returns along a line a couple of degrees wide with open sky
     // both sides, and a fill that stopped at one would report a dozen small
@@ -490,9 +495,9 @@ struct Diagnostics {
     // And over how much of the way around the pole it reached that far, and what
     // the instrument measured all around it. The three together are why an opening
     // was or was not believed, and a report that printed only the angle said the
-    // wrong thing about two of the three ways of failing. See Options::skyMinArcShare
+    // wrong thing about two of the three ways of failing. See Options::skyMinArcDeg
     // and SkyReport::borderTooClose.
-    double   skyArcShare = 0.0;
+    double   skyArcDeg = 0.0;
     double   skyBorderMedianM = -1.0;
     bool     skyBorderTooClose = false;
     // And what it cost the opening at the pole not to be sky: those cells are a
@@ -815,11 +820,11 @@ struct SkyReport {
     bool     poseDisagreesWithCone = false;
     uint64_t cells = 0;
     double   extentDeg = 0.0;       // how far from the pole the region reaches
-    // And over how much of the way around the pole it reaches skyMinExtentDeg:
-    // the share of the bearings this scan sampled whose own reach makes the angle.
-    // A real opening is near 1; a dead strip up a door frame is a few thousandths.
-    // See Options::skyMinArcShare.
-    double   arcShare = 0.0;
+    // And over how wide an arc of bearing it reaches skyMinExtentDeg, in degrees,
+    // added up from the widths of the columns whose own reach makes the angle. A
+    // real opening is near 360; a dead strip up a door frame is about one.
+    // See Options::skyMinArcDeg.
+    double   arcDeg = 0.0;
     // What the instrument measured all around the region, and whether that puts the
     // region INSIDE the minimum range rather than outside everything.
     //

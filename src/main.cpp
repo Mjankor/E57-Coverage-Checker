@@ -61,7 +61,7 @@ int info(const std::vector<std::string>& paths, bool verifyCrc, double maxRange,
     // report built its images at the library defaults and then described them as
     // though they were the carve's, which is the one thing report.h says it is for.
     ro.skyMinExtentDeg    = co.skyMinExtentDeg;
-    ro.skyMinArcShare     = co.skyMinArcShare;
+    ro.skyMinArcDeg       = co.skyMinArcDeg;
     ro.darkBorderFraction = co.darkBorderFraction;
     ro.skyOnly            = co.skyOnly;
     std::string text;
@@ -463,14 +463,15 @@ void usage() {
         "          opening whose own border is inside --min-range never counts,\n"
         "          whatever angle it reaches: that is a ceiling the scanner is\n"
         "          parked too close to see. 0 names no sky at all.\n"
-        "  --sky-arc <0..1>\n"
-        "          (carve) Over what share of the bearings around the zenith\n"
-        "          --sky-extent has to be reached. Default 0.10. Reaching the\n"
-        "          angle at one bearing is a spike, not an opening: a door\n"
-        "          frame's reveal returns nothing all the way up and, joined to\n"
-        "          a dead spot at the zenith, carried the whole region past the\n"
-        "          angle and cleared a pencil of space up the frame. 0 restores\n"
-        "          the single-bearing test.\n"
+        "  --sky-arc <deg>\n"
+        "          (carve) Over how wide an arc of bearing --sky-extent has to\n"
+        "          be reached, in degrees. Default 36. Reaching the angle along\n"
+        "          one bearing is a spike, not an opening: a door frame's reveal\n"
+        "          returns nothing all the way up and, joined to a dead spot at\n"
+        "          the zenith, carried the whole region past the angle and\n"
+        "          cleared a pencil of space up the frame — over about a degree\n"
+        "          of bearing. A real opening makes it right around, 360. 0\n"
+        "          restores the single-bearing test.\n"
         "  --blind-cone auto|none|first|last|both\n"
         "          (carve) Which end of each raster holds the instrument's own\n"
         "          blind cone, where no ray was fired. Default auto, and every\n"
@@ -599,9 +600,9 @@ int main(int argc, char** argv) {
             continue;
         }
         if (std::strcmp(argv[i], "--sky-arc") == 0 && i + 1 < argc) {
-            co.skyMinArcShare = std::strtod(argv[++i], nullptr);
-            if (!(co.skyMinArcShare >= 0.0) || co.skyMinArcShare > 1.0) {
-                std::printf("--sky-arc must be a share from 0 to 1\n");
+            co.skyMinArcDeg = std::strtod(argv[++i], nullptr);
+            if (!(co.skyMinArcDeg >= 0.0) || co.skyMinArcDeg > 360.0) {
+                std::printf("--sky-arc must be an arc of bearing from 0 to 360 degrees\n");
                 return 2;
             }
             continue;
@@ -689,7 +690,7 @@ int main(int argc, char** argv) {
         ro.blindCone        = co.blindCone;
         ro.minRange         = co.minRange;
         ro.skyMinExtentDeg    = co.skyMinExtentDeg;
-        ro.skyMinArcShare     = co.skyMinArcShare;
+        ro.skyMinArcDeg       = co.skyMinArcDeg;
         ro.darkBorderFraction = co.darkBorderFraction;
         ro.skyOnly            = co.skyOnly;
         std::string text;

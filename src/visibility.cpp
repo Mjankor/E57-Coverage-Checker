@@ -563,7 +563,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     ro.blindCone        = opt.blindCone;
     ro.minRange         = opt.minRange;
     ro.skyMinExtentDeg    = opt.skyMinExtentDeg;
-    ro.skyMinArcShare     = opt.skyMinArcShare;
+    ro.skyMinArcDeg       = opt.skyMinArcDeg;
     ro.darkBorderFraction = opt.darkBorderFraction;
     ro.skyOnly            = opt.skyOnly;
 

@@ -1167,7 +1167,7 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
     // rather than collapsed into one maximum. One number per column, filled as the
     // flood passes through it, which is what lets the breadth test below ask how
     // much of the way around the pole the region actually opens — see
-    // Options::skyMinArcShare.
+    // Options::skyMinArcDeg.
     std::vector<float> reachByCol(size_t(cols), -1.0f);
     while (!stack.empty()) {
         const size_t i = stack.back();
@@ -1206,29 +1206,51 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
     rep.cells     = cells;
     rep.extentDeg = extent;
 
-    // HOW MUCH OF THE WAY AROUND THE POLE THE REGION OPENS.
+    // HOW FAR AROUND THE POLE THE REGION OPENS, IN DEGREES OF BEARING.
     //
     // The extent above is one number for the whole region, so one bearing carries
     // it: a dead strip up a door frame reaches the angle at a handful of columns and
     // the region passed on that alone. The reach is per bearing, so the test is too.
     //
-    // The denominator is the bearings this scan SAMPLED, not every column of the
-    // raster. A column the file holds no data for at all — markUnsampledColumns
-    // found 88 to 94 of 2640 on the instrument this was built against — is not a
-    // bearing where the sky was looked for and found absent; it is a bearing nobody
-    // looked along, and counting it would charge the scan for its own gaps.
+    // Summed from each column's OWN azimuth width rather than counted as a share of
+    // the columns, because a count is not an angle. Neither axis of these rasters is
+    // uniform (see Mapping) and a partial sweep does not cover a turn, so a tenth of
+    // the columns can be a tenth of 360 degrees or a tenth of 180 — and the question
+    // being asked is how wide the opening is, which is a real-world angle. Adding up
+    // the widths of the columns that made the reach answers it directly and needs no
+    // assumption about the raster at all.
+    //
+    // Only columns the scan SAMPLED contribute, on either side of the sum. A column
+    // the file holds no data for — markUnsampledColumns found 88 to 94 of 2640 on
+    // the instrument this was built against — is not a bearing where the sky was
+    // looked for and found absent; nobody looked along it, and its width is not the
+    // scan's to spend.
     {
-        uint64_t sampled = 0, made = 0;
+        double arc = 0.0;
         for (int64_t c = 0; c < cols; ++c) {
             bool any = false;
             for (int64_t r = 0; r < rows && !any; ++r)
                 any = Status(im.cells[size_t(r) * size_t(cols) + size_t(c)].status)
                       != Status::OutsideFov;
             if (!any) continue;
-            ++sampled;
-            if (double(reachByCol[size_t(c)]) >= opt.skyMinExtentDeg) ++made;
+            if (double(reachByCol[size_t(c)]) < opt.skyMinExtentDeg) continue;
+            // This column's own share of the sweep, from its neighbours in the
+            // measured table, halved at each side because a width is shared.
+            const std::vector<double>& az = im.map.azByCol;
+            const size_t nc = az.size();
+            double w = 0.0;
+            if (nc > 1 && size_t(c) < nc) {
+                if (size_t(c) + 1 < nc) w += 0.5 * std::fabs(az[size_t(c) + 1] - az[size_t(c)]);
+                if (c > 0)              w += 0.5 * std::fabs(az[size_t(c)] - az[size_t(c) - 1]);
+                if (size_t(c) + 1 >= nc) w *= 2.0;      // the ends have one neighbour
+                if (c == 0)              w *= 2.0;
+            }
+            arc += w * kDeg;
         }
-        rep.arcShare = sampled ? double(made) / double(sampled) : 0.0;
+        // A sweep that runs past a full turn looked at some bearings twice, so the
+        // widths can add to more than a circle. Capped, so that 360 means "at every
+        // bearing" on every instrument rather than on most of them.
+        rep.arcDeg = std::min(arc, 360.0);
     }
 
     // AND WHAT THE INSTRUMENT MEASURED ALL AROUND IT.
@@ -1275,7 +1297,7 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
     }
 
     rep.isSky = extent >= opt.skyMinExtentDeg &&
-                (opt.skyMinArcShare <= 0.0 || rep.arcShare >= opt.skyMinArcShare) &&
+                (opt.skyMinArcDeg <= 0.0 || rep.arcDeg >= opt.skyMinArcDeg) &&
                 !rep.borderTooClose;
     if (rep.isSky) return rep;
 
@@ -2688,7 +2710,7 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         // being open is the reading that says the fill is percolating.
         out.diag.skyCells     = rep.cells;
         out.diag.skyExtentDeg = rep.extentDeg;
-        out.diag.skyArcShare       = rep.arcShare;
+        out.diag.skyArcDeg         = rep.arcDeg;
         out.diag.skyBorderMedianM  = rep.borderMedianM;
         out.diag.skyBorderTooClose = rep.borderTooClose;
         out.diag.zenithDemoted = rep.demotedCells;

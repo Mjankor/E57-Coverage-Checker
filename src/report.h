@@ -29,7 +29,7 @@ struct Options {
     rimg::BlindCone blindCone = rimg::BlindCone::Auto;
     double   minRange           = rimg::Options{}.minRange;
     double   skyMinExtentDeg    = rimg::Options{}.skyMinExtentDeg;
-    double   skyMinArcShare     = rimg::Options{}.skyMinArcShare;
+    double   skyMinArcDeg       = rimg::Options{}.skyMinArcDeg;
     double   darkBorderFraction = rimg::Options{}.darkBorderFraction;
     bool     skyOnly            = rimg::Options{}.skyOnly;
 };
