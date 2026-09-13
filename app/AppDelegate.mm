@@ -1311,86 +1311,106 @@ const char *kindLabel(check::Kind k) {
     // new control moves, so adding one cannot land it on top of another — which is
     // how the popup once came to be drawn over the fourth parameter row.
     //
-    // 620 wide, with the labels given 380 of it. The labels say what a setting
-    // means rather than naming it, so they are sentences, and at 220 they were
-    // being clipped mid-word — "Buffer / margin past the last return (m," — which
-    // is worse than a short label would have been.
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 620, 382)];
-    struct { NSString *label; NSString *value; } rows[] = {
-        {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
-        {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
-        {@"Tile size (voxels)", [NSString stringWithFormat:@"%u", _visOptions.tileVoxels]},
-        // The shrinkwrap's buffer and the box's margin are the same number meaning
-        // the same thing — how far past the last return the question still applies
-        // — so the label names both rather than making it look like two settings.
-        // Negative is allowed and useful: it pulls the question inside the walls.
-        {@"Buffer / margin past the last return (m, may be −)",
-                                [NSString stringWithFormat:@"%.1f", _visOptions.domainMargin]},
-        // How wide an opening the shrinkwrap may bridge, in metres of OPENING —
-        // the width of the hole, which is what an operator can measure on site.
-        // Without it the wrap dips into every window reveal and runs through every
-        // open door, threading itself into the rooms behind; with it the shell
-        // stays on the outside of the building. It is also what makes the envelope
-        // watertight enough for a negative buffer to mean anything, since that
-        // asks which side of the shell a cell is on. Ask for a little more than
-        // the hole: the barrier has to exceed half of it, so 1.2 does not quite
-        // close a 1.2 m window and 1.6 does.
+    // 460 wide, down from 620, because the explanations moved to TOOLTIPS. The
+    // labels now name a setting instead of explaining it, so they fit in 330 and
+    // the sheet fits on a laptop screen — which the version that explained every
+    // setting in its own text did not.
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 382)];
+    // Label, value, and the explanation — which lives in a TOOLTIP rather than in
+    // the sheet. Every one of these settings needs a paragraph to use well and
+    // none of them needs it on screen at once: put them all in the sheet's own
+    // text and it grows past the height of the display, which it did. Hovering is
+    // the right place for "what does this one do", and the sheet is left saying
+    // only what pressing Run means.
+    struct { NSString *label; NSString *value; NSString *tip; } rows[] = {
+        {@"Voxel size (m)",
+         [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize],
+         @"How finely space is divided. Halving it costs eight times the work and "
+         @"eight times the memory; a large site at 5 cm takes minutes on this CPU "
+         @"reference."},
+        {@"Maximum range (m)",
+         [NSString stringWithFormat:@"%.1f", _visOptions.maxRange],
+         @"The instrument's rated range. Past it a return means little, so no setup "
+         @"establishes anything beyond this — neither surface nor empty space."},
+        {@"Tile size (voxels)",
+         [NSString stringWithFormat:@"%u", _visOptions.tileVoxels],
+         @"How much of the grid is carved at a time. A performance setting only: it "
+         @"cannot change the answer, and the default suits most machines."},
+        {@"Buffer / margin past the last return (m)",
+         [NSString stringWithFormat:@"%.1f", _visOptions.domainMargin],
+         @"How far past the measured surfaces the question still applies. The sign "
+         @"chooses the question.\n\nPOSITIVE: a skin that thick around every "
+         @"surface, which is what a survey looking outward wants — the shadow "
+         @"behind a wall is part of the answer.\n\nNEGATIVE: the region the survey "
+         @"encloses, pulled in by that much, so the boundary sits inside the outer "
+         @"face of the walls and nothing beyond them is in the answer. That is what "
+         @"a job conducted entirely indoors wants."},
         {@"Bridge openings in the shell up to (m wide)",
-                                [NSString stringWithFormat:@"%g", _visOptions.wrapSpanGaps]},
-        // The cap on voxels DRAWN, not on voxels found. Over it the frontier is
-        // sampled, which is the one setting whose effect looks like a bug: a
-        // large site at 5 cm has tens of millions of frontier voxels and six
-        // million of them scattered through a building reads as nothing at all.
+         [NSString stringWithFormat:@"%g", _visOptions.wrapSpanGaps],
+         @"Keeps the shrinkwrap on the outside of a building. There is no return in "
+         @"a window or an open door for the wrap to go round, so without this the "
+         @"shell dips into every reveal and threads itself into the rooms "
+         @"behind.\n\nAsk for a little more than the widest hole: 1.2 does not quite "
+         @"close a 1.2 m window, 1.6 does. It only means anything for a shell that "
+         @"encloses something — a lone wall with a hole has no inside — and a "
+         @"negative buffer needs it, since that asks which side of the shell a cell "
+         @"is on."},
         {@"Voxels drawn at most (millions)",
-                                [NSString stringWithFormat:@"%.0f",
-                                 double(_visOptions.displayCap) / 1048576.0]},
-        // The instrument's rated MINIMUM range. A surface closer than this returns
-        // nothing, and believing that empty cell clears a pencil of space straight
-        // through the surface — a setup parked half a metre from a wall otherwise
-        // carves a fan out through it to the maximum range. Here rather than
-        // buried because it is a property of the instrument the operator knows and
-        // the tool cannot read from the file.
+         [NSString stringWithFormat:@"%.0f", double(_visOptions.displayCap) / 1048576.0],
+         @"A cap on what is DRAWN, not on what is found. Over it the result is "
+         @"sampled — and a large site at 5 cm has tens of millions of voxels, six "
+         @"million of which scattered through a building read as nothing at all."},
         {@"Instrument minimum range (m, 0 to ignore)",
-                                [NSString stringWithFormat:@"%.2f", _visOptions.minRange]},
-        // How far the opening at a scan's own zenith has to reach before it is
-        // called sky and cleared. Measured from the pole outwards, and it only has
-        // to get there in ONE direction: a verandah cutting one side off at ten
-        // degrees does not disqualify the rest. Lower clears more of a roofless or
-        // open-sided scene; higher is conservative and leaves it unobserved.
-        // %g rather than a fixed width, here and below: these two exist to be tried
-        // against data, and a field that showed 22.5 as "23" would write 23 back the
-        // next time Run was pressed.
+         [NSString stringWithFormat:@"%.2f", _visOptions.minRange],
+         @"The instrument's rated MINIMUM. A surface closer than this returns "
+         @"nothing, and believing that empty cell clears a pencil of space straight "
+         @"through it: a setup parked half a metre from a wall otherwise carves a "
+         @"fan out through it to the maximum range."},
         {@"Sky opening at the zenith, at least (deg, 0 = never)",
-                                [NSString stringWithFormat:@"%g",
-                                 _visOptions.skyMinExtentDeg]},
-        // OFF, and shipped off: at 0.01, 0.25 and 1.0 on real scans this was
-        // either doing nothing or refusing to carve plainly visible space, and a
-        // test that cannot be moved off those two outcomes by its own parameter is
-        // not measuring what it claims to. E57 intensity is quantised, clipped,
-        // and scaled by range and incidence with no calibration to say which. Left
-        // on the sheet because the machinery is sound and a scan with trustworthy
-        // intensity can still use it; a quarter is what it ran at.
+         [NSString stringWithFormat:@"%g", _visOptions.skyMinExtentDeg],
+         @"What a gap at a scan's own zenith means. Reach this far from the zenith "
+         @"and it is open air and clears; fall short and it is a hole in whatever "
+         @"the instrument was under — a rooflight, a dark patch of ceiling — and it "
+         @"clears nothing.\n\nThe angle only has to be reached in ONE direction, so "
+         @"a branch across it or a verandah down one side does not disqualify it."},
         {@"Dark border share that stops a clear (0–1, 0 = off)",
-                                [NSString stringWithFormat:@"%g",
-                                 _visOptions.darkBorderFraction]},
+         [NSString stringWithFormat:@"%g", _visOptions.darkBorderFraction],
+         @"OFF, and shipped off. It stopped a clear where the returns around a gap "
+         @"were near the bottom of that scan's own intensity spread — but E57 "
+         @"intensity is quantised, clipped and scaled by range and incidence, and "
+         @"on real scans this either did nothing or refused to carve plainly "
+         @"visible space at every setting tried. Left here for a scan whose "
+         @"intensity is worth trusting: a quarter is what it ran at."},
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (int i = 0; i < 9; ++i) {
         const CGFloat y = 354 - i * 28;
-        [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 380, 20)]];
-        NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(390, y - 3, 90, 22)];
+        NSTextField *l = [self labelWithText:rows[i].label frame:NSMakeRect(0, y, 330, 20)];
+        l.toolTip = rows[i].tip;
+        [acc addSubview:l];
+        NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(340, y - 3, 90, 22)];
+        f.toolTip = rows[i].tip;
         [acc addSubview:f];
         [fields addObject:f];
     }
 
     // What region the question covers — the setting that changes the answer more
     // than any other, so it is a choice rather than a tick box.
-    [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 102, 60, 20)]];
+    NSTextField *regionLabel = [self labelWithText:@"Region" frame:NSMakeRect(0, 102, 60, 20)];
     NSPopUpButton *region =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 99, 556, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 99, 396, 24) pullsDown:NO];
     [region addItemsWithTitles:@[@"Shrinkwrap of the returns (tightest)",
                                  @"Box around the surveyed extent",
                                  @"Everything in range of a setup"]];
+    region.toolTip =
+        @"Which region the question is asked about — the setting that changes the "
+        @"answer more than any other.\n\nThe shrinkwrap is the space near what the "
+        @"scans actually returned, which is the tightest and the one that makes the "
+        @"unobserved FRACTION mean something. A box has corners nobody reached, and "
+        @"the range spheres reach tens of metres out through every wall, so an "
+        @"indoor job comes back mostly sky.";
+    regionLabel.toolTip = region.toolTip;
+    [acc addSubview:regionLabel];
     const vis::DomainMode regionOrder[3] = {vis::DomainMode::Shrinkwrap,
                                             vis::DomainMode::MeasuredExtent,
                                             vis::DomainMode::RangeSpheres};
@@ -1398,48 +1418,65 @@ const char *kindLabel(check::Kind k) {
         if (regionOrder[i] == _visOptions.domain) [region selectItemAtIndex:i];
     [acc addSubview:region];
 
-    // The policy, not a filter — so it is a tick box and it sits first. See
-    // rimg::Options::skyOnly: an empty cell is only evidence of empty space where
-    // the scan could name it as its own sky, and every other reason a cell is
-    // empty gets told apart by elimination, which is wrong in the direction that
-    // clears a pencil of space through a wall.
-    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 620, 20)];
-    skyOnly.title = @"Clear only where the scan saw its own sky — untick to let every "
-                    @"unexplained empty cell clear";
+    // The tick boxes: short titles, and the reasoning on hover. "Scanned entirely
+    // indoors" used to sit among them and is gone — it asked for the space outside
+    // the shell to be dropped, which a NEGATIVE buffer says better, as a distance
+    // rather than as a switch. The tick box could only say whether; the number
+    // says how far in to come.
+    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
+    skyOnly.title = @"Clear only where the scan saw its own sky";
+    skyOnly.toolTip =
+        @"An empty cell is only evidence of empty space where the scan could name it "
+        @"as its own sky.\n\nA no-return says a ray came back with nothing, and the "
+        @"reasons are the blind cone, a surface inside the minimum range, a surface "
+        @"too dark or too oblique to answer, a surface past the rated range, and open "
+        @"sky. Only the last is a ray that went out and found nothing there, and only "
+        @"it can be identified positively. Telling the rest apart by elimination gets "
+        @"them wrong in the direction that clears a pencil of space through a "
+        @"wall.\n\nThe cost: a surface past the rated range stops clearing too, so a "
+        @"far wall down a long corridor reads as unobserved. Untick it for a site "
+        @"whose far field matters.";
     [skyOnly setButtonType:NSButtonTypeSwitch];
     skyOnly.font = [NSFont systemFontOfSize:11];
     skyOnly.state = _visOptions.skyOnly ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:skyOnly];
 
-    // "Scanned entirely indoors" is gone. It asked for the space outside the shell
-    // to be dropped, which a NEGATIVE buffer says better: as a distance, in the
-    // units the rest of the sheet uses, and by moving the boundary inside the wall
-    // rather than leaving the domain hugging both of its faces. The tick box could
-    // only say whether; the number says how far.
-    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 620, 20)];
-    firstHit.title = @"Stop at the first evidence — faster, and visible and occupied "
-                     @"become lower bounds";
+    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 460, 20)];
+    firstHit.title = @"Stop at the first evidence";
+    firstHit.toolTip =
+        @"Much faster, and exact for the unobserved set — which is the set being "
+        @"reported. What it costs is the other two counts: `visible` and `occupied` "
+        @"become lower bounds rather than totals, because a voxel stops being asked "
+        @"about as soon as any setup has said anything about it.";
     [firstHit setButtonType:NSButtonTypeSwitch];
     firstHit.font = [NSFont systemFontOfSize:11];
     firstHit.state = (_visOptions.earlyOut == carve::EarlyOut::AnyEvidence)
                    ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:firstHit];
 
-    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 620, 20)];
-    solid.title = @"Show every unobserved voxel — untick to draw only the frontier, "
-                  @"where coverage stops";
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 460, 20)];
+    solid.title = @"Show every unobserved voxel";
+    solid.toolTip =
+        @"Untick to draw only the frontier — where coverage stops — which is far "
+        @"cheaper and looks the same from outside.\n\nExcept where a region's own "
+        @"boundary was never observed either: the blind cone under a lone setup then "
+        @"reads from beneath as a hole carved through the answer. Nothing is carved; "
+        @"the reduction is simply hiding a region it should not.";
     [solid setButtonType:NSButtonTypeSwitch];
     solid.font = [NSFont systemFontOfSize:11];
     solid.state = _visOptions.solid ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:solid];
 
-    // The intersection. A display filter over a finished carve rather than a
-    // parameter of it, but it belongs here: it only means anything when the region
-    // is the shrinkwrap, and it is the difference between seeing the site and
-    // seeing a solid red mass in front of it.
-    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 620, 20)];
-    insideWrap.title = @"Keep only unobserved voxels inside the shrinkwrap "
-                       @"(drops the blanket out to the range limit)";
+    // A display filter over a finished carve rather than a parameter of it, but it
+    // belongs here: it only means anything when the region is the shrinkwrap, and
+    // it is the difference between seeing the site and seeing a red mass in front
+    // of it.
+    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 460, 20)];
+    insideWrap.title = @"Keep only unobserved voxels inside the shrinkwrap";
+    insideWrap.toolTip =
+        @"Drops the blanket of unobserved space that otherwise wraps the site out to "
+        @"the range limit and hides everything within it. A filter on what is drawn, "
+        @"not on what was carved, so it changes no count.";
     [insideWrap setButtonType:NSButtonTypeSwitch];
     insideWrap.font = [NSFont systemFontOfSize:11];
     insideWrap.state = _intersectWrap ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1450,46 +1487,14 @@ const char *kindLabel(check::Kind k) {
 
     NSAlert *a = [[NSAlert alloc] init];
     a.messageText = @"Run visibility filter";
+    // Three sentences. Every setting below needs a paragraph to use well, and none
+    // of them needs it here: they are on the controls themselves, where hovering
+    // asks the question. Put them all in this string and the sheet grows taller
+    // than the display, which it did.
     a.informativeText =
         @"Marks every voxel some setup could see through or measured a surface in, and "
         @"reports the rest: space in range of a scanner that nothing observed.\n\n"
-        @"The shrinkwrap is the tightest region and the one that makes the fraction "
-        @"mean something: the space near what the scans actually returned, rather than a "
-        @"box with corners nobody reached.\n\n"
-        @"The buffer's SIGN chooses the question. Positive is a skin that thick around "
-        @"every measured surface — what a survey looking outward wants, where the shadow "
-        @"behind a wall is part of the answer. NEGATIVE is the region the survey "
-        @"encloses, pulled in by that much, so the boundary sits inside the outer face of "
-        @"the walls and nothing beyond them is in the answer at all. That is what a job "
-        @"conducted entirely indoors wants, and it is why there is no longer a tick box "
-        @"for it: the number says how far in to come, which a tick box could not.\n\n"
-        @"Bridging openings is what keeps the shell on the outside of a building. There "
-        @"is no return in a window or an open door for the wrap to go round, so without "
-        @"it the shell dips into every reveal and threads itself into the rooms behind. "
-        @"Give it a little more than the widest hole you want closed — 1.2 does not quite "
-        @"close a 1.2 m window, 1.6 does — and the shell crosses the opening instead of "
-        @"following it inward. It only means anything for a shell that encloses "
-        @"something: a lone wall with a hole in it has no inside. A negative buffer needs "
-        @"this, since it has to know which side of the shell a cell is on.\n\n"
-        @"The instrument minimum range matters more than it looks: a surface closer than "
-        @"that returns nothing, and an empty cell that is really a wall at arm's length "
-        @"would otherwise clear space straight through it, out to the maximum range.\n\n"
-        @"The sky opening decides what a gap at a scan's own zenith means. Reach that "
-        @"far from the zenith and it is open air and clears; fall short of it and the "
-        @"gap is a hole in whatever the instrument was under — a rooflight, a dark patch "
-        @"of ceiling — and it clears nothing. The angle only has to be reached in one "
-        @"direction, so a branch across it or a verandah down one side does not "
-        @"disqualify it.\n\n"
-        @"The dark border share is OFF. It stopped a clear where the returns around a "
-        @"gap were near the bottom of that scan's own intensity spread, but E57 "
-        @"intensity is quantised, clipped and scaled by range and incidence angle, and "
-        @"on real scans the setting either did nothing or refused to carve plainly "
-        @"visible space. Left here for a scan whose intensity is worth trusting: a "
-        @"quarter is what it ran at.\n\n"
-        @"Every unobserved voxel is drawn. Untick that below to draw only the frontier "
-        @"— where coverage stops — which is far cheaper and looks the same from outside, "
-        @"except where a region's own boundary was never observed either: the blind cone "
-        @"under a lone setup then reads from beneath as a hole.\n\n"
+        @"Hover any setting for what it does.\n\n"
         @"This is the CPU reference, so a large site at 5 cm takes minutes. "
         @"File ▸ Cancel stops it, and a coarser voxel is much faster: halving the "
         @"voxel size costs eight times the work.";
