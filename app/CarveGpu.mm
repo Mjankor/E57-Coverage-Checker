@@ -491,6 +491,19 @@ static NSString *g_unavailable = @"not initialised";
     const uint32_t dim  = core + 2 * p.apron;
     if (dim == 0 || dim > kMaxTileDim) return NO;
 
+    // THE MARCH IS NOT ON THE GPU YET, so it declines the tile and the CPU takes
+    // it — the same fallback every other failure here uses.
+    //
+    // Declining rather than approximating. This kernel is a gather: one thread per
+    // voxel, asking the raster about its own centre. A march inverts that — one
+    // thread per raster cell, walking a ray and OR-ing into whatever voxels it
+    // crosses — which needs a different dispatch shape, atomics on the state
+    // buffer, and the mapping's forward tables. It is a good fit for the hardware
+    // and it is the next piece of work; running the gather and calling it the march
+    // would just make the two methods indistinguishable in the one place the answer
+    // actually gets produced.
+    if (p.method == carve::Method::RayMarch) return NO;
+
     // Tile geometry, in double, exactly as the CPU computes it.
     const double T = p.tileMetres();
     double lo[3] = {double(key.x) * T, double(key.y) * T, double(key.z) * T};

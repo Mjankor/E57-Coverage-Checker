@@ -768,6 +768,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     // do that without the answer depending on where tile seams fall.
     p.apron      = opt.solid ? 0u : 1u;
     p.earlyOut   = opt.earlyOut;
+    p.method     = opt.method;
 
     // --- the domain -------------------------------------------------------
     // What the range spheres alone would cover, kept for comparison so the

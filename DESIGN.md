@@ -83,6 +83,24 @@ inter-thread contention, deterministic and bit-reproducible run to run — which
 matters because it makes validation against the CPU reference exact rather than
 statistical.
 
+**Half of that reasoning turned out to be wrong, and the half that was wrong is
+the half this section leans on.** See §4, *The carve is a scatter*. In short:
+
+- The aliasing objection is real but it is not an argument against marching, it is
+  a statement about ray spacing at long range — and it is answered by filling a
+  cell's *frustum* instead of walking its axis, which costs nothing at all inside
+  about sixteen metres because there the rays are closer together than a voxel.
+- The claim that a gather "paints the swept solid angle rather than a set of
+  infinitely thin lines" is **false as implemented**. Testing a voxel's CENTRE
+  against one raster cell paints one infinitely thin line per voxel, not a solid
+  angle, and it is the gather that then aliases: where a scan cannot explain a
+  third of its directions, a third of near voxels land on a cell that says nothing
+  and come back unobserved — 37% of a room, with hundreds of rays passing through
+  each of those voxels. The aliasing this section attributes to marching is what
+  the gather actually did.
+- The cost objection stands, and is why both formulations are kept rather than one
+  replacing the other.
+
 ---
 
 ## 3. Two phases
@@ -177,33 +195,73 @@ line fitted through each. The maximum deviation from that line is reported, so
 a scanner that is not a uniform raster shows up as a large residual rather than
 as quietly misplaced lookups.
 
-### A voxel is a volume, so it is asked about as one
+### The carve is a scatter: rays into voxels, not voxels into cells
 
-The per-voxel test (`carve::evidenceAt`) resolves a direction to a raster cell
-and compares the voxel's range with that cell's. One cell — and a voxel is much
-larger than a cell over most of the range that matters. At 5 cm against the
-~0.14° cells these instruments produce, a voxel subtends 2.86/*r* degrees: 445
-rays pass through it at 1 m, 111 at 2 m, 27 at 4 m, and it takes about 16 m
-before one ray is the whole story.
+The specification was "for each E57, identify which voxels are intersected by the
+scanner's rays to the points in the E57". That is a **scatter** — walk each
+measured ray from the setup to where it stopped and mark the voxels along it — and
+it is why the grid is voxels: a ray is guaranteed to intersect the voxels it
+passes through, so nothing has to line up with anything.
 
-That matters because of the resolution order above. Everything left over after
-the blind cone, the minimum range and the sky is demoted to `OUTSIDE_FOV`, which
-establishes nothing — and on a real indoor station that is a third of the raster.
-Asking about one direction per voxel therefore left a third of the air between a
-station and a wall sampled more densely than the voxel unobserved, at every
-range: measured at 29.6% on APAL__0005's raster geometry, with hundreds of
-measured rays passing through each of those voxels to that same wall.
+The carve was built as a **gather** instead: resolve each voxel's *centre* to a
+raster cell and compare ranges. That answers a different question — not "did a ray
+pass through this voxel" but "what does the one direction through its centre say" —
+and the two come apart wherever a voxel is bigger than a cell. At 5 cm against the
+~0.14° cells these instruments produce, a voxel subtends 2.86/*r* degrees: 445 rays
+cross it at 1 m, 111 at 2 m, 27 at 4 m, and it takes about 16 m before one ray is
+the whole story.
 
-So the test asks the other rays too, whenever the centre ray does not decide:
-seventeen rays over two rings of the voxel's own angular footprint, inside out,
-stopping at the first that decides. The footprint is the cone of the voxel's
-**inscribed** sphere, so every ray in it passes through the voxel itself. This
-widens nothing about what counts as evidence — each ray is one the instrument
-really fired — and it degrades in exactly the direction physics requires: a dead
-patch **wider** than the voxel's footprint still blocks, which is why the blind
-cone and a dark wall are unaffected, while scattered dead cells no longer punch a
-voxel-sized hole through observed space. Both properties are asserted in
-`tests/test_carve.cpp`.
+That was survivable while most cells held a measurement, and is not under the
+resolution order above: everything not explained by the blind cone, the minimum
+range or the sky is demoted to `OUTSIDE_FOV`, which establishes nothing, and on a
+real indoor station that is a third of the raster. A third of voxel centres landed
+on one of those cells and came back unobserved with hundreds of rays passing
+through them to a wall eight metres away.
+
+Three methods are kept, selectable per run (`carve::Method`), because they differ
+only in how many of the rays that crossed a voxel they consult:
+
+| | rays per voxel | unobserved | ms |
+|---|---|---|---|
+| `CentreRay` | 1 | **37.31%** | 482 |
+| `VoxelFootprint` | ≤17 over the voxel's own angular footprint | 0.51% | 605 |
+| `RayMarch` | every ray that crossed it | 0.45% | 4581 |
+
+Measured over an 8 m room on APAL__0005's raster geometry, a third of the
+directions demoted, a wall at 8 m, 4.1 M voxels at 5 cm, one thread.
+`CentreRay`'s figure is the dead-cell share, which is the diagnosis.
+
+Their answers **nest**, with zero inversions: every voxel one ray finds, seventeen
+find; every voxel seventeen find, the ray that actually passed through it finds.
+The march adds 31,807 voxels the footprint misses. That nesting is the check the
+march is worth trusting on — it shares almost no arithmetic with the gathers, so a
+wrong sign or a transposed rotation in its frame chain could not leave the sets
+ordered (`tests/test_carve.cpp`, `testTheMethodsAreNested`).
+
+Both fixes degrade the way physics requires: a dead patch **wider** than a voxel
+still blocks everything behind it, so the blind cone, a dark wall and a genuine
+no-return zone are untouched. The gather finds nothing on any of its seventeen
+rays; the march never fires a ray into that cone at all.
+
+Notes on the march:
+
+- It is a 3D DDA per ray, so every voxel the segment touches is visited exactly
+  once — no step size to choose and no way to skip a voxel between samples.
+- Reachability and the domain are settled in a pass before it, and the march
+  writes only to reachable voxels. That is what keeps a ray from writing outside
+  the question rather than a test at every step.
+- Past about 16 m adjacent rays diverge by more than a voxel, so a cell's
+  **frustum** is filled by sub-rays across it rather than its axis walked. Inside
+  16 m — the whole of an indoor scan — that is one ray per cell.
+- Its cost scales with the space the rays swept, not with the domain: at a rated
+  range well past the walls the gather pays for every voxel in the range sphere
+  while the march's ray work does not change.
+- `EarlyOut` means nothing to it. There is no per-voxel loop to stop, and the
+  result is a plain OR over setups, so it cannot depend on the order they run in.
+- It runs on the CPU only for now. The Metal carver is a gather — one thread per
+  voxel — and declines march tiles rather than answering a different question.
+  Inverting it is a good fit for the hardware (one thread per raster cell, atomics
+  into the grid) and is the next piece of work.
 
 ### Other construction details
 

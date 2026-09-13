@@ -143,7 +143,38 @@ enum class EarlyOut : uint8_t {
     AnyEvidence,
 };
 
+// How the carve decides what a setup saw. Two families, kept side by side so
+// they can be run against each other on real data.
+//
+// The question is always the same — which voxels did a measured ray pass
+// through — and the two answer it from opposite ends.
+enum class Method : uint8_t {
+    // GATHER, one ray per voxel. Resolve the voxel's CENTRE to a raster cell and
+    // compare ranges. One cell, and a voxel is bigger than a cell everywhere
+    // inside about sixteen metres, so this asks one of the hundreds of rays that
+    // crossed the voxel and throws the rest away. Where a scan leaves a third of
+    // its directions unexplained — which the only-sky policy does — a third of
+    // near voxels land on one and come back unobserved. Kept as the baseline and
+    // as the cheapest possible answer, not as a default.
+    CentreRay,
+    // GATHER, seventeen rays per voxel: the centre, then two rings over the
+    // voxel's own angular footprint, stopping at the first that decides. Fixes
+    // CentreRay's blind spot without changing its shape, and the footprint bounds
+    // the rays to ones that really crossed the voxel. An approximation in that it
+    // samples the footprint rather than covering it.
+    VoxelFootprint,
+    // SCATTER, and the method originally specified: walk each measured ray from
+    // the setup to where it stopped and mark the voxels it intersects. Nothing has
+    // to line up with anything — which is why the grid is voxels — and it visits
+    // the space the rays swept rather than every voxel in the range sphere.
+    RayMarch,
+};
+
 struct Params {
+    // Which of the two formulations to run. See Method: RayMarch is the specified
+    // one, the others are the gather it replaced and are kept for comparison.
+    Method method = Method::RayMarch;
+
     double voxelSize = 0.05;
     // Half a voxel diagonal. Keeps the voxel holding the measured surface out
     // of the visible set: without it the carve eats the very surfaces it is

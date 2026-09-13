@@ -108,7 +108,13 @@ struct Options {
     // See carve::EarlyOut. Saturated is exact; AnyEvidence is exact for the
     // unknown set only, which is the set being reported, and it is much faster —
     // so it is the default and `visible` and `occupied` are read as lower bounds.
+    // Means nothing under Method::RayMarch, which has no per-voxel loop to stop.
     carve::EarlyOut earlyOut = carve::EarlyOut::AnyEvidence;
+
+    // Which formulation of the carve to run — see carve::Method. RayMarch is the
+    // specified one and the default; the two gathers are kept so the three can be
+    // run against each other on real data.
+    carve::Method method = carve::Method{};
 
     // The tightest region, and the one that makes the fraction mean something.
     DomainMode domain = DomainMode::Shrinkwrap;

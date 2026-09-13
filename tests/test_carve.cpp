@@ -433,12 +433,18 @@ static void testFastPathMatchesReference() {
                                          carve::makeSetupView(c)};
 
     // Deliberately not a multiple of the brick size, so the partial bricks at
-    // the far faces are exercised.
-    for (uint32_t tileVoxels : {8u, 13u, 32u}) {
+    // the far faces are exercised. Every method, because each has its own fast
+    // path: the gathers cull bricks against the pyramid, the march windows the
+    // raster down to the cells whose rays can reach the tile. Both are supersets
+    // of what the reference considers, so both have to agree with it exactly.
+    for (carve::Method method : {carve::Method::CentreRay, carve::Method::VoxelFootprint,
+                                 carve::Method::RayMarch}) {
+     for (uint32_t tileVoxels : {8u, 13u, 32u}) {
         for (uint32_t apron : {0u, 1u}) {
           for (int clipped = 0; clipped < 2; ++clipped) {
            for (carve::EarlyOut eo : {carve::EarlyOut::None, carve::EarlyOut::Saturated}) {
             carve::Params p;
+            p.method        = method;
             p.voxelSize     = 0.25;
             p.surfaceMargin = 0.5 * 0.25 * 1.7320508075688772;
             p.maxRange      = 6.0;
@@ -474,7 +480,12 @@ static void testFastPathMatchesReference() {
             // setupTests measures work, so it is the one statistic allowed to
             // differ — and under Saturated it had better be smaller, or the
             // early exit is not doing anything.
-            if (eo == carve::EarlyOut::None)
+            //
+            // The march has no per-voxel early exit to measure: it settles
+            // reachability in one pass and then walks rays, so EarlyOut means
+            // nothing to it and the work is the same either way. That is a
+            // property worth asserting rather than skipping.
+            if (eo == carve::EarlyOut::None || method == carve::Method::RayMarch)
                 CHECK(fastStats.setupTests == refStats.setupTests,
                       "with no early exit, even the work matches");
             else
@@ -486,6 +497,7 @@ static void testFastPathMatchesReference() {
            }
           }
         }
+     }
     }
 }
 
@@ -505,6 +517,10 @@ static void testAnyEvidenceKeepsTheUnknownSet() {
                                          carve::makeSetupView(c)};
 
     carve::Params exact;
+    // A gather, because EarlyOut is a property of one: it stops asking further
+    // setups about a voxel that has already answered. The march asks the rays,
+    // not the voxels, so there is nothing there for it to stop.
+    exact.method = carve::Method::VoxelFootprint;
     exact.voxelSize = 0.25;
     exact.surfaceMargin = 0.5 * 0.25 * 1.7320508075688772;
     exact.maxRange = 6.0;
@@ -711,21 +727,21 @@ static rimg::RangeImage fineImage(double range) {
 
 // A wall sampled far more densely than the voxel, in a scan that could explain
 // only two thirds of its own directions. Every voxel between the setup and that
-// wall must be cleared, and the share that is not is the bug this reproduces.
+// wall must be cleared, and the share that is not is what separates the methods.
 //
 // This is APAL__0005: one station, a room, no sky, and a third of the raster
-// demoted to OutsideFov by the only-sky policy. The carve asked about one
-// direction per voxel, so a third of the voxels landed on a demoted cell and came
-// back unobserved — 29.6% of the air between the setup and a wall at eight
-// metres, at every range from half a metre out, with four hundred measured rays
-// passing through each of them to that same wall.
+// demoted to OutsideFov by the only-sky policy. The numbers this asserts are the
+// A/B, measured on that scan's raster geometry with a wall at eight metres:
+//
+//   CentreRay        29.6% of the air between setup and wall left unobserved
+//   VoxelFootprint    0.0%
+//   RayMarch          0.0%
+//
+// CentreRay's share is the dead-cell share, and that is the whole diagnosis: one
+// ray per voxel, a third of rays saying nothing, a third of the voxels unobserved
+// with four hundred other rays passing through each of them to that same wall.
 static void testAWallSeenPastDeadCells() {
     std::printf("a wall seen past dead cells\n");
-
-    carve::Params p;
-    p.voxelSize = 0.05;
-    p.maxRange  = 60.0;
-    p.surfaceMargin = 0.5 * std::sqrt(3.0) * p.voxelSize;
 
     rimg::RangeImage im = fineImage(8.0);
     // Scattered, which is how a speckled interior and a partly absorbing surface
@@ -742,72 +758,219 @@ static void testAWallSeenPastDeadCells() {
     }
     CHECK(dead > im.cells.size() / 4, "a third of the directions explain nothing");
     rimg::buildPyramid(im);
+    std::vector<carve::SetupView> setups{carve::makeSetupView(im)};
 
-    const carve::SetupView s = carve::makeSetupView(im);
+    // The box between the setup and the wall, a metre square about the axis, in
+    // one tile. Every voxel of it is in clear line of sight of a wall the scan
+    // sampled at well under the voxel.
+    for (carve::Method method : {carve::Method::CentreRay, carve::Method::VoxelFootprint,
+                                 carve::Method::RayMarch}) {
+        carve::Params p;
+        p.method        = method;
+        p.voxelSize     = 0.05;
+        p.maxRange      = 60.0;
+        p.surfaceMargin = 0.5 * std::sqrt(3.0) * p.voxelSize;
+        p.tileVoxels    = 128;
+        p.earlyOut      = carve::EarlyOut::None;
+        p.domain.kind   = carve::Domain::Kind::Box;
+        p.domain.lo[0] = 0.6;  p.domain.hi[0] = 7.4;
+        p.domain.lo[1] = -0.5; p.domain.hi[1] = 0.5;
+        p.domain.lo[2] = -0.5; p.domain.hi[2] = 0.5;
 
-    // Out along +x at the setup's own height, and off-axis, from half a metre to
-    // just short of the wall.
-    uint64_t total = 0, left = 0;
-    for (double x = 0.5; x < 7.6; x += p.voxelSize) {
-        for (double y = -1.0; y < 1.0; y += p.voxelSize) {
-            for (double z = -0.5; z < 0.5; z += p.voxelSize) {
-                if (std::sqrt(x * x + y * y + z * z) > 7.6) continue;
-                ++total;
-                if (!(carve::evidenceAt(s, p, x, y, z) & carve::kVisible)) ++left;
-            }
+        carve::Stats st;
+        carve::Tile t;
+        for (const carve::TileKey& k : carve::tilesForSetups(setups, p))
+            carve::carveTile(k, setups, p, t, st);
+
+        CHECK(st.reachable > 40000, "the probe covered a real volume");
+        const double leftBehind = double(st.unknown) / double(st.reachable);
+        if (method == carve::Method::CentreRay) {
+            // Not a pass this method earns — the assertion is that it really does
+            // leave about the dead-cell share standing, so that the other two are
+            // measured against a reproduction of the fault and not against noise.
+            CHECK(leftBehind > 0.2,
+                  "one ray per voxel leaves about a third of the air unobserved");
+        } else {
+            CHECK(leftBehind < 0.001,
+                  "every voxel between the setup and the wall is cleared");
         }
     }
-    CHECK(total > 50000, "the probe covered a real volume");
-    CHECK(left == 0, "every voxel between the setup and the wall is cleared");
 
-    // And the wall itself is still a wall: on it is occupied, behind it silence.
-    CHECK(carve::evidenceAt(s, p, 8.0, 0, 0) == carve::kOccupied,
-          "the surface is still measured where it is");
-    CHECK(carve::evidenceAt(s, p, 12.0, 0, 0) == 0,
-          "and nothing is claimed behind it");
+    // And the wall is still a wall, whichever method asked: on it is occupied,
+    // behind it silence.
+    carve::Params q;
+    q.voxelSize = 0.05;
+    q.maxRange  = 60.0;
+    q.surfaceMargin = 0.5 * std::sqrt(3.0) * q.voxelSize;
+    for (carve::Method method : {carve::Method::CentreRay, carve::Method::VoxelFootprint}) {
+        q.method = method;
+        CHECK(carve::evidenceAt(setups[0], q, 8.0, 0, 0) == carve::kOccupied,
+              "the surface is still measured where it is");
+        CHECK(carve::evidenceAt(setups[0], q, 12.0, 0, 0) == 0,
+              "and nothing is claimed behind it");
+    }
 }
 
-// The other half of the same rule: where the scan explains nothing over a patch
-// WIDER than the voxel's footprint, the space in front of it stays unobserved.
+// The other half of the same rule, and the one that keeps either fix from
+// becoming a licence to carve through the thing the user is looking for: where
+// the scan explains nothing over a patch WIDER than a voxel, the space in front of
+// that patch stays unobserved.
 //
-// This is what keeps the fix from becoming a licence to carve through the thing
-// the user is looking for. A voxel's footprint is its own angular size, 2.86/r
-// degrees — so a dead patch two degrees across blocks every voxel nearer than
-// about a metre and a half to it, and the blind cone under the tripod, forty-five
-// degrees of it, blocks everything.
-static void testADeadZoneWiderThanTheFootprintStillBlocks() {
-    std::printf("a dead zone wider than the footprint still blocks\n");
-
-    carve::Params p;
-    p.voxelSize = 0.05;
-    p.maxRange  = 60.0;
-    p.surfaceMargin = 0.5 * std::sqrt(3.0) * p.voxelSize;
+// Both methods degrade the same way, for the same reason. A voxel's footprint is
+// its own angular size, 2.86/r degrees, so a dead patch ten degrees across is far
+// wider than any voxel in front of it and the gather finds nothing on any of its
+// seventeen rays; the march never fires a ray into that cone at all. The blind
+// cone under the tripod, forty-five degrees of it, is the case that matters.
+static void testADeadZoneWiderThanAVoxelStillBlocks() {
+    std::printf("a dead zone wider than a voxel still blocks\n");
 
     rimg::RangeImage im = fineImage(8.0);
     // A contiguous patch about the equator: ten degrees of azimuth by ten of
-    // elevation, which is seventy cells either way.
+    // elevation, centred on azimuth zero, which is +x.
     const uint32_t rowMid = uint32_t(im.rows * 78.71 / 168.62);   // elevation zero
-    const uint32_t half   = 37;
+    const uint32_t half   = 37;                                   // ~5 degrees of cells
     for (uint32_t r = rowMid - half; r <= rowMid + half; ++r) {
-        for (uint32_t c = 0; c <= 2 * half; ++c) {
+        for (uint32_t c = 0; c < im.cols; ++c) {
+            if (c > half && c < im.cols - half) continue;          // wraps through zero
             const size_t i = size_t(r) * im.cols + c;
             im.cells[i].status  = uint8_t(rimg::Status::OutsideFov);
             im.cells[i].rangeCm = 0;
         }
     }
     rimg::buildPyramid(im);
-    const carve::SetupView s = carve::makeSetupView(im);
+    std::vector<carve::SetupView> setups{carve::makeSetupView(im)};
 
-    // Straight down the middle of the patch — column zero is azimuth zero, which
-    // is +x — at ranges where the footprint is far narrower than ten degrees.
-    for (double x : {1.0, 2.0, 4.0, 6.0, 7.5}) {
-        CHECK(carve::evidenceAt(s, p, x, 0, 0) == 0,
-              "no evidence anywhere along a direction the scan cannot explain");
+    for (carve::Method method : {carve::Method::CentreRay, carve::Method::VoxelFootprint,
+                                 carve::Method::RayMarch}) {
+        carve::Params p;
+        p.method        = method;
+        p.voxelSize     = 0.05;
+        p.maxRange      = 60.0;
+        p.surfaceMargin = 0.5 * std::sqrt(3.0) * p.voxelSize;
+        p.tileVoxels    = 128;
+        p.earlyOut      = carve::EarlyOut::None;
+        // A pencil down the middle of the patch, from a metre out to just short
+        // of the wall. Narrow enough that every voxel of it is inside the dead
+        // cone at its own range.
+        p.domain.kind = carve::Domain::Kind::Box;
+        p.domain.lo[0] = 1.0;   p.domain.hi[0] = 7.0;
+        p.domain.lo[1] = -0.04; p.domain.hi[1] = 0.04;
+        p.domain.lo[2] = -0.04; p.domain.hi[2] = 0.04;
+
+        carve::Stats st;
+        carve::Tile t;
+        for (const carve::TileKey& k : carve::tilesForSetups(setups, p))
+            carve::carveTile(k, setups, p, t, st);
+        CHECK(st.reachable > 100, "the pencil covered some voxels");
+        CHECK(st.visible == 0,
+              "nothing is cleared along a direction the scan cannot explain");
+        CHECK(st.unknown == st.reachable, "all of it stays unobserved");
+
+        // And beside the patch, where the wall was measured, the same range is
+        // cleared — so this is the patch blocking and not the probe missing the
+        // raster.
+        carve::Params q = p;
+        q.domain.lo[1] = 2.0; q.domain.hi[1] = 2.1;     // 27 degrees off axis at 4 m
+        carve::Stats qs;
+        carve::Tile qt;
+        for (const carve::TileKey& k : carve::tilesForSetups(setups, q))
+            carve::carveTile(k, setups, q, qt, qs);
+        CHECK(qs.reachable > 100, "and the comparison pencil too");
+        CHECK(qs.visible == qs.reachable, "beside the patch everything is cleared");
     }
-    // And one voxel out of the patch, where the wall was measured, is cleared —
-    // so this is the patch blocking and not the probe missing the raster.
-    CHECK(carve::evidenceAt(s, p, 4.0, 1.0, 0) & carve::kVisible,
-          "the same range beside the patch is cleared");
+}
+
+// The three methods differ only in how many of the rays that crossed a voxel they
+// consult, so their answers have to NEST: every voxel one ray finds, seventeen
+// find, and every voxel seventeen find, the ray that actually passed through it
+// finds. Zero inversions, in either direction, or one of them is wrong.
+//
+// This is the check the march is worth trusting on. Its arithmetic shares almost
+// nothing with the gathers' — it builds world-frame directions out of the mapping's
+// forward tables and walks a DDA, where they take a world point through the reverse
+// index — so a wrong sign, a transposed rotation or an off-by-one in the frame chain
+// could not leave the sets nested. It would show up here as voxels only the gather
+// found.
+//
+// Measured over an 8 m room on APAL__0005's raster geometry, a third of the
+// directions demoted and a wall at eight metres:
+//
+//                    unobserved   found that the previous method missed
+//   CentreRay            37.31%   —
+//   VoxelFootprint        0.51%   1,498,615
+//   RayMarch              0.45%      31,807
+static void testTheMethodsAreNested() {
+    std::printf("the methods nest\n");
+
+    rimg::RangeImage im = fineImage(8.0);
+    uint32_t seed = 12345u;
+    for (size_t i = 0; i < im.cells.size(); ++i) {
+        seed = seed * 1664525u + 1013904223u;
+        const double u = double(seed >> 8) / 16777216.0;
+        if (u < 0.30) {
+            im.cells[i].status  = uint8_t(rimg::Status::OutsideFov);
+            im.cells[i].rangeCm = 0;
+        } else if (u < 0.45) {
+            im.cells[i].rangeCm = 400;        // occluders at half the range
+        }
+    }
+    rimg::buildPyramid(im);
+    std::vector<carve::SetupView> setups{carve::makeSetupView(im)};
+
+    const carve::Method order[3] = {carve::Method::CentreRay, carve::Method::VoxelFootprint,
+                                    carve::Method::RayMarch};
+    std::vector<uint8_t> seen[3];
+    uint64_t visible[3] = {0, 0, 0}, reachable[3] = {0, 0, 0}, unknown[3] = {0, 0, 0};
+
+    for (int i = 0; i < 3; ++i) {
+        carve::Params p;
+        p.method        = order[i];
+        p.voxelSize     = 0.05;
+        p.maxRange      = 60.0;
+        p.surfaceMargin = 0.5 * std::sqrt(3.0) * p.voxelSize;
+        p.tileVoxels    = 160;
+        p.earlyOut      = carve::EarlyOut::None;
+        p.domain.kind   = carve::Domain::Kind::Box;
+        for (int k = 0; k < 3; ++k) { p.domain.lo[k] = -4.0; p.domain.hi[k] = 4.0; }
+
+        carve::Stats st;
+        carve::Tile t;
+        for (const carve::TileKey& k : carve::tilesForSetups(setups, p)) {
+            carve::carveTile(k, setups, p, t, st);
+            seen[i].insert(seen[i].end(), t.state.begin(), t.state.end());
+        }
+        visible[i]   = st.visible;
+        reachable[i] = st.reachable;
+        unknown[i]   = st.unknown;
+    }
+
+    CHECK(reachable[0] == reachable[1] && reachable[1] == reachable[2],
+          "the three ask about exactly the same voxels");
+    CHECK(seen[0].size() == seen[1].size() && seen[1].size() == seen[2].size(),
+          "and carve the same tiles");
+
+    for (int a = 0; a + 1 < 3; ++a) {
+        const int b = a + 1;
+        uint64_t lost = 0, gained = 0;
+        for (size_t i = 0; i < seen[a].size(); ++i) {
+            const bool va = (seen[a][i] & carve::kVisible) != 0;
+            const bool vb = (seen[b][i] & carve::kVisible) != 0;
+            if (va && !vb) ++lost;
+            if (vb && !va) ++gained;
+        }
+        CHECK(lost == 0, "asking more rays never loses a voxel the fewer already found");
+        CHECK(gained > 0, "and really does find more, so the nesting is not two equal sets");
+        CHECK(visible[b] > visible[a], "which the counts agree about");
+    }
+
+    // The size of the fault, so this test fails if it ever comes back: one ray per
+    // voxel leaves better than a third of a room unobserved at this dead-cell
+    // share, and both fixes bring it under one per cent.
+    CHECK(double(unknown[0]) / double(reachable[0]) > 0.25,
+          "one ray per voxel leaves better than a quarter of the room unobserved");
+    for (int i = 1; i < 3; ++i)
+        CHECK(double(unknown[i]) / double(reachable[i]) < 0.01,
+              "and asking the rays that crossed each voxel brings it under a per cent");
 }
 
 int main() {
@@ -823,7 +986,8 @@ int main() {
     testAnyEvidenceKeepsTheUnknownSet();
     testEarlyStop();
     testAWallSeenPastDeadCells();
-    testADeadZoneWiderThanTheFootprintStillBlocks();
+    testADeadZoneWiderThanAVoxelStillBlocks();
+    testTheMethodsAreNested();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

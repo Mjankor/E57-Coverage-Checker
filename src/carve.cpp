@@ -156,6 +156,8 @@ uint8_t evidenceAt(const SetupView& s, const Params& p,
     // from the voxel's INSCRIBED sphere, so a direction inside it passes within
     // half a voxel of the centre and therefore through the voxel itself; the
     // circumscribed sphere would admit rays that only clip a corner.
+    if (p.method != Method::VoxelFootprint) return 0;
+
     const double rho = 0.5 * p.voxelSize;
     if (!(rho < 0.5 * r)) return 0;     // a voxel as near as its own size: no cone
 
@@ -471,6 +473,480 @@ BrickVerdict judgeBrick(const SetupView& s, const Params& p,
 
 } // namespace
 
+namespace {
+
+constexpr double kTwoPi = 6.28318530717958648;
+
+// THE CARVE, AS ORIGINALLY SPECIFIED
+//
+// "For each E57, identify which voxels are intersected by the scanner's rays to
+// the points in the E57." A scatter: walk each measured ray from the setup to
+// where it stopped and mark the voxels it passes through. That is why the grid is
+// voxels and not samples — a ray is guaranteed to intersect the voxels along it,
+// and nothing has to line up with anything.
+//
+// The alternative, asking each voxel's CENTRE which cell it falls in, is a gather,
+// and it answers a different question: not "did a ray pass through this voxel" but
+// "what does the one direction through this voxel's centre say". Those come apart
+// wherever a voxel is larger than a raster cell, which is everywhere inside about
+// sixteen metres — a 5 cm voxel subtends 2.86/r degrees against cells of about
+// 0.14, so 445 rays pass through it at a metre and 111 at two. On APAL__0005,
+// where the only-sky policy leaves a third of the raster saying nothing at all, a
+// third of voxel centres landed on one of those cells and the voxel came back
+// unobserved with hundreds of rays passing through it to a wall eight metres away.
+// Measured: 29.6% of the air between the setup and that wall, at every range.
+//
+// The scatter has no such failure mode, and it is cheaper: it touches the space
+// the rays actually swept rather than every voxel in the range sphere, most of
+// which is behind a surface.
+
+// How far along one ray each kind of evidence extends.
+//
+// Exactly the bands verdictFor names, written as intervals instead of as a test
+// at a point, so the two cannot drift: visible over [0, visTo), occupied over
+// [occLo, occHi]. Empty intervals mean the ray establishes nothing.
+struct RayBands {
+    double visTo = 0;
+    double occLo = 0, occHi = -1;
+};
+
+RayBands bandsFor(rimg::Status st, double surface, const Params& p) {
+    RayBands b;
+    switch (st) {
+    case rimg::Status::OutsideFov:
+        // The scanner never looked here. Silence, not emptiness — this is the
+        // distinction DESIGN.md §4 turns on.
+        return b;
+    case rimg::Status::NoReturn:
+        // Fired and came back empty, so everything along it out to the clearing
+        // distance was seen through, and nothing on it was ever measured.
+        b.visTo = std::min(surface, p.maxRange);
+        return b;
+    case rimg::Status::Hit:
+        b.visTo = std::min(surface - p.surfaceMargin, p.maxRange);
+        b.occLo = surface - p.surfaceMargin;
+        b.occHi = std::min(surface + p.surfaceMargin, p.maxRange);
+        return b;
+    }
+    return b;
+}
+
+// Everything needed to turn a raster cell into a world-frame ray, hoisted out of
+// the per-ray loop.
+//
+// The chain is the inverse of the one evidenceAt walks — instrument frame out of
+// (az, el), off the instrument's own axis into the scanner's stored frame, then
+// the pose's rotation into the world — and all of it but the first step is two
+// fixed rotations, so they are composed into one matrix once per setup. The
+// sines and cosines of the mapping's own tables go the same way: a raster has
+// a few thousand rows and columns and millions of cells, so there are only a few
+// thousand distinct angles to take a cosine of.
+struct RayFrame {
+    double M[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};   // instrument direction -> world
+    std::vector<double> ce, se;                  // per row
+    std::vector<double> ca, sa;                  // per column
+};
+
+RayFrame makeRayFrame(const SetupView& s) {
+    RayFrame f;
+    const double* R = s.worldToScanner.R;      // world -> scanner; its transpose returns
+    const double* T = s.image->tilt;           // scanner -> instrument; likewise
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) {
+            double v = 0;
+            for (int k = 0; k < 3; ++k) v += R[3 * k + i] * T[3 * j + k];
+            f.M[3 * i + j] = v;
+        }
+    const rimg::Mapping& m = s.image->map;
+    f.ce.resize(m.elByRow.size());
+    f.se.resize(m.elByRow.size());
+    for (size_t i = 0; i < m.elByRow.size(); ++i) {
+        f.ce[i] = std::cos(m.elByRow[i]);
+        f.se[i] = std::sin(m.elByRow[i]);
+    }
+    f.ca.resize(m.azByCol.size());
+    f.sa.resize(m.azByCol.size());
+    for (size_t i = 0; i < m.azByCol.size(); ++i) {
+        f.ca[i] = std::cos(m.azByCol[i]);
+        f.sa[i] = std::sin(m.azByCol[i]);
+    }
+    return f;
+}
+
+// The world direction of an instrument-frame direction given by its own sines and
+// cosines.
+void rayDirection(const RayFrame& f, double ce, double se, double ca, double sa,
+                  double d[3]) {
+    const double v[3] = {ce * ca, ce * sa, se};
+    for (int i = 0; i < 3; ++i)
+        d[i] = f.M[3 * i + 0] * v[0] + f.M[3 * i + 1] * v[1] + f.M[3 * i + 2] * v[2];
+}
+
+// Clips the ray o + t*d to a tile's box, narrowing [ta, tb]. False when nothing
+// of the interval is inside.
+bool clipToTile(const double o[3], const double d[3], const Tile& t, double vs,
+                double& ta, double& tb) {
+    for (int k = 0; k < 3; ++k) {
+        const double lo = t.origin[k], hi = t.origin[k] + double(t.dim) * vs;
+        if (std::fabs(d[k]) < 1e-12) {
+            if (o[k] < lo || o[k] > hi) return false;   // parallel and outside
+            continue;
+        }
+        double t1 = (lo - o[k]) / d[k], t2 = (hi - o[k]) / d[k];
+        if (t1 > t2) std::swap(t1, t2);
+        ta = std::max(ta, t1);
+        tb = std::min(tb, t2);
+        if (tb < ta) return false;
+    }
+    return tb >= ta;
+}
+
+// Marks every voxel the ray passes through between ta and tb.
+//
+// A 3D DDA: from the voxel the ray enters, step to whichever of the three
+// neighbours the ray crosses into next. Every voxel the segment touches is
+// visited exactly once, which is the property the whole method rests on — no step
+// size to choose, and no way for a voxel to be skipped between samples.
+//
+// Only voxels already marked kReachable are written. That is not an optimisation:
+// reachability carries the domain and the rated range, both decided per voxel in
+// the pass before this one, so gating on it is what keeps a ray from writing
+// outside the question being asked.
+void marchSegment(const SetupView& s, const Params& p, Tile& out,
+                  const double d[3], double ta, double tb, uint8_t bits) {
+    if (!(tb > ta) || bits == 0) return;
+    const double vs = p.voxelSize;
+    if (!clipToTile(s.origin, d, out, vs, ta, tb)) return;
+
+    // Entry point, in the tile's own frame.
+    double e[3];
+    for (int k = 0; k < 3; ++k) e[k] = s.origin[k] - out.origin[k] + ta * d[k];
+
+    int64_t ix[3];
+    int64_t stp[3];
+    double  tMax[3], tDel[3];
+    for (int k = 0; k < 3; ++k) {
+        ix[k] = int64_t(std::floor(e[k] / vs));
+        // The clip put the entry point on the box, where rounding can put it a
+        // hair outside. Clamping is right rather than rejecting: the ray is
+        // demonstrably in the box over [ta, tb].
+        ix[k] = std::clamp<int64_t>(ix[k], 0, int64_t(out.dim) - 1);
+        if (std::fabs(d[k]) < 1e-12) {
+            stp[k] = 0;
+            tMax[k] = 1e300;
+            tDel[k] = 1e300;
+        } else {
+            stp[k] = d[k] > 0 ? 1 : -1;
+            const double bound = double(ix[k] + (d[k] > 0 ? 1 : 0)) * vs;
+            tMax[k] = ta + (bound - e[k]) / d[k];
+            tDel[k] = vs / std::fabs(d[k]);
+        }
+    }
+
+    // The flat index is carried rather than recomputed: a step moves it by one
+    // stride, which is what turns the inner loop into an add and a byte OR.
+    const int64_t stride[3] = {1, int64_t(out.dim), int64_t(out.dim) * out.dim};
+    int64_t idx = ix[0] * stride[0] + ix[1] * stride[1] + ix[2] * stride[2];
+    uint8_t* state = out.state.data();
+
+    // One visit per voxel along the segment, so the diagonal of the tile bounds
+    // the count; the slack covers the clamp above.
+    const int64_t cap = 3 * int64_t(out.dim) + 8;
+    for (int64_t n = 0; n < cap; ++n) {
+        if (state[idx] & kReachable) state[idx] |= bits;
+
+        int a = 0;
+        if (tMax[1] < tMax[a]) a = 1;
+        if (tMax[2] < tMax[a]) a = 2;
+        if (tMax[a] > tb) break;
+        ix[a] += stp[a];
+        if (ix[a] < 0 || ix[a] >= int64_t(out.dim)) break;
+        idx += stp[a] * stride[a];
+        tMax[a] += tDel[a];
+    }
+}
+
+// How many sub-rays across one raster cell, so that neighbouring rays cannot
+// leave a voxel between them unvisited.
+//
+// Adjacent rays diverge: at range t they are dEl*t and dAz*cos(el)*t apart. Inside
+// about sixteen metres that is less than a voxel and one ray per cell covers the
+// space between them; past it a gap opens, and the cell's own frustum has to be
+// filled rather than its axis walked. So the count is the cell's width at the far
+// end of the marched segment in voxels — 1 wherever the beam is finer than the
+// grid, which is the whole of an indoor scan.
+//
+// Capped because the count is a cost: eight sub-rays an axis is a cell eight
+// voxels wide, which at 5 cm and 0.14 degree cells is 165 m, past any instrument
+// this reads. Past the cap the far field thins out, which is honest — the scan
+// really did not sample it.
+constexpr int kMaxSubRays = 8;
+
+int subRaysFor(double cellAngle, double tFar, double voxelSize) {
+    if (!(cellAngle > 0) || !(tFar > 0)) return 1;
+    const int n = int(std::ceil(cellAngle * tFar / voxelSize));
+    return std::clamp(n, 1, kMaxSubRays);
+}
+
+// A contiguous run of raster rows or columns.
+struct Run { uint32_t lo, hi; };   // inclusive
+
+// Which rows and columns hold rays that could cross the tile.
+//
+// The tile's bounding sphere, seen from the setup, is a cone; the rows and columns
+// whose measured angle lies inside it are found by scanning the mapping's own
+// tables. Scanning rather than inverting, because these tables are neither uniform
+// nor confined to one turn (see rimg::Mapping) and a superset costs only a clipped
+// ray, while a subset loses one.
+//
+// Columns come back as runs because a sweep past a full turn looks at some bearings
+// twice, so the accepted set is up to two stretches of the table rather than one.
+struct CellWindow {
+    std::vector<Run> rows, cols;
+    bool any = false;
+};
+
+CellWindow windowForTile(const SetupView& s, const Params& p, const Tile& t) {
+    CellWindow w;
+    const rimg::RangeImage& im = *s.image;
+    const rimg::Mapping& m = im.map;
+    const size_t nr = m.elByRow.size(), nc = m.azByCol.size();
+    if (nr == 0 || nc == 0 || im.rows == 0 || im.cols == 0) return w;
+
+    const double vs = p.voxelSize;
+    // Centre and bounding-sphere radius of the tile, in the instrument's frame.
+    double c[3];
+    for (int k = 0; k < 3; ++k) c[k] = t.origin[k] + 0.5 * double(t.dim) * vs;
+    const double rho = 0.5 * std::sqrt(3.0) * double(t.dim) * vs;
+    s.worldToScanner.apply(c[0], c[1], c[2]);
+    im.toInstrument(c[0], c[1], c[2]);
+    const double dist = std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]);
+
+    // One cell of slack on the cone, because a sub-ray sits up to half a cell off
+    // its cell's nominal direction and the tables are not uniform.
+    const double elStep = nr > 1 ? std::fabs(m.elByRow[nr - 1] - m.elByRow[0]) / double(nr - 1) : 0;
+    const double azStep = nc > 1 ? std::fabs(m.azByCol[nc - 1] - m.azByCol[0]) / double(nc - 1) : 0;
+    const double slack  = std::max(elStep, azStep);
+
+    w.any = true;
+    // The setup inside or on the tile: every direction is possible, and the cone
+    // arithmetic has nothing to say.
+    if (dist <= rho + 1e-9) {
+        w.rows.push_back({0, im.rows - 1});
+        w.cols.push_back({0, im.cols - 1});
+        return w;
+    }
+
+    const double alpha = std::asin(std::clamp(rho / dist, -1.0, 1.0)) + slack;
+    const double elC   = std::asin(std::clamp(c[2] / dist, -1.0, 1.0));
+    const double elLo = elC - alpha, elHi = elC + alpha;
+
+    auto runsWhere = [](const std::vector<double>& table, uint32_t count,
+                        auto&& keep, std::vector<Run>& into) {
+        const uint32_t n = uint32_t(std::min<size_t>(table.size(), count));
+        bool open = false;
+        Run cur{0, 0};
+        for (uint32_t i = 0; i < n; ++i) {
+            if (keep(table[i])) {
+                if (!open) { cur.lo = i; open = true; }
+                cur.hi = i;
+            } else if (open) {
+                into.push_back(cur);
+                open = false;
+            }
+        }
+        if (open) into.push_back(cur);
+    };
+
+    runsWhere(m.elByRow, im.rows,
+              [&](double v) { return v >= elLo && v <= elHi; }, w.rows);
+    if (w.rows.empty()) { w.any = false; return w; }
+
+    // On a small circle at elevation e, an angular radius alpha spans an azimuth
+    // half-width of asin(sin alpha / cos e); at the pole it spans everything.
+    constexpr double kHalfPi = 1.5707963267948966;
+    const double elAbs = std::max(std::fabs(elLo), std::fabs(elHi));
+    const double denom = std::cos(std::min(elAbs, kHalfPi));
+    const double sinHalf = denom > 1e-9 ? std::sin(alpha) / denom : 2.0;
+    if (!(sinHalf < 1.0) || elLo <= -kHalfPi || elHi >= kHalfPi) {
+        w.cols.push_back({0, im.cols - 1});
+        return w;
+    }
+    const double azC = std::atan2(c[1], c[0]);
+    const double azHalf = std::asin(sinHalf);
+    runsWhere(m.azByCol, im.cols, [&](double v) {
+        double dd = v - azC;
+        dd -= kTwoPi * std::floor(dd / kTwoPi + 0.5);   // to [-pi, pi)
+        return std::fabs(dd) <= azHalf;
+    }, w.cols);
+    if (w.cols.empty()) w.any = false;
+    return w;
+}
+
+// The angle a fractional row or column sits at. Fractional because a cell wider
+// than a voxel at the far end of a ray is filled by sub-rays across it, and those
+// sit between the table's entries.
+double angleAt(const std::vector<double>& table, double idx) {
+    if (table.empty()) return 0;
+    const double top = double(table.size() - 1);
+    const double v = std::clamp(idx, 0.0, top);
+    const size_t i = size_t(v);
+    if (i + 1 >= table.size()) return table.back();
+    const double f = v - double(i);
+    return table[i] * (1.0 - f) + table[i + 1] * f;
+}
+
+// One raster cell's whole contribution to one tile: the rays it fired, marched
+// through the voxels they crossed.
+void marchCell(const SetupView& s, const RayFrame& f, const Params& p, Tile& out,
+               uint32_t row, uint32_t col) {
+    const rimg::RangeImage& im = *s.image;
+    const RayBands b = bandsFor(im.statusAt(row, col), im.rangeAt(row, col), p);
+    const double far = std::max(b.visTo, b.occHi);
+    if (!(far > 0)) return;                       // the cell establishes nothing
+
+    const rimg::Mapping& m = im.map;
+    const size_t nr = m.elByRow.size(), nc = m.azByCol.size();
+    if (row >= nr || col >= nc) return;
+
+    // The cell's angular size, from its own neighbours in the tables.
+    const double dEl = nr > 1 ? std::fabs(row + 1 < nr ? m.elByRow[row + 1] - m.elByRow[row]
+                                                       : m.elByRow[row] - m.elByRow[row - 1]) : 0;
+    const double dAz = nc > 1 ? std::fabs(col + 1 < nc ? m.azByCol[col + 1] - m.azByCol[col]
+                                                       : m.azByCol[col] - m.azByCol[col - 1]) : 0;
+    const int nEl = subRaysFor(dEl, far, p.voxelSize);
+    const int nAz = subRaysFor(dAz * std::max(f.ce[row], 1e-6), far, p.voxelSize);
+
+    // The common case by a wide margin: the cell is finer than the grid at this
+    // range, so its axis is the only ray it has, and its trigonometry is already
+    // on the table.
+    if (nEl == 1 && nAz == 1) {
+        double d[3];
+        rayDirection(f, f.ce[row], f.se[row], f.ca[col], f.sa[col], d);
+        marchSegment(s, p, out, d, 0.0, b.visTo, kVisible);
+        marchSegment(s, p, out, d, b.occLo, b.occHi, kOccupied);
+        return;
+    }
+
+    for (int i = 0; i < nEl; ++i) {
+        const double fr = double(row) + (double(i) + 0.5) / double(nEl) - 0.5;
+        const double el = angleAt(m.elByRow, fr);
+        for (int j = 0; j < nAz; ++j) {
+            const double fc = double(col) + (double(j) + 0.5) / double(nAz) - 0.5;
+            const double az = angleAt(m.azByCol, fc);
+            double d[3];
+            rayDirection(f, std::cos(el), std::sin(el), std::cos(az), std::sin(az), d);
+            marchSegment(s, p, out, d, 0.0, b.visTo, kVisible);
+            marchSegment(s, p, out, d, b.occLo, b.occHi, kOccupied);
+        }
+    }
+}
+
+// Reachability, and with it the domain: which voxels of this tile are part of the
+// question at all.
+//
+// Separate from the march because it is a property of where a voxel is, not of
+// what any ray did — and because the march needs it to already be decided: it
+// writes only to reachable voxels, so the domain and the rated range are enforced
+// once, here, rather than at every step of every ray.
+void markReachable(const std::vector<size_t>& reach, const std::vector<SetupView>& setups,
+                   const Params& p, Tile& out, Stats& stats) {
+    const double R2 = p.maxRange * p.maxRange;
+    const uint32_t dim = out.dim;
+    const uint32_t B = kBrickVoxels;
+    const uint32_t nb = (dim + B - 1) / B;
+
+    for (uint32_t bz = 0; bz < nb; ++bz) {
+        for (uint32_t by = 0; by < nb; ++by) {
+            for (uint32_t bx = 0; bx < nb; ++bx) {
+                const uint32_t x0 = bx * B, x1 = std::min(x0 + B, dim);
+                const uint32_t y0 = by * B, y1 = std::min(y0 + B, dim);
+                const uint32_t z0 = bz * B, z1 = std::min(z0 + B, dim);
+                const double blo[3] = {out.origin[0] + x0 * p.voxelSize,
+                                       out.origin[1] + y0 * p.voxelSize,
+                                       out.origin[2] + z0 * p.voxelSize};
+                const double bhi[3] = {out.origin[0] + x1 * p.voxelSize,
+                                       out.origin[1] + y1 * p.voxelSize,
+                                       out.origin[2] + z1 * p.voxelSize};
+                // Out of the domain is out of the question: not unknown, not
+                // counted, not carved.
+                const Overlap ov = p.domain.testBox(blo, bhi);
+                if (ov == Overlap::None) continue;
+                const bool allInDomain = (ov == Overlap::Full);
+
+                for (size_t si : reach) {
+                    const SetupView& s = setups[si];
+                    if (distSqPointBox(s.origin, blo, bhi) > R2) continue;
+                    double far = 0;
+                    for (int k = 0; k < 3; ++k) {
+                        const double a = std::fabs(blo[k] - s.origin[k]);
+                        const double bb = std::fabs(bhi[k] - s.origin[k]);
+                        const double mx = std::max(a, bb);
+                        far += mx * mx;
+                    }
+                    const bool allInRange = far <= R2;
+                    for (uint32_t z = z0; z < z1; ++z) {
+                        for (uint32_t y = y0; y < y1; ++y) {
+                            for (uint32_t x = x0; x < x1; ++x) {
+                                if (!allInDomain || !allInRange) {
+                                    double c[3];
+                                    out.centre(x, y, z, p.voxelSize, c);
+                                    if (!allInDomain &&
+                                        !p.domain.contains(c[0], c[1], c[2])) continue;
+                                    const double dx = c[0] - s.origin[0];
+                                    const double dy = c[1] - s.origin[1];
+                                    const double dz = c[2] - s.origin[2];
+                                    if (dx * dx + dy * dy + dz * dz > R2) continue;
+                                }
+                                out.state[out.index(x, y, z)] |= uint8_t(kReachable);
+                                if (out.isInterior(x, y, z)) ++stats.setupTests;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// The scatter, over one tile.
+//
+// Reachability first, so the domain and the rated range are settled per voxel;
+// then, per setup, the rays whose directions could cross this tile, each marched
+// through the voxels it intersects. `whole` asks every cell of the raster instead
+// of the windowed subset — the window is a superset of the cells that can reach
+// the tile, so the two give the same answer, and the expensive one is the oracle
+// that says so.
+void marchTile(const std::vector<size_t>& reach, const std::vector<SetupView>& setups,
+               const Params& p, Tile& out, Stats& stats, bool whole) {
+    markReachable(reach, setups, p, out, stats);
+
+    for (size_t si : reach) {
+        const SetupView& s = setups[si];
+        if (!s.image || !s.image->map.valid) continue;
+        const rimg::RangeImage& im = *s.image;
+        if (im.map.elByRow.size() < im.rows || im.map.azByCol.size() < im.cols) continue;
+        const RayFrame f = makeRayFrame(s);
+
+        if (whole) {
+            for (uint32_t r = 0; r < im.rows; ++r)
+                for (uint32_t c = 0; c < im.cols; ++c)
+                    marchCell(s, f, p, out, r, c);
+            continue;
+        }
+
+        const CellWindow w = windowForTile(s, p, out);
+        if (!w.any) continue;
+        for (const Run& rr : w.rows)
+            for (uint32_t r = rr.lo; r <= rr.hi; ++r)
+                for (const Run& cr : w.cols)
+                    for (uint32_t c = cr.lo; c <= cr.hi; ++c)
+                        marchCell(s, f, p, out, r, c);
+    }
+}
+
+} // namespace
+
 // The fast path. Same arithmetic as the reference, reordered for the machine:
 // one setup at a time so a single range image is resident, and within that in
 // bricks, so the patch of image a brick projects onto stays in cache while all
@@ -480,6 +956,12 @@ void carveTile(const TileKey& key, const std::vector<SetupView>& setups,
     const std::vector<size_t> reach = prepareTile(key, setups, p, out);
     const uint32_t dim = out.dim;
     if (dim == 0) return;
+
+    if (p.method == Method::RayMarch) {
+        marchTile(reach, setups, p, out, stats, /*whole=*/false);
+        tallyTile(out, stats);
+        return;
+    }
 
     const double R2 = p.maxRange * p.maxRange;
     const uint32_t B  = kBrickVoxels;
@@ -622,6 +1104,14 @@ void carveTileReference(const TileKey& key, const std::vector<SetupView>& setups
     const std::vector<size_t> reach = prepareTile(key, setups, p, out);
     const uint32_t dim = out.dim;
     if (dim == 0) return;
+
+    if (p.method == Method::RayMarch) {
+        // Every cell of every reaching setup, with no window and no culling.
+        marchTile(reach, setups, p, out, stats, /*whole=*/true);
+        tallyTile(out, stats);
+        return;
+    }
+
     const double R2 = p.maxRange * p.maxRange;
 
     for (uint32_t z = 0; z < dim; ++z) {

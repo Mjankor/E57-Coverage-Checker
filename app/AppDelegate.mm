@@ -1315,7 +1315,7 @@ const char *kindLabel(check::Kind k) {
     // labels now name a setting instead of explaining it, so they fit in 330 and
     // the sheet fits on a laptop screen — which the version that explained every
     // setting in its own text did not.
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 382)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 410)];
     // Label, value, and the explanation — which lives in a TOOLTIP rather than in
     // the sheet. Every one of these settings needs a paragraph to use well and
     // none of them needs it on screen at once: put them all in the sheet's own
@@ -1385,7 +1385,7 @@ const char *kindLabel(check::Kind k) {
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (int i = 0; i < 9; ++i) {
-        const CGFloat y = 354 - i * 28;
+        const CGFloat y = 382 - i * 28;
         NSTextField *l = [self labelWithText:rows[i].label frame:NSMakeRect(0, y, 330, 20)];
         l.toolTip = rows[i].tip;
         [acc addSubview:l];
@@ -1394,6 +1394,38 @@ const char *kindLabel(check::Kind k) {
         [acc addSubview:f];
         [fields addObject:f];
     }
+
+    // WHICH FORMULATION OF THE CARVE. Here rather than buried, because the three
+    // give different answers on the same data and the difference is the point.
+    NSTextField *methodLabel = [self labelWithText:@"Method" frame:NSMakeRect(0, 130, 60, 20)];
+    NSPopUpButton *method =
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 127, 396, 24) pullsDown:NO];
+    [method addItemsWithTitles:@[@"March each scanner ray through the voxels it crosses",
+                                 @"Sample the voxel's own footprint (17 rays)",
+                                 @"One ray per voxel, through its centre (baseline)"]];
+    method.toolTip =
+        @"How the carve decides what a setup saw.\n\nMarching the rays is the "
+        @"specified method: walk each measured ray from the setup to where it stopped "
+        @"and mark the voxels it passes through. Nothing has to line up with anything, "
+        @"which is why the grid is voxels.\n\nThe other two ask each voxel's CENTRE "
+        @"which raster cell it falls in, which is a different question wherever a voxel "
+        @"is bigger than a cell — everywhere inside about sixteen metres, where "
+        @"hundreds of rays cross a 5 cm voxel. One ray per voxel is the baseline and it "
+        @"leaves about the unexplained-direction share of near space unobserved: a "
+        @"third of it on a station where the only-sky policy demotes a third of the "
+        @"raster. Seventeen rays over the voxel's footprint fixes that far more cheaply "
+        @"than marching, and agrees with the march to about a per cent.\n\nMarching runs "
+        @"on the CPU only for now — the Metal carver is a gather and declines those "
+        @"tiles rather than answering a different question — so it is slower than the "
+        @"other two in the app by more than the figures above suggest.";
+    methodLabel.toolTip = method.toolTip;
+    [acc addSubview:methodLabel];
+    const carve::Method methodOrder[3] = {carve::Method::RayMarch,
+                                          carve::Method::VoxelFootprint,
+                                          carve::Method::CentreRay};
+    for (int i = 0; i < 3; ++i)
+        if (methodOrder[i] == _visOptions.method) [method selectItemAtIndex:i];
+    [acc addSubview:method];
 
     // What region the question covers — the setting that changes the answer more
     // than any other, so it is a choice rather than a tick box.
@@ -1566,6 +1598,7 @@ const char *kindLabel(check::Kind k) {
     _intersectWrap   = (insideWrap.state == NSControlStateValueOn);
     const BOOL intersectWrap = _intersectWrap;
     opt.solid        = (solid.state == NSControlStateValueOn);
+    opt.method       = methodOrder[std::clamp<NSInteger>(method.indexOfSelectedItem, 0, 2)];
     opt.earlyOut     = (firstHit.state == NSControlStateValueOn)
                      ? carve::EarlyOut::AnyEvidence : carve::EarlyOut::Saturated;
     // The carver is a "try": every failure it can have comes back as a declined
