@@ -111,13 +111,25 @@ void spreadThrough(Grid& g, uint8_t mark, uint8_t blocked) {
 
     // Seeded from every run already marked, so the caller marks the seeds and this
     // carries them as far as they reach.
+    //
+    // The seed runs are EXTENDED along x as they are found, not merely pushed. A
+    // run of already-marked cells cannot be grown by `fill`, which refuses a cell
+    // that carries the mark — so pushing it as it stands leaves the only way out
+    // of it through a neighbouring line in y or z. A region reachable from its
+    // seed only along x is then never marked at all: a corridor a cell wide in the
+    // other two axes, and, less obviously, any region whose seed happens to sit in
+    // a line that its walls close off.
     for (uint32_t z = 0; z < Z; ++z)
         for (uint32_t y = 0; y < Y; ++y)
             for (uint32_t x = 0; x < X; ++x)
                 if (g.inDomain[g.index(x, y, z)] & mark) {
-                    uint32_t x1 = x;
-                    while (x1 + 1 < X && (g.inDomain[g.index(x1 + 1, y, z)] & mark)) ++x1;
-                    stack.push_back({z, y, x, x1});
+                    uint32_t x0 = x, x1 = x;
+                    while (x1 + 1 < X &&
+                           ((g.inDomain[g.index(x1 + 1, y, z)] & mark) ||
+                            open(x1 + 1, y, z))) ++x1;
+                    while (x0 > 0 && open(x0 - 1, y, z)) --x0;
+                    for (uint32_t i = x0; i <= x1; ++i) g.inDomain[g.index(i, y, z)] |= mark;
+                    stack.push_back({z, y, x0, x1});
                     x = x1;
                 }
 
@@ -132,8 +144,6 @@ void spreadThrough(Grid& g, uint8_t mark, uint8_t blocked) {
             for (uint32_t x = s.x0; x <= s.x1; ++x)
                 fill(x, uint32_t(ny), uint32_t(nz));
         }
-        // The run itself may reach further along x than the seed run did.
-        for (uint32_t x = s.x0; x <= s.x1; ++x) fill(x, s.y, s.z);
     }
 }
 
@@ -643,6 +653,18 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
             // FAILING IS NOT AN OUTCOME. Every surface is covered by one rule or
             // the other, so the worst case is a region asked about too generously
             // rather than a site with no question at all.
+            // WHICH REGIONS ARE ENCLOSED, and which of them are deep enough.
+            //
+            // Note what this CANNOT see, because it decides whether the negative
+            // buffer does anything at all. An indoor survey stops where the job
+            // stops: mid corridor, at the edge of the area of interest, with no
+            // wall across the end because there is no wall there. The flood from
+            // the grid's boundary pours in through every one of those open ends,
+            // and a site with no closed end anywhere has no enclosed region, no
+            // core, and every surface falling back to the skin — which is the
+            // negative buffer quietly doing nothing. `enclosedRegions` and
+            // `coredRegions` are reported so that case is visible as a number
+            // rather than as a picture that looks like the positive answer.
             const std::vector<double> dOut = distanceTo(grid, kOutside);
             for (size_t i = 0; i < grid.inDomain.size(); ++i)
                 if (!(grid.inDomain[i] & kOutside) && dOut[i] > bufSq)
@@ -650,6 +672,29 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
             // Which enclosed regions those cores belong to: everything reachable
             // from a core without crossing the outside.
             spreadThrough(grid, kKeptIn, kOutside);
+
+            // How much of the site was enclosed at all, against how much of that
+            // was deep enough to pull into. Two numbers rather than one because
+            // they fail differently: no enclosed space at all is an open-ended
+            // survey, and enclosed space with no core is a site whose rooms are
+            // thinner than the buffer asked for.
+            for (size_t i = 0; i < grid.inDomain.size(); ++i) {
+                const uint8_t b = grid.inDomain[i];
+                if (!(b & (kOutside | kOccupied))) ++grid.enclosedCells;
+                if (b & kKeptIn) ++grid.keptInCells;
+            }
+            for (size_t i = 0; i + 2 < setupsXYZ.size(); i += 3) {
+                int64_t c[3];
+                bool inGrid = true;
+                for (int k = 0; k < 3; ++k) {
+                    c[k] = int64_t(std::floor(setupsXYZ[i + size_t(k)] / grid.cell)) - grid.lo[k];
+                    if (c[k] < 0 || c[k] >= int64_t(grid.dim[k])) { inGrid = false; break; }
+                }
+                if (!inGrid) continue;
+                ++grid.setupsSeen;
+                if (grid.inDomain[grid.index(uint32_t(c[0]), uint32_t(c[1]),
+                                             uint32_t(c[2]))] & kKeptIn) ++grid.setupsPulledIn;
+            }
 
             for (size_t i = 0; i < grid.inDomain.size(); ++i) {
                 const uint8_t b = grid.inDomain[i];

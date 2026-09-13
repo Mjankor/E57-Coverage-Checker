@@ -699,11 +699,90 @@ static void testEachEnclosedRegionIsJudgedOnItsOwn() {
 
     // Nothing is asked about outside the site at all.
     CHECK(!g.contains(17.0, 7.0, 1.5), "open ground is not the question");
+
+    // And the numbers that say which way each part was decided, since a picture
+    // of a pull-in that did nothing looks exactly like the positive answer.
+    CHECK(g.setupsSeen == 2, "both setups were on the grid");
+    CHECK(g.setupsPulledIn == 1, "one of them stood in a region the pull-in kept");
+    CHECK(g.enclosedCells > 0 && g.keptInCells > 0, "and there was enclosed space to keep");
+}
+
+// A SURVEY WITH NO CLOSED END, which is the ordinary indoor job: it stops mid
+// corridor, at the edge of the area of interest, with no wall across the end
+// because there is no wall there. The flood from the boundary pours in, nothing
+// is enclosed, and the negative buffer has nothing to pull into.
+//
+// It must not fail. Every surface keeps the ordinary skin, and the counters say
+// plainly that this is what happened, so a run that looks like the positive
+// answer can be read as one rather than guessed at.
+static void testAnOpenEndedSurveyFallsBackAndSaysSo() {
+    std::printf("a survey with no closed end falls back to the skin, and says so\n");
+
+    const double lo[3] = {-1, -1, 0}, hi[3] = {9, 4, 3};
+    wrap::Options opt;
+    opt.buffer   = -0.5;
+    opt.cell     = 0.1;
+    opt.spanGaps = 1.6;
+    wrap::Grid g;
+    std::string err;
+    CHECK(wrap::size(lo, hi, opt, g, err), err.empty() ? "sized" : err.c_str());
+
+    // A corridor: two walls, a floor and a ceiling, and both ends wide open.
+    for (uint32_t z = 0; z < g.dim[2]; ++z)
+        for (uint32_t y = 0; y < g.dim[1]; ++y)
+            for (uint32_t x = 0; x < g.dim[0]; ++x) {
+                double c[3];
+                g.cellCentre(x, y, z, c);
+                if (c[0] < -0.05 || c[0] > 8.05 || c[1] < -0.05 || c[1] > 3.05 ||
+                    c[2] < -0.05 || c[2] > 3.05) continue;
+                if (c[1] < 0.1 || c[1] > 2.9 || c[2] < 0.1 || c[2] > 2.9)
+                    g.inDomain[g.index(x, y, z)] |= 1u;
+            }
+    const std::vector<double> setups = {4.0, 1.5, 1.5};
+    wrap::build(opt, g, setups);
+
+    CHECK(g.pulledInCells == 0,
+          "a ball narrower than the corridor rolls down it, so nothing is pulled in");
+    CHECK(g.setupsPulledIn == 0, "and the setup is not inside a kept region");
+    CHECK(g.skinnedSurfaces > 0, "every surface fell back to the skin");
+    CHECK(g.domainCells > 0, "which is an answer, where an empty domain would not be");
+    CHECK(g.contains(4.0, 0.3, 1.5), "the space against a wall is in the question");
+    CHECK(!g.contains(4.0, 1.5, 1.5), "the middle of the corridor is a buffer's width away");
+
+    // AND THE SAME CORRIDOR WITH A BALL TOO FAT TO ROLL DOWN IT.
+    //
+    // This is the whole of the fix for a complex interior, and it is a dial rather
+    // than a different method. The bridge is the diameter of the ball the outside
+    // rolls in on: below the width of the way in, it rolls down the corridor and
+    // there is no interior; above it, the corridor is interior and the boundary
+    // comes in from the walls. The corridor here is 2.8 m wide.
+    wrap::Options wide = opt;
+    wide.spanGaps = 3.0;                       // a 1.5 m ball, too fat for 2.8 m
+    wrap::Grid w;
+    CHECK(wrap::size(lo, hi, wide, w, err), err.empty() ? "sized" : err.c_str());
+    for (uint32_t z = 0; z < w.dim[2]; ++z)
+        for (uint32_t y = 0; y < w.dim[1]; ++y)
+            for (uint32_t x = 0; x < w.dim[0]; ++x) {
+                double c[3];
+                w.cellCentre(x, y, z, c);
+                if (c[0] < -0.05 || c[0] > 8.05 || c[1] < -0.05 || c[1] > 3.05 ||
+                    c[2] < -0.05 || c[2] > 3.05) continue;
+                if (c[1] < 0.1 || c[1] > 2.9 || c[2] < 0.1 || c[2] > 2.9)
+                    w.inDomain[w.index(x, y, z)] |= 1u;
+            }
+    wrap::build(wide, w, setups);
+
+    CHECK(w.pulledInCells > 0, "the outside cannot roll in, so the corridor is interior");
+    CHECK(w.setupsPulledIn == 1, "and the instrument is standing in it");
+    CHECK(w.contains(4.0, 1.5, 1.5), "the corridor's air is the question");
+    CHECK(!w.contains(4.0, 0.05, 1.5), "the wall and its surface are not");
+    CHECK(!w.contains(4.0, -0.8, 1.5), "and nothing beyond it is");
 }
 
 int main() {
     std::printf("E57 Coverage Checker — shrinkwrap tests\n\n");
     testEachEnclosedRegionIsJudgedOnItsOwn();
+    testAnOpenEndedSurveyFallsBackAndSaysSo();
     testTheShellBridgesAnOpeningAndStaysOutside();
     testDilationIsExactlyEuclidean();
     testOutsideTheGridIsOutsideTheQuestion();

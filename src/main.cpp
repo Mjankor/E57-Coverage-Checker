@@ -185,6 +185,17 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
                         (unsigned long long)g.skinnedSurfaces,
                         g.sealLeaked ? " —\n            one shell was one the flood got into"
                                      : "");
+        if (g.pulledIn)
+            std::printf("            %llu of %llu setups ended up inside a region the pull-in "
+                        "kept;\n            %llu cells were enclosed at all and %llu of those "
+                        "were deep enough%s\n",
+                        (unsigned long long)g.setupsPulledIn, (unsigned long long)g.setupsSeen,
+                        (unsigned long long)g.enclosedCells, (unsigned long long)g.keptInCells,
+                        g.pulledInCells == 0
+                            ? "\n            *** NOTHING WAS PULLED IN: the outside rolled into "
+                              "the building. The opening\n            the shell may bridge is "
+                              "narrower than the way in — widen it past the\n            widest "
+                              "corridor end or room opening and this works ***" : "");
         else if (g.interiorOnly && !g.sealLeaked)
             std::printf("            %llu cells dropped as outside the surveyed shell\n",
                         (unsigned long long)g.droppedOutside);

@@ -227,6 +227,21 @@ struct Grid {
     // asked about too generously is the worst case, never no question at all.
     uint64_t pulledInCells = 0;
     uint64_t skinnedSurfaces = 0;
+    // What the assessment had to work with, which is what says WHY a negative
+    // buffer did little.
+    //
+    // `setupsPulledIn` against `setupsSeen` is the one to read: how many
+    // instruments ended up standing in a region the pull-in kept. None of them,
+    // and the outside rolled into the building — the opening the shell may bridge
+    // is narrower than the way in. Measured on an open-ended 2.8 m corridor: at a
+    // 1.6 m bridge nothing is pulled in and the setup is outside its own corridor;
+    // at 3.0 m, where the ball no longer fits down it, 30,870 cells are kept and
+    // the setup is inside. The other two are supporting detail — space the flood
+    // could not reach, and how much of it was deep enough to keep.
+    uint64_t enclosedCells = 0;
+    uint64_t keptInCells = 0;
+    uint64_t setupsSeen = 0;
+    uint64_t setupsPulledIn = 0;
     bool     coarsened = false;    // the cell size grew to fit the budget
     bool     interiorOnly = false; // which rule was applied
     double   buffer = 0.0;

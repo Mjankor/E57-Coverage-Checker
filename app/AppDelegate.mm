@@ -1347,14 +1347,15 @@ const char *kindLabel(check::Kind k) {
          @"a job conducted entirely indoors wants."},
         {@"Bridge openings in the shell up to (m wide)",
          [NSString stringWithFormat:@"%g", _visOptions.wrapSpanGaps],
-         @"Keeps the shrinkwrap on the outside of a building. There is no return in "
-         @"a window or an open door for the wrap to go round, so without this the "
-         @"shell dips into every reveal and threads itself into the rooms "
-         @"behind.\n\nAsk for a little more than the widest hole: 1.2 does not quite "
-         @"close a 1.2 m window, 1.6 does. It only means anything for a shell that "
-         @"encloses something — a lone wall with a hole has no inside — and a "
-         @"negative buffer needs it, since that asks which side of the shell a cell "
-         @"is on."},
+         @"The diameter of the ball the outside rolls in on. Anything narrower than "
+         @"this is not a way in, so the shell crosses it: a window, a doorway, a "
+         @"stretch of wall nobody reached.\n\nOUTDOORS, two metres is plenty — it "
+         @"bridges the openings and leaves genuine gaps alone.\n\nINSIDE A COMPLEX "
+         @"BUILDING it has to exceed the widest way in, or the outside rolls down a "
+         @"corridor and there is no interior left to pull into. Measured on an open-"
+         @"ended 2.8 m corridor: nothing at a 1.6 m bridge, the whole corridor at "
+         @"3.0. Start at 3-4 m indoors and watch the setups-inside count in the "
+         @"status line."},
         {@"Voxels drawn at most (millions)",
          [NSString stringWithFormat:@"%.0f", double(_visOptions.displayCap) / 1048576.0],
          @"A cap on what is DRAWN, not on what is found. Over it the result is "
@@ -1708,6 +1709,16 @@ const char *kindLabel(check::Kind k) {
                     result->wrapGrid.sealLeaked
                         ? " — one of them was a shell the flood got into, so widen the opening "
                           "the shell may bridge if it should have held" : ""];
+        if (result->domain.kind == carve::Domain::Kind::Wrap && result->wrapGrid.pulledIn)
+            warn = [warn stringByAppendingFormat:
+                    result->wrapGrid.pulledInCells == 0
+                        ? @"   ·   ⚠︎ NOTHING WAS PULLED IN (%llu of %llu setups inside a kept "
+                           "region): the outside rolled into the building, because the opening "
+                           "the shell may bridge is narrower than the way in. Widen it past the "
+                           "widest corridor end or room opening."
+                        : @"   ·   %llu of %llu setups ended up inside a region the pull-in kept",
+                    (unsigned long long)result->wrapGrid.setupsPulledIn,
+                    (unsigned long long)result->wrapGrid.setupsSeen];
         else if (result->domain.kind == carve::Domain::Kind::Wrap &&
                  result->wrapGrid.interiorOnly && !result->wrapGrid.sealLeaked)
             warn = [warn stringByAppendingFormat:
