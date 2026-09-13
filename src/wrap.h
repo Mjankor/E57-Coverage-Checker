@@ -98,6 +98,16 @@ struct Options {
     //   hand. It needs the flood that finds the outside, so it implies
     //   interiorOnly and does not need it set.
     //
+    //   THE SIGN CHOOSES WHAT IS REPORTED, NOT WHAT IS CARVED. Both halves — the
+    //   skin and the interiors — go into the carve's question, so the same voxels
+    //   are asked about and get the same verdicts whichever way the buffer points;
+    //   measured, and asserted, voxel for voxel. Only then does the sign pick which
+    //   half the answer is reported over. They used to be one thing, and two runs
+    //   of one corpus came back with different volumes, different fractions and
+    //   pictures that looked nothing alike, with not one verdict different between
+    //   them and nothing to say so. See Grid::containsReported, and DESIGN.md
+    //   section 6, which is the same separation: carve first, separate afterwards.
+    //
     //   DECIDED ONE ENCLOSED REGION AT A TIME. A site is not one building: it is a
     //   building, a boundary wall with nothing behind it, a canopy, and a shed
     //   whose door stood open while the survey ran. A region deep enough for the
@@ -194,11 +204,12 @@ struct Grid {
     // Whether each cell is in the domain. Built by build(); one byte a cell
     // rather than a bit, because the flood needs a third state while it runs and
     // a byte costs 6 MB on a site where the range images cost 44 GB.
-    std::vector<uint8_t> inDomain;
+    std::vector<uint16_t> inDomain;
 
     // What it cost and what it decided, for the report.
     uint64_t occupiedCells = 0;    // cells holding at least one return
-    uint64_t domainCells   = 0;    // cells inside the wrap
+    uint64_t domainCells   = 0;    // cells the carve is asked about: the union
+    uint64_t reportedCells = 0;    // cells the answer is about: the subset
     uint64_t droppedOutside = 0;   // cells the interior-only rule removed
     // The flood came in through a hole in the survey and reached a cell an
     // instrument was standing in. Nothing that happened inside a building is
@@ -257,13 +268,23 @@ struct Grid {
     uint64_t cellCount() const {
         return uint64_t(dim[0]) * dim[1] * dim[2];
     }
-    // The volume the wrap covers, in cubic metres.
+    // The volume the wrap covers, in cubic metres: what was asked about, and what
+    // the answer is about.
     double volume() const { return double(domainCells) * cell * cell * cell; }
+    double reportedVolume() const { return double(reportedCells) * cell * cell * cell; }
 
     // Is this world position inside the wrap? Outside the grid is outside the
     // wrap: the grid is padded past everything the survey reached, so a position
     // beyond it is beyond the question too.
     bool contains(double wx, double wy, double wz) const;
+
+    // Is this position in the part of the answer that is REPORTED? The carve is
+    // asked about the union of both questions — see Options::buffer — so that the
+    // sign cannot change a verdict; this is the subset the sign chooses. Pulled
+    // in, it is the interiors plus the skin on surfaces that bound none of them;
+    // grown out, it is the skin.
+    bool containsReported(double wx, double wy, double wz) const;
+    bool cellReported(int64_t x, int64_t y, int64_t z) const;
 
     // How much of an axis-aligned box lies inside. 0 none, 1 some, 2 all — the
     // three answers carve::Domain::testBox needs, in the order carve::Overlap

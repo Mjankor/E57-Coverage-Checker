@@ -180,6 +180,12 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
         if (g.spanGaps > 0.0)
             std::printf("            openings up to %.2f m bridged, %llu cells added to the "
                         "envelope\n", g.spanGaps, (unsigned long long)g.bridgedCells);
+        if (g.reportedCells && g.reportedCells != g.domainCells)
+            std::printf("            the carve was asked about all %llu cells; the answer is "
+                        "reported over\n            the %llu the buffer's sign chooses — %.0f m^3 "
+                        "of %.0f\n",
+                        (unsigned long long)g.domainCells, (unsigned long long)g.reportedCells,
+                        g.reportedVolume(), g.volume());
         if (g.pulledIn)
             std::printf("            pulled in %.2f m: %llu cells inside the shells deep enough "
                         "for it,\n            and %llu surfaces bounding none of them kept the "

@@ -460,9 +460,12 @@ uint64_t keepVoxelsInsideWrap(Result& r) {
         const lod::StorePoint& p = r.voxels[i];
         // Back to world, which is the frame the wrap is indexed in. The voxels are
         // stored against r.origin; Grid::contains does the rest.
-        if (!g.contains(double(p.x) + r.origin[0],
-                        double(p.y) + r.origin[1],
-                        double(p.z) + r.origin[2])) continue;
+        // The REPORTED subset, not the carve's question. The carve was asked about
+        // the union of both questions so the buffer's sign could not change a
+        // verdict; this is where the sign has its say — see wrap::Options::buffer.
+        if (!g.containsReported(double(p.x) + r.origin[0],
+                                double(p.y) + r.origin[1],
+                                double(p.z) + r.origin[2])) continue;
         keptV.push_back(p);
         if (haveFaces) keptF.push_back(r.voxelFaces[i]);
     }
@@ -928,6 +931,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                     p.domain.kind     = carve::Domain::Kind::Wrap;
                     p.domain.wrapGrid = &out.wrapGrid;
                     out.domainVolume  = out.wrapGrid.volume();
+                    out.reportedVolume = out.wrapGrid.reportedVolume();
                 }
             }
         }

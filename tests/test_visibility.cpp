@@ -1538,12 +1538,17 @@ static void testANegativeMarginAsksAboutLess() {
         // The point of it. The room runs x in [-5,5], y in [-4,4], z in [0,3], so
         // the domain holds the air inside it and stops short of the walls, and
         // nothing beyond them is in the question at all.
-        CHECK(rneg.wrapGrid.contains(0.0, 2.0, 1.5), "the air inside the room is in it");
-        CHECK(!rneg.wrapGrid.contains(4.8, 2.0, 1.5),
+        CHECK(rneg.wrapGrid.containsReported(0.0, 2.0, 1.5),
+              "the air inside the room is what the answer is about");
+        CHECK(!rneg.wrapGrid.containsReported(4.8, 2.0, 1.5),
               "the last half metre before the wall is not");
-        CHECK(!rneg.wrapGrid.contains(7.0, 2.0, 1.5), "and neither is anything outside");
-        CHECK(rpos.wrapGrid.contains(5.2, 2.0, 1.5),
-              "where the positive question keeps a skin on the outer face");
+        CHECK(!rneg.wrapGrid.containsReported(7.0, 2.0, 1.5),
+              "and neither is anything outside");
+        CHECK(rpos.wrapGrid.containsReported(5.2, 2.0, 1.5),
+              "where the positive question reports a skin on the outer face");
+        // The CARVE, though, was asked about both halves either way.
+        CHECK(rneg.wrapGrid.contains(5.2, 2.0, 1.5),
+              "the skin is in the carve's question even when it is not reported");
 
         // Deeper in leaves less. The magnitude is a distance and has to behave
         // like one, rather than switching a mode on.
@@ -1552,8 +1557,8 @@ static void testANegativeMarginAsksAboutLess() {
         vis::Result rdeep;
         CHECK(vis::run({path}, deeper, nullptr, rdeep, err), "ran");
         CHECK(!rdeep.wrapGrid.sealLeaked, "the shell held there too");
-        CHECK(rdeep.wrapGrid.domainCells < rneg.wrapGrid.domainCells,
-              "pulling in further leaves a smaller region");
+        CHECK(rdeep.wrapGrid.reportedCells < rneg.wrapGrid.reportedCells,
+              "pulling in further reports a smaller region");
     }
 }
 
@@ -1659,10 +1664,17 @@ static void testTheMarginsSignChangesTheQuestionNotTheAnswer() {
         // for the same reason and not because anything was carved differently —
         // the skin's unobserved voxels are behind the walls where nobody looks,
         // and the pull-in's are in the middle of the room where everybody does.
-        const double posPct = 100.0 * double(rpos.stats.unknown) / double(rpos.stats.reachable);
-        const double negPct = 100.0 * double(rneg.stats.unknown) / double(rneg.stats.reachable);
-        CHECK(posPct > negPct + 10.0,
-              "the skin reports a far higher unobserved share than the pull-in");
+        // AND NOW THE CARVE IS THE SAME CARVE. The union is the same region
+        // whichever way the buffer points, so the two runs ask about the same
+        // voxels and get the same answers — to the voxel, not to within a
+        // tolerance. What the sign chooses is which part of it is reported.
+        CHECK(rpos.stats.reachable == rneg.stats.reachable,
+              "both signs ask about exactly the same voxels");
+        CHECK(rpos.stats.unknown == rneg.stats.unknown, "and get the same unobserved set");
+        CHECK(rpos.stats.visible == rneg.stats.visible, "the same visible set");
+        CHECK(unPos == unNeg, "voxel for voxel, the same answer");
+        CHECK(rpos.wrapGrid.reportedVolume() != rneg.wrapGrid.reportedVolume(),
+              "while reporting over different regions");
     }
 }
 

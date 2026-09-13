@@ -151,13 +151,13 @@ static void testOutsideTheGridIsOutsideTheQuestion() {
     wrap::markScan(sourceFor(pl), g);
     wrap::build(opt, g);
 
-    CHECK(g.contains(0, 0, 0), "the marked cell is in");
-    CHECK(!g.contains(500, 0, 0), "a position far outside the grid is out");
-    CHECK(!g.contains(0, -500, 0), "in every direction");
+    CHECK(g.containsReported(0, 0, 0), "the marked cell is in");
+    CHECK(!g.containsReported(500, 0, 0), "a position far outside the grid is out");
+    CHECK(!g.containsReported(0, -500, 0), "in every direction");
     // The grid is padded past the buffer, so its own boundary is genuinely
     // outside — which is what lets the interior flood start there.
     const double edge = (double(g.lo[0]) + 0.5) * g.cell;
-    CHECK(!g.contains(edge, 0, 0), "and the grid's own edge cell is not in the wrap");
+    CHECK(!g.containsReported(edge, 0, 0), "and the grid's own edge cell is not in the wrap");
 }
 
 static void testBoxAgreesWithContains() {
@@ -252,30 +252,30 @@ static void testInteriorOnlyDropsTheOutside() {
     wrap::build(inside, gIn);
 
     CHECK(gBoth.occupiedCells == gIn.occupiedCells, "both wrapped the same returns");
-    CHECK(gIn.domainCells < gBoth.domainCells, "the interior rule removed something");
+    CHECK(gIn.reportedCells < gBoth.reportedCells, "the interior rule removed something");
     CHECK(gIn.droppedOutside > 0, "and says how much");
     CHECK(!gIn.sealLeaked, "and the shell held");
 
     // Just outside the wall: in the question for an outward survey, out of it for
     // an interior one. That is the whole of the switch.
     const double justOut = half + 0.6;
-    CHECK(gBoth.contains(0, 0, justOut), "outward: the space past the wall is asked about");
-    CHECK(!gIn.contains(0, 0, justOut), "interior: it is not");
+    CHECK(gBoth.containsReported(0, 0, justOut), "outward: the space past the wall is asked about");
+    CHECK(!gIn.containsReported(0, 0, justOut), "interior: it is not");
     // Just inside: in the question either way.
     const double justIn = half - 0.6;
-    CHECK(gBoth.contains(0, 0, justIn), "outward: the space inside the wall is asked about");
-    CHECK(gIn.contains(0, 0, justIn), "interior: so is it");
+    CHECK(gBoth.containsReported(0, 0, justIn), "outward: the space inside the wall is asked about");
+    CHECK(gIn.containsReported(0, 0, justIn), "interior: so is it");
     // The sealed pocket, which is what separates this from simply clipping to a
     // box: it is enclosed by observed surface, so it survives the flood even
     // though the flood surrounds it on every side.
-    CHECK(gIn.contains(0, 0, ph - 0.6), "the sealed pocket's own inside is kept");
-    CHECK(gBoth.contains(0, 0, ph - 0.6), "as it is for an outward survey");
+    CHECK(gIn.containsReported(0, 0, ph - 0.6), "the sealed pocket's own inside is kept");
+    CHECK(gBoth.containsReported(0, 0, ph - 0.6), "as it is for an outward survey");
     // Its middle is not, and for a reason that has nothing to do with the flood:
     // it is further from any measured surface than the buffer reaches. That is
     // the wrap's real limit, and it is the same limit in both modes — unobserved
     // space is only asked about near something that was seen.
-    CHECK(!gBoth.contains(0, 0, 0), "the pocket's middle is beyond the buffer");
-    CHECK(!gIn.contains(0, 0, 0), "in either mode");
+    CHECK(!gBoth.containsReported(0, 0, 0), "the pocket's middle is beyond the buffer");
+    CHECK(!gIn.containsReported(0, 0, 0), "in either mode");
 
     // Nothing the interior rule keeps was outside the outward wrap: narrowing
     // removes questions, it does not invent them.
@@ -286,7 +286,7 @@ static void testInteriorOnlyDropsTheOutside() {
                 const double c[3] = {(double(int64_t(x) + gIn.lo[0]) + 0.5) * gIn.cell,
                                      (double(int64_t(y) + gIn.lo[1]) + 0.5) * gIn.cell,
                                      (double(int64_t(z) + gIn.lo[2]) + 0.5) * gIn.cell};
-                if (gIn.contains(c[0], c[1], c[2]) && !gBoth.contains(c[0], c[1], c[2]))
+                if (gIn.containsReported(c[0], c[1], c[2]) && !gBoth.containsReported(c[0], c[1], c[2]))
                     ++invented;
             }
     CHECK(invented == 0, "the interior wrap is a subset of the outward one");
@@ -341,7 +341,7 @@ static void testASealedDoorwayAndNoSkinOutside() {
     CHECK(sealed.droppedOutside > 0, "and the outside was dropped");
     // Just inside the far wall — in the question, and it is the flood reaching
     // here that the seal prevents.
-    CHECK(sealed.contains(0, 0, -half + 0.6), "the space inside the wall is in the question");
+    CHECK(sealed.containsReported(0, 0, -half + 0.6), "the space inside the wall is in the question");
 
     // No skin outside. Every cell beyond the wall, right up against it, has to be
     // out — that band is the whole failure mode, and it is only a cell or two
@@ -349,7 +349,7 @@ static void testASealedDoorwayAndNoSkinOutside() {
     uint64_t skin = 0;
     for (double d = 0.05; d < 0.95; d += 0.05)
         for (double a = -3.0; a <= 3.0; a += 0.5)
-            if (sealed.contains(-half - d, a, 0.0)) ++skin;   // the face without a doorway
+            if (sealed.containsReported(-half - d, a, 0.0)) ++skin;   // the face without a doorway
     CHECK(skin == 0, "and not one cell of skin survives outside the wall");
 
     // Turn the seal off and the same survey leaks, which is what the seal is for.
@@ -361,7 +361,7 @@ static void testASealedDoorwayAndNoSkinOutside() {
     wrap::build(unsealed, leaky, setups);
     CHECK(leaky.sealLeaked, "without a seal the doorway lets the outside in");
     CHECK(leaky.droppedOutside == 0, "and nothing is dropped when it does");
-    CHECK(leaky.domainCells > sealed.domainCells,
+    CHECK(leaky.reportedCells > sealed.reportedCells,
           "so the answer is the generous one, not the deleted one");
 }
 
@@ -420,7 +420,7 @@ static void testTheSealIsAThresholdNotADial() {
         const wrap::Grid g = wrapAt(seal, true);
         CHECK(g.sealLeaked, "a seal narrower than the hole leaks");
         CHECK(g.droppedOutside == 0, "and drops nothing when it does");
-        CHECK(g.domainCells == outward.domainCells,
+        CHECK(g.reportedCells == outward.reportedCells,
               "leaving exactly the outward answer, not a smaller one");
     }
     // Wide enough, and every wider seal agrees with it to the cell. The seal is
@@ -428,11 +428,11 @@ static void testTheSealIsAThresholdNotADial() {
     const wrap::Grid first = wrapAt(1.0, true);
     CHECK(!first.sealLeaked, "a seal as wide as the hole closes it");
     CHECK(first.droppedOutside > 0, "and the outside is dropped");
-    CHECK(first.domainCells < outward.domainCells, "so the domain is smaller than the outward one");
+    CHECK(first.reportedCells < outward.reportedCells, "so the domain is smaller than the outward one");
     for (double seal : {1.5, 2.0, 3.0}) {
         const wrap::Grid g = wrapAt(seal, true);
         CHECK(!g.sealLeaked, "a wider seal still closes it");
-        CHECK(g.domainCells == first.domainCells,
+        CHECK(g.reportedCells == first.reportedCells,
               "and gives the same answer to the cell — the seal is a threshold");
         CHECK(g.droppedOutside == first.droppedOutside, "dropping exactly as much");
     }
@@ -490,7 +490,7 @@ static void testMarkingIsTheSameFromAnyNumberOfThreads() {
         wrap::build(opt, many);
         CHECK(many.occupiedCells == one.occupiedCells,
               "the same cells hold returns however many threads marked them");
-        CHECK(many.domainCells == one.domainCells, "so the same domain comes out");
+        CHECK(many.reportedCells == one.reportedCells, "so the same domain comes out");
         CHECK(many.inDomain == one.inDomain, "byte for byte");
     }
 }
@@ -537,10 +537,10 @@ static void testNoReturnsMeansNoWrap() {
     CHECK(wrap::size(lo, hi, opt, g, err), "sized");
     wrap::build(opt, g);              // nothing marked
     CHECK(g.occupiedCells == 0, "nothing was marked");
-    CHECK(g.domainCells == 0, "so nothing is in the question");
+    CHECK(g.reportedCells == 0, "so nothing is in the question");
     // The caller falls back to the box; a wrap that quietly answered "everything"
     // would be a domain that had stopped narrowing without saying so.
-    CHECK(!g.contains(0, 0, 0), "and the wrap does not claim the site");
+    CHECK(!g.containsReported(0, 0, 0), "and the wrap does not claim the site");
 }
 
 // A room with a window in it, and the shell that ought to go past the window
@@ -606,17 +606,17 @@ static void testTheShellBridgesAnOpeningAndStaysOutside() {
     buildRoom(1.6, -0.5, closed);
     CHECK(!closed.sealLeaked, "bridged, the outside stays out");
     CHECK(closed.bridgedCells > 0, "and the opening is part of the envelope");
-    CHECK(closed.contains(0.0, 0.0, 1.5), "the room's air is the question");
-    CHECK(!closed.contains(2.0, 0.0, 1.5), "the window is not, being the shell itself");
-    CHECK(!closed.contains(3.0, 0.0, 1.5), "and neither is anything outside");
-    CHECK(closed.domainCells < open.domainCells,
+    CHECK(closed.containsReported(0.0, 0.0, 1.5), "the room's air is the question");
+    CHECK(!closed.containsReported(2.0, 0.0, 1.5), "the window is not, being the shell itself");
+    CHECK(!closed.containsReported(3.0, 0.0, 1.5), "and neither is anything outside");
+    CHECK(closed.reportedCells < open.reportedCells,
           "a shell pulled in asks about far less than a leak did");
 
     // The same bridge with a POSITIVE buffer: the skin crosses the window instead
     // of following the reveal inward.
     wrap::Grid skin;
     buildRoom(1.6, 0.3, skin);
-    CHECK(skin.contains(2.0, 0.0, 1.5), "the skin spans the opening");
+    CHECK(skin.containsReported(2.0, 0.0, 1.5), "the skin spans the opening");
     CHECK(skin.bridgedCells == closed.bridgedCells,
           "off the same envelope, whichever way the buffer points");
 
@@ -681,24 +681,24 @@ static void testEachEnclosedRegionIsJudgedOnItsOwn() {
 
     // The building: pulled in, and nothing outside it in the question.
     CHECK(g.pulledInCells > 0, "something was deep enough to pull the boundary into");
-    CHECK(g.contains(3.0, 3.0, 1.5), "the building's air is the question");
-    CHECK(!g.contains(-1.5, 3.0, 1.5), "and no point outside its walls is");
+    CHECK(g.containsReported(3.0, 3.0, 1.5), "the building's air is the question");
+    CHECK(!g.containsReported(-1.5, 3.0, 1.5), "and no point outside its walls is");
 
     // The freestanding wall: no interior, so it keeps the skin rather than losing
     // its place in the question.
     CHECK(g.skinnedSurfaces > 0, "the surfaces bounding no interior were counted");
-    CHECK(g.contains(9.3, 3.0, 1.5), "a wall with nothing behind it keeps its skin");
-    CHECK(!g.contains(10.5, 3.0, 1.5), "a buffer's width of it, and no more");
+    CHECK(g.containsReported(9.3, 3.0, 1.5), "a wall with nothing behind it keeps its skin");
+    CHECK(!g.containsReported(10.5, 3.0, 1.5), "a buffer's width of it, and no more");
 
     // The shed: the flood got in, which costs the shed its interior and nothing
     // else. That is the whole point — it used to cost the building its question.
     CHECK(g.sealLeaked, "the shed's doorway is wider than the bridge, so it leaked");
-    CHECK(g.contains(3.0, 3.0, 1.5), "and the building is still pulled in regardless");
-    CHECK(!g.contains(13.5, 1.5, 1.5),
+    CHECK(g.containsReported(3.0, 3.0, 1.5), "and the building is still pulled in regardless");
+    CHECK(!g.containsReported(13.5, 1.5, 1.5),
           "while the middle of the shed is beyond a skin's reach of its walls");
 
     // Nothing is asked about outside the site at all.
-    CHECK(!g.contains(17.0, 7.0, 1.5), "open ground is not the question");
+    CHECK(!g.containsReported(17.0, 7.0, 1.5), "open ground is not the question");
 
     // And the numbers that say which way each part was decided, since a picture
     // of a pull-in that did nothing looks exactly like the positive answer.
@@ -745,9 +745,9 @@ static void testAnOpenEndedSurveyFallsBackAndSaysSo() {
           "a ball narrower than the corridor rolls down it, so nothing is pulled in");
     CHECK(g.setupsPulledIn == 0, "and the setup is not inside a kept region");
     CHECK(g.skinnedSurfaces > 0, "every surface fell back to the skin");
-    CHECK(g.domainCells > 0, "which is an answer, where an empty domain would not be");
-    CHECK(g.contains(4.0, 0.3, 1.5), "the space against a wall is in the question");
-    CHECK(!g.contains(4.0, 1.5, 1.5), "the middle of the corridor is a buffer's width away");
+    CHECK(g.reportedCells > 0, "which is an answer, where an empty domain would not be");
+    CHECK(g.containsReported(4.0, 0.3, 1.5), "the space against a wall is in the question");
+    CHECK(!g.containsReported(4.0, 1.5, 1.5), "the middle of the corridor is a buffer's width away");
 
     // AND THE SAME CORRIDOR WITH A BALL TOO FAT TO ROLL DOWN IT.
     //
@@ -798,19 +798,19 @@ static void testAnOpenEndedSurveyFallsBackAndSaysSo() {
                 }
         wrap::build(fat, f, setups);
         CHECK(f.pulledInCells > 0, "a fatter ball still finds the interior");
-        CHECK(!f.contains(4.0, -0.8, 1.5),
+        CHECK(!f.containsReported(4.0, -0.8, 1.5),
               "and the open ground outside stays out however fat the ball is");
         // The corridor's own air, where the grid still resolves it. At 20 m the
         // padding pushes the grid past its budget, the cell doubles, and THIS
         // FIXTURE's walls — painted by cell centre — thin from 14,514 cells to
         // 1,160. That is the fixture's marking, not the wrap's: markScan marks
         // every cell a return lands in, so a real scan's walls survive coarsening.
-        if (!f.coarsened) CHECK(f.contains(4.0, 1.5, 1.5), "which is still the corridor's air");
+        if (!f.coarsened) CHECK(f.containsReported(4.0, 1.5, 1.5), "which is still the corridor's air");
     }
     CHECK(w.setupsPulledIn == 1, "and the instrument is standing in it");
-    CHECK(w.contains(4.0, 1.5, 1.5), "the corridor's air is the question");
-    CHECK(!w.contains(4.0, 0.05, 1.5), "the wall and its surface are not");
-    CHECK(!w.contains(4.0, -0.8, 1.5), "and nothing beyond it is");
+    CHECK(w.containsReported(4.0, 1.5, 1.5), "the corridor's air is the question");
+    CHECK(!w.containsReported(4.0, 0.05, 1.5), "the wall and its surface are not");
+    CHECK(!w.containsReported(4.0, -0.8, 1.5), "and nothing beyond it is");
 }
 
 // A ROOM WITH A DESK IN IT AND A VOID ABOVE IT.
@@ -863,10 +863,10 @@ static void testACavityIsNotARoom() {
     wrap::build(opt, g, setups);
 
     CHECK(g.pulledInCells > 0, "the room was pulled in");
-    CHECK(g.contains(2.0, 2.0, 1.5), "the room's air is the question");
-    CHECK(!g.contains(5.0, 4.5, 0.4), "the inside of the desk is not");
-    CHECK(!g.contains(6.0, 5.0, 3.1), "nor is the void above the suspended ceiling");
-    CHECK(!g.contains(-1.0, 5.0, 1.5), "nor is anything outside the room");
+    CHECK(g.containsReported(2.0, 2.0, 1.5), "the room's air is the question");
+    CHECK(!g.containsReported(5.0, 4.5, 0.4), "the inside of the desk is not");
+    CHECK(!g.containsReported(6.0, 5.0, 3.1), "nor is the void above the suspended ceiling");
+    CHECK(!g.containsReported(-1.0, 5.0, 1.5), "nor is anything outside the room");
 }
 
 int main() {

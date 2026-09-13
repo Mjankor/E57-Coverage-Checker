@@ -380,6 +380,10 @@ struct Result {
     // The region actually asked about, and how much smaller it made the job.
     carve::Domain domain;
     double        domainVolume = 0;      // m^3 of the domain box, 0 when unbounded
+    // And the part of it the answer is REPORTED over, which the buffer's sign
+    // chooses out of the union the carve was asked about. Equal to domainVolume
+    // where the region is not a wrap.
+    double        reportedVolume = 0;
     double        sphereVolume = 0;      // m^3 of the range-sphere bounding box
 
     // Voxels to draw, as StorePoints so the existing point pipeline can render

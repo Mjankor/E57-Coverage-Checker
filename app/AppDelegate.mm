@@ -1706,6 +1706,16 @@ const char *kindLabel(check::Kind k) {
                      "%.2f m offset — so the boundary came in by a cell rather than by the "
                      "distance asked for",
                     result->wrapGrid.cell, std::fabs(result->wrapGrid.buffer)];
+        if (result->domain.kind == carve::Domain::Kind::Wrap &&
+            result->wrapGrid.reportedCells &&
+            result->wrapGrid.reportedCells != result->wrapGrid.domainCells)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   carved all %llu wrap cells (%.0f m³); reporting over the %llu the "
+                     "buffer's sign chooses (%.0f m³), so the sign cannot change a verdict",
+                    (unsigned long long)result->wrapGrid.domainCells,
+                    result->wrapGrid.volume(),
+                    (unsigned long long)result->wrapGrid.reportedCells,
+                    result->wrapGrid.reportedVolume()];
         if (result->domain.kind == carve::Domain::Kind::Wrap && result->wrapGrid.pulledIn)
             warn = [warn stringByAppendingFormat:
                     @"   ·   pulled in %.2f m: %llu cells inside the shells that were deep "
