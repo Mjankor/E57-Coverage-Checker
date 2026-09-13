@@ -1555,6 +1555,13 @@ static void testASetupAgainstAWallDoesNotCarveThroughIt() {
     base.domain     = vis::DomainMode::MeasuredExtent;
     base.domainMargin = 3.0;         // ask about the space beyond the wall
     base.solid      = true;          // the volume, not its frontier
+    // The carve policy is off for this one, and has to be: under it no empty cell
+    // clears unless the scan named it as sky, so the cells this test is about
+    // would be demoted whether the minimum-range filter caught them or not, and
+    // an A/B against that filter would measure nothing. What is asserted here is
+    // that the filter itself works, which is what makes it worth having when the
+    // policy is off.
+    base.skyOnly    = false;
 
     // Voxels in the slab just beyond the wall, at the height of the setup that is
     // parked against it: the space the pencils would have cleared.

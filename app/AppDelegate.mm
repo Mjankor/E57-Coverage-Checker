@@ -1298,19 +1298,20 @@ const char *kindLabel(check::Kind k) {
     // adding a control by eyeballing a y is how the region popup ended up drawn
     // over the fourth parameter row.
     //
-    //   326 298 270 242 214 186 158 130   eight label/value rows, 28 apart
-    //    99                                the region popup, 24 tall, clearing 130 by seven
-    //    74  52  30   8                    four tick boxes, 22 apart
+    //   348 320 292 264 236 208 180 152   eight label/value rows, 28 apart
+    //   121                                the region popup, 24 tall, clearing 152 by seven
+    //    96  74  52  30   8                five tick boxes, 22 apart
     //
-    // The stack grows UPWARDS when a row is added — the popup and the ticks keep
-    // the y they have always had, so a new parameter cannot shift them onto each
-    // other.
+    // The stack grows UPWARDS as things are added: a new tick box pushes the popup
+    // and the rows up, a new row pushes only the top of the view. Nothing below a
+    // new control moves, so adding one cannot land it on top of another — which is
+    // how the popup once came to be drawn over the fourth parameter row.
     //
     // 620 wide, with the labels given 380 of it. The labels say what a setting
     // means rather than naming it, so they are sentences, and at 220 they were
     // being clipped mid-word — "Buffer / margin past the last return (m," — which
     // is worse than a short label would have been.
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 620, 354)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 620, 376)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -1360,7 +1361,7 @@ const char *kindLabel(check::Kind k) {
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (int i = 0; i < 8; ++i) {
-        const CGFloat y = 326 - i * 28;
+        const CGFloat y = 348 - i * 28;
         [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 380, 20)]];
         NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(390, y - 3, 90, 22)];
         [acc addSubview:f];
@@ -1369,9 +1370,9 @@ const char *kindLabel(check::Kind k) {
 
     // What region the question covers — the setting that changes the answer more
     // than any other, so it is a choice rather than a tick box.
-    [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 102, 60, 20)]];
+    [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 124, 60, 20)]];
     NSPopUpButton *region =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 99, 556, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 121, 556, 24) pullsDown:NO];
     [region addItemsWithTitles:@[@"Shrinkwrap of the returns (tightest)",
                                  @"Box around the surveyed extent",
                                  @"Everything in range of a setup"]];
@@ -1381,6 +1382,19 @@ const char *kindLabel(check::Kind k) {
     for (int i = 0; i < 3; ++i)
         if (regionOrder[i] == _visOptions.domain) [region selectItemAtIndex:i];
     [acc addSubview:region];
+
+    // The policy, not a filter — so it is a tick box and it sits first. See
+    // rimg::Options::skyOnly: an empty cell is only evidence of empty space where
+    // the scan could name it as its own sky, and every other reason a cell is
+    // empty gets told apart by elimination, which is wrong in the direction that
+    // clears a pencil of space through a wall.
+    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 96, 620, 20)];
+    skyOnly.title = @"Clear only where the scan saw its own sky — untick to let every "
+                    @"unexplained empty cell clear";
+    [skyOnly setButtonType:NSButtonTypeSwitch];
+    skyOnly.font = [NSFont systemFontOfSize:11];
+    skyOnly.state = _visOptions.skyOnly ? NSControlStateValueOn : NSControlStateValueOff;
+    [acc addSubview:skyOnly];
 
     NSButton *interior = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 620, 20)];
     interior.title = @"Scanned entirely indoors — leaves the space outside the walls out "
@@ -1508,6 +1522,7 @@ const char *kindLabel(check::Kind k) {
         const NSInteger i = region.indexOfSelectedItem;
         opt.domain = (i >= 0 && i < 3) ? order[i] : vis::DomainMode::Shrinkwrap;
     }
+    opt.skyOnly          = (skyOnly.state == NSControlStateValueOn);
     opt.wrapInteriorOnly = (interior.state == NSControlStateValueOn);
     _intersectWrap   = (insideWrap.state == NSControlStateValueOn);
     const BOOL intersectWrap = _intersectWrap;

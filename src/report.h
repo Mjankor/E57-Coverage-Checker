@@ -30,6 +30,7 @@ struct Options {
     double   minRange           = rimg::Options{}.minRange;
     double   skyMinExtentDeg    = rimg::Options{}.skyMinExtentDeg;
     double   darkBorderFraction = rimg::Options{}.darkBorderFraction;
+    bool     skyOnly            = rimg::Options{}.skyOnly;
 };
 
 // Appends the report for one file to `out`. Returns the number of problems

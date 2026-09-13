@@ -154,6 +154,31 @@ struct Options {
     // is an edge.
     double   skyBridgeDeg = 2.0;
 
+    // ONLY THE SKY CLEARS. An empty cell establishes nothing unless it is part of
+    // the region this scan named as its own sky.
+    //
+    // ON by default, and it is the whole policy rather than one more filter. A
+    // no-return says the ray came back with nothing, and the reasons are: the
+    // instrument's blind cone, a surface inside its minimum range, a surface too
+    // dark or too oblique to answer, a surface past the rated range, and open sky.
+    // Only the last of those is a ray that went out and found nothing there, and
+    // only it can be identified positively — an opening at the instrument's own
+    // zenith reaching past skyMinExtentDeg. The rest are told apart by elimination,
+    // and elimination gets them wrong in the expensive direction: believed, one
+    // empty cell clears a pencil of space to the rated range straight through
+    // whatever was actually in the way, which is where the fans through walls, the
+    // cone under the tripod and the cleared shadow under a bench all came from.
+    //
+    // So space is observed where a ray reached a return, or where the scan saw the
+    // sky. Nothing else is claimed.
+    //
+    // THE COST, stated plainly: a surface past the rated range stops clearing too.
+    // A far wall down a long corridor, the end of a large outdoor site — each is a
+    // ray that genuinely found nothing within reach, and each now reads as
+    // unobserved rather than as cleared space. Indoors that is right and is most of
+    // why this is on; on a site whose far field matters, untick it and the cone,
+    // the minimum range and the dark border go back to being the only filters.
+    bool     skyOnly = true;
     // --- a surface too dark to answer ---------------------------------------
     //
     // What share of the returns bordering a zone has to be among the weakest in
@@ -430,11 +455,21 @@ struct Diagnostics {
     // so a rejected one can still be read — an opening that covered most of the
     // raster and was thrown out is the reading that says the fill percolated.
     bool     skyFound = false;
+    // Where the zenith was taken from, and whether the two sources agreed. See
+    // SkyReport: the pose is the world's answer, the cone is the fallback.
+    bool     skyPoleFromPose = false;
+    bool     skyPoleFromCone = false;
+    bool     skyPoleDisputed = false;
+    bool     skyPoleAtFirstRow = false;
     uint64_t skyCells = 0;
     double   skyExtentDeg = 0.0;
     // And what it cost the opening at the pole to fall short of the angle: those
     // cells are a hole in a roof, not a view of the sky, so they clear nothing.
     uint64_t zenithDemoted = 0;
+    // Empty cells that nothing named as sky, demoted under Options::skyOnly. On an
+    // indoor scan this is very nearly every no-return in the file, which is the
+    // point: none of them is a ray that went out and found nothing there.
+    uint64_t unexplainedDemoted = 0;
     // The median bordering range of the nearest such zone, in metres, which is the
     // evidence the decision was made on. -1 where no zone was found.
     double   tooCloseBorderRange = -1.0;
@@ -737,7 +772,14 @@ struct SkyReport {
     bool     reachedPole = false;   // the pole itself holds no returns
     bool     isSky = false;         // and the region there opens past skyMinExtentDeg
     bool     poleAtFirstRow = false;
-    bool     fromCone = false;      // the pole was taken as the end away from the cone
+    // Where "up" came from. The pose, which is the world's answer and the one that
+    // is right for an inverted mounting; failing that the cone, as the end away
+    // from the mount; failing both, the high-elevation end of the sweep.
+    bool     fromPose = false;
+    bool     fromCone = false;
+    // The pose says up is the same end of the raster the mount was found at. One
+    // of the two is wrong about this scan; the pose is followed and this is said.
+    bool     poseDisagreesWithCone = false;
     uint64_t cells = 0;
     double   extentDeg = 0.0;       // how far from the pole the region reaches
     // Cells demoted because the opening at the pole was NOT sky. An opening there

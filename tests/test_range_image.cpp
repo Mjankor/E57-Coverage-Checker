@@ -119,6 +119,11 @@ static void testGridPath() {
 
     rimg::Options opt;
     opt.maxRange = 45.0;
+    // This is a test of the GRID PATH — that the declared grid identifies the
+    // misses exactly — so the carve policy is turned off for it and an empty cell
+    // is left to mean what the decode made it mean. The policy itself is asserted
+    // at the end, on the same fixture.
+    opt.skyOnly = false;
     rimg::RangeImage img;
     CHECK(rimg::build(r, 0, opt, img, err), err.empty() ? "built" : err.c_str());
     if (img.cellCount() == 0) return;
@@ -162,6 +167,22 @@ static void testGridPath() {
     CHECK(img.diag.furthestReturn > img.diag.nearestReturn, "return extent reported");
     CHECK(img.diag.furthestReturn < opt.maxRange,
           "this fixture's returns sit inside the clearing distance");
+
+    // And the policy, on the same fixture. Only what a scan names as its own sky
+    // clears; every other empty cell establishes nothing. This instrument's sweep
+    // stops at +27.7 degrees, so it never looks at the zenith and can name no sky
+    // at all — under the default, none of its empty cells clears.
+    {
+        rimg::Options only = opt;
+        only.skyOnly = true;
+        rimg::RangeImage im2;
+        CHECK(rimg::build(r, 0, only, im2, err), err.empty() ? "built" : err.c_str());
+        CHECK(im2.diag.unexplainedDemoted > 0, "the unnamed empty cells are demoted");
+        CHECK(im2.diag.noReturns == 0, "and on this scan that is every one of them");
+        CHECK(im2.statusAt(kRows - 1, 0) == rimg::Status::OutsideFov,
+              "the band that used to clear to maxRange now clears nothing");
+        CHECK(im2.diag.hits == img.diag.hits, "the returns are untouched");
+    }
 }
 
 static void testMappingAndLookup() {
@@ -480,18 +501,75 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
               "and only the open half of it is the region");
     }
 
-    // Which way is up comes from the instrument, not from the world: with the cone
-    // identified at the HIGH end — a scan whose frame was rewritten, or an
-    // instrument hanging — the sky pole is the low end.
+    // WHICH WAY IS UP COMES FROM THE WORLD. The sky is up, and the only thing in
+    // the file that says where up is once the scan is placed is its pose. An
+    // upright instrument's own axis points at the world's zenith, so the sky is at
+    // the high-elevation end of its sweep.
     {
         rimg::RangeImage im = build(60, false, false);
+        im.hasPose = true;
+        im.pose = e57::Pose{};                       // identity: standing upright
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.fromPose, "the pose said which way up this scan is");
+        CHECK(!rep.poleAtFirstRow, "and upright puts the zenith at the high end");
+        CHECK(rep.isSky, "where the sky is");
+    }
+
+    // Hanging upside down. The instrument's axis now points at the ground, so the
+    // sky is at the LOW-elevation end of its own sweep — which reads backwards
+    // from inside the instrument's frame and is exactly the case a rule based on
+    // the raster alone gets wrong. Same raster as above, turned over by its pose.
+    {
+        rimg::RangeImage im = build(0, false, false);
+        for (uint32_t r = 0; r < 60; ++r)             // the opening at the LOW end
+            for (uint32_t c = 0; c < im.cols; ++c)
+                im.cells[size_t(r) * im.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+        // Hanging, so the end of its sweep that points up is the low one — and it
+        // has to actually reach that end for the question to be answerable, the
+        // same as an upright instrument has to reach +90. -90 to +45.
+        im.map = rimg::uniformMapping(im.rows, im.cols, -90.0 * kPi / 180.0,
+                                      (135.0 / 179.0) * kPi / 180.0, 0.0, kTau / 240.0);
+        im.map.valid = true;
+        im.hasPose = true;
+        im.pose = e57::Pose{};
+        im.pose.q[0] = 0.0; im.pose.q[1] = 1.0;      // 180 degrees about x: inverted
+        im.pose.q[2] = 0.0; im.pose.q[3] = 0.0;
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.fromPose, "the pose said so here too");
+        CHECK(rep.poleAtFirstRow, "and inverted puts the zenith at the low end");
+        CHECK(rep.isSky, "which is where this scan's sky is");
+    }
+
+    // No pose, so the cone is the fallback: the end away from the mount.
+    {
+        rimg::RangeImage im = build(60, false, false);
+        im.hasPose = false;
         im.diag.blindConeRows = 10;
         im.diag.blindConeAtFirstRow = false;         // the mount is at the top
         std::vector<uint8_t> sky;
         const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
-        CHECK(rep.fromCone, "the pole was taken from the cone");
+        CHECK(!rep.fromPose && rep.fromCone, "the pole was taken from the cone");
         CHECK(rep.poleAtFirstRow, "which puts the sky at the other end");
         CHECK(!rep.reachedPole, "and there is no sky there in this raster");
+    }
+
+    // The pose and the cone disagreeing — up is the end the mount was found at.
+    // The pose is followed, because it is the one that knows about the world, and
+    // the disagreement is recorded rather than resolved quietly.
+    {
+        rimg::RangeImage im = build(60, false, false);
+        im.hasPose = true;
+        im.pose = e57::Pose{};                       // upright: up is the high end
+        im.diag.blindConeRows = 10;
+        im.diag.blindConeAtFirstRow = false;         // but the mount is up there too
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.fromPose, "the pose decides");
+        CHECK(!rep.poleAtFirstRow, "so up is still the high-elevation end");
+        CHECK(rep.poseDisagreesWithCone, "and the disagreement is reported, not hidden");
     }
 
     // An INTERIOR, speckled with single empty cells — grazing incidence, dark

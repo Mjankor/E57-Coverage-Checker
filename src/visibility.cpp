@@ -561,6 +561,7 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
     ro.minRange         = opt.minRange;
     ro.skyMinExtentDeg    = opt.skyMinExtentDeg;
     ro.darkBorderFraction = opt.darkBorderFraction;
+    ro.skyOnly            = opt.skyOnly;
 
     // --- range images -----------------------------------------------------
     std::vector<std::unique_ptr<rimg::RangeImage>> images;

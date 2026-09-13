@@ -232,6 +232,7 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                 ro.minRange         = opt.minRange;
                 ro.skyMinExtentDeg    = opt.skyMinExtentDeg;
                 ro.darkBorderFraction = opt.darkBorderFraction;
+                ro.skyOnly            = opt.skyOnly;
                 std::string rerr;
                 if (rimg::build(r, i, ro, img, rerr)) {
                     o.add("      grid      : %u x %u = %.2f M cells, %.1f%% filled\n",
@@ -316,6 +317,31 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                     "— the cells there\n                  are returns, or empty "
                                     "cells with returns all around them, which\n                "
                                     "  is a speckled surface and not a view of the sky\n");
+                    }
+                    // Which way was up, and what said so. The pose is the world's
+                    // answer and is followed; the cone is the fallback. A scan
+                    // where the two disagree is a scan to go and look at.
+                    o.add("      zenith    : the %s end of the raster, from %s%s\n",
+                                img.diag.skyPoleAtFirstRow ? "first" : "last",
+                                img.diag.skyPoleFromPose
+                                    ? "the pose — where this instrument's\n                  own "
+                                      "axis points in the world"
+                                    : (img.diag.skyPoleFromCone
+                                        ? "the blind cone, there being no\n                  "
+                                          "pose: the end away from the mount"
+                                        : "the sweep alone, there being\n                  "
+                                          "neither a pose nor a cone to say"),
+                                img.diag.skyPoleDisputed
+                                    ? "\n                  *** THE POSE PUTS UP AT THE SAME END "
+                                      "THE MOUNT WAS FOUND AT ***" : "");
+                    if (img.diag.unexplainedDemoted) {
+                        o.add("      sky only  : %llu empty cells clear nothing because no part "
+                                    "of this scan\n                  named them as its own sky. "
+                                    "Space is observed where a ray\n                  reached a "
+                                    "return, or where the scan saw the sky — see\n               "
+                                    "   rimg::Options::skyOnly, and untick it to let an "
+                                    "unexplained\n                  empty cell clear again.\n",
+                                    (unsigned long long)img.diag.unexplainedDemoted);
                     }
                     if (img.diag.darkZones) {
                         o.add("      dark      : %llu empty cells in %u zone(s) are bordered by "
@@ -1224,6 +1250,7 @@ int selfTest(const std::vector<std::string>& paths, const Options& opt, std::str
     ro.minRange         = opt.minRange;
     ro.skyMinExtentDeg    = opt.skyMinExtentDeg;
     ro.darkBorderFraction = opt.darkBorderFraction;
+    ro.skyOnly            = opt.skyOnly;
 
     std::vector<std::unique_ptr<e57::Reader>> readers;
     std::vector<std::unique_ptr<rimg::RangeImage>> images;

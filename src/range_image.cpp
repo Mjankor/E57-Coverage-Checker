@@ -955,11 +955,41 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
 
     const double kDeg = 57.29577951308232;
     const bool firstIsLow = im.map.elByRow.front() <= im.map.elByRow.back();
-    // The sky pole is the end away from the mount. With no cone identified, the
-    // high-elevation end of this scan's own sweep.
-    const bool skyAtFirst = im.diag.blindConeRows ? !im.diag.blindConeAtFirstRow : !firstIsLow;
+
+    // WHICH END IS UP IN THE WORLD. The sky is up, so the pole is whichever end of
+    // this instrument's sweep points at the world's zenith once the scan is placed
+    // by its own pose — which is the question, and the pose is the only thing in
+    // the file that answers it.
+    //
+    // A raster's elevation runs about the instrument's axis, so the high-elevation
+    // end is the instrument's own +z. The pose says where that points: the z
+    // component of the rotation's third column is positive for an upright
+    // instrument and negative for one hanging inverted, and the sky pole follows
+    // it. An inverted mounting therefore puts the sky at the LOW-elevation end of
+    // the raster, which is the case this has to get right and the one that reads
+    // backwards from inside the instrument's own frame.
+    //
+    // The cone is the fallback, not the rule. Without a pose there is nothing to
+    // say which way the world is, and the end away from the mount is the best
+    // available guess; with no cone either, the high-elevation end. When both are
+    // present and they DISAGREE — the pose saying up is the same end the mount was
+    // found at — that is recorded rather than silently resolved: one of the two is
+    // wrong about this scan, and which one is not something to guess at here.
+    bool skyAtFirst;
+    if (im.hasPose) {
+        const viewer::Rigid R = viewer::rigidFromPose(im.pose);
+        const bool localUpIsWorldUp = R.R[8] >= 0.0;     // local +z, world z component
+        skyAtFirst   = (localUpIsWorldUp != firstIsLow);
+        rep.fromPose = true;
+        if (im.diag.blindConeRows && im.diag.blindConeAtFirstRow == skyAtFirst)
+            rep.poseDisagreesWithCone = true;
+    } else if (im.diag.blindConeRows) {
+        skyAtFirst   = !im.diag.blindConeAtFirstRow;
+        rep.fromCone = true;
+    } else {
+        skyAtFirst = !firstIsLow;
+    }
     rep.poleAtFirstRow = skyAtFirst;
-    rep.fromCone       = im.diag.blindConeRows != 0;
 
     // How far a row sits from that pole — from the POLE ROW'S OWN elevation, not
     // from a nominal 90 degrees.
@@ -2465,6 +2495,10 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         std::vector<uint8_t> sky;
         const SkyReport rep = identifySky(out, opt, sky);
         out.diag.skyFound     = rep.isSky;
+        out.diag.skyPoleFromPose   = rep.fromPose;
+        out.diag.skyPoleFromCone   = rep.fromCone;
+        out.diag.skyPoleDisputed   = rep.poseDisagreesWithCone;
+        out.diag.skyPoleAtFirstRow = rep.poleAtFirstRow;
         // How far the region got and how big it was, whether or not it was
         // believed. A rejected region is the more interesting of the two: an
         // opening that reached most of the raster and was thrown out for not
@@ -2473,6 +2507,32 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         out.diag.skyExtentDeg = rep.extentDeg;
         out.diag.zenithDemoted = rep.demotedCells;
         filterDarkBorderedZones(out, cellIntensity, sky, opt);
+
+        // And then the policy: only the sky clears. See Options::skyOnly for why
+        // this is the rule rather than one more filter — every other reason a cell
+        // is empty is told apart by elimination, and elimination gets them wrong in
+        // the direction that clears a pencil of space through a wall.
+        //
+        // Last, so the filters above still run and still report: what the cone
+        // took, what the minimum range took and what the zenith took are each worth
+        // reading on their own, and they are the same cells whether this sweep
+        // follows or not. What this adds is everything left over.
+        if (opt.skyOnly) {
+            const bool haveSky = out.diag.skyFound && sky.size() == out.cells.size();
+            uint64_t left = 0;
+            for (size_t i = 0; i < out.cells.size(); ++i) {
+                if (Status(out.cells[i].status) != Status::NoReturn) continue;
+                if (haveSky && sky[i]) continue;
+                out.cells[i].status  = uint8_t(Status::OutsideFov);
+                out.cells[i].rangeCm = 0;
+                ++left;
+            }
+            out.diag.unexplainedDemoted = left;
+            if (left) {
+                out.diag.noReturns  -= std::min<uint64_t>(left, out.diag.noReturns);
+                out.diag.outsideFov += left;
+            }
+        }
     }
     // And what is left believed, for the report and the status line. Here rather
     // than in the caller's aggregation loop because build() runs in parallel across

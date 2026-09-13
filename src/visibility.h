@@ -171,6 +171,11 @@ struct Options {
     // demotes almost nothing. See rimg::filterDarkBorderedZones.
     double   darkBorderFraction = rimg::Options{}.darkBorderFraction;
 
+    // Only a no-return the scan named as its own sky clears space; every other
+    // empty cell establishes nothing. ON by default — see rimg::Options::skyOnly,
+    // which carries the reasoning and the cost.
+    bool     skyOnly = rimg::Options{}.skyOnly;
+
     // Which end of each raster holds the instrument's blind cone. Auto finds it
     // from the geometry and copes with a scanner mounted upside down.
     rimg::BlindCone blindCone = rimg::BlindCone::Auto;
