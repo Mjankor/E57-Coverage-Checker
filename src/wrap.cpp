@@ -309,34 +309,40 @@ void floodOutside(Grid& g) {
 // that ridge — so it gets no further than the mouth. It also needs no bound: the
 // distance strictly decreases, so it terminates on its own.
 void growOutside(Grid& g, const std::vector<double>& d2) {
-    const uint32_t X = g.dim[0], Y = g.dim[1], Z = g.dim[2];
-    std::vector<uint8_t> next;
-    for (;;) {
-        next.assign(g.inDomain.size(), 0);
-        bool grew = false;
-        for (uint32_t z = 0; z < Z; ++z)
-            for (uint32_t y = 0; y < Y; ++y)
-                for (uint32_t x = 0; x < X; ++x) {
-                    const size_t i = g.index(x, y, z);
-                    if (!(g.inDomain[i] & kOutside)) continue;
-                    const int32_t d[6][3] = {{1,0,0}, {-1,0,0}, {0,1,0},
-                                             {0,-1,0}, {0,0,1}, {0,0,-1}};
-                    for (const auto& o : d) {
-                        const int64_t nx = int64_t(x) + o[0];
-                        const int64_t ny = int64_t(y) + o[1];
-                        const int64_t nz = int64_t(z) + o[2];
-                        if (nx < 0 || ny < 0 || nz < 0 || nx >= int64_t(X) ||
-                            ny >= int64_t(Y) || nz >= int64_t(Z)) continue;
-                        const size_t j = g.index(uint32_t(nx), uint32_t(ny), uint32_t(nz));
-                        if (g.inDomain[j] & (kOutside | kOccupied)) continue;
-                        if (!(d2[j] < d2[i])) continue;          // downhill only
-                        next[j] = 1;
-                        grew = true;
-                    }
-                }
-        if (!grew) return;
-        for (size_t i = 0; i < g.inDomain.size(); ++i)
-            if (next[i]) g.inDomain[i] |= kOutside;
+    const int64_t X = g.dim[0], Y = g.dim[1], Z = g.dim[2];
+    // A FRONT, not a sweep. This used to walk the whole grid once per layer and
+    // stop when a pass changed nothing, which is the seal's radius in cells times
+    // the cell count: at a 5 m bridge and 5 cm cells that is fifty passes over
+    // sixty million cells, and it was most of the time a wrap took. The layers are
+    // the same and so is the answer — each cell is entered once, from the front
+    // that reached it, instead of being looked at fifty times.
+    std::vector<size_t> front, next;
+    for (int64_t z = 0; z < Z; ++z)
+        for (int64_t y = 0; y < Y; ++y)
+            for (int64_t x = 0; x < X; ++x) {
+                const size_t i = g.index(uint32_t(x), uint32_t(y), uint32_t(z));
+                if (g.inDomain[i] & kOutside) front.push_back(i);
+            }
+
+    while (!front.empty()) {
+        next.clear();
+        for (const size_t i : front) {
+            const int64_t z = int64_t(i) / (X * Y);
+            const int64_t y = (int64_t(i) / X) % Y;
+            const int64_t x = int64_t(i) % X;
+            const int32_t d[6][3] = {{1,0,0}, {-1,0,0}, {0,1,0},
+                                     {0,-1,0}, {0,0,1}, {0,0,-1}};
+            for (const auto& o : d) {
+                const int64_t nx = x + o[0], ny = y + o[1], nz = z + o[2];
+                if (nx < 0 || ny < 0 || nz < 0 || nx >= X || ny >= Y || nz >= Z) continue;
+                const size_t j = g.index(uint32_t(nx), uint32_t(ny), uint32_t(nz));
+                if (g.inDomain[j] & (kOutside | kOccupied)) continue;
+                if (!(d2[j] < d2[i])) continue;          // downhill only
+                g.inDomain[j] |= kOutside;               // claimed as it is queued
+                next.push_back(j);
+            }
+        }
+        front.swap(next);
     }
 }
 
@@ -402,7 +408,23 @@ bool size(const double lo[3], const double hi[3], const Options& opt, Grid& grid
     // than grown out — see Options::buffer — and it wants the same resolution and
     // the same clearance at the boundary as the positive one.
     const double reach = std::fabs(opt.buffer);
-    double cell = (opt.cell > 0) ? opt.cell : reach / 4.0;
+    // The cell follows the radius that SHAPES the answer, and which one that is
+    // depends on the sign.
+    //
+    // Positive: the buffer is the dilation, so a quarter of it gives four cells of
+    // radius and a shape that is round rather than octagonal.
+    //
+    // Negative: the shape comes from the ball's sweep, which is the seal and is
+    // metres across — the offset only has to be resolvable, not resolved four
+    // times over. Deriving the cell from the offset instead makes a small offset
+    // cost an enormous grid for nothing: 0.2 m gave 5 cm cells and 52 M of them on
+    // a single room, where the sweep's own quarter is 0.6 m. So it is the smaller
+    // of the sweep's quarter and the offset itself, which on that room is 0.2 m
+    // and a grid sixty-four times smaller.
+    const double sealFor = (opt.seal > 0.0) ? opt.seal
+                                            : std::max(0.5 * reach, 0.5 * opt.spanGaps);
+    double cell = (opt.cell > 0) ? opt.cell
+                : (opt.buffer < 0.0 ? std::min(0.25 * sealFor, reach) : reach / 4.0);
     if (!(cell > 0)) { err = "wrap: the buffer must not be zero"; return false; }
     if (!(reach > 0)) { err = "wrap: the buffer must not be zero"; return false; }
     for (int k = 0; k < 3; ++k)
@@ -419,8 +441,7 @@ bool size(const double lo[3], const double hi[3], const Options& opt, Grid& grid
     // The closing is in here too: it dilates before it erodes, and a dilation that
     // reached the boundary would touch the grid's own edge and be eroded back
     // against it rather than against open air.
-    const double seal = (opt.seal > 0.0) ? opt.seal
-                                        : std::max(0.5 * reach, 0.5 * opt.spanGaps);
+    const double seal = sealFor;
     for (;;) {
         // Recomputed as the cell grows: the two cells of slack are two of whatever
         // the cell is now, not two of what it was when the first try was made.
@@ -711,11 +732,52 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
                 if (dCentre[i] <= sealSq) grid.inDomain[i] |= kSeed;   // swept: exterior
                 else if (dCentre[i] > coreSq) grid.inDomain[i] |= kCore;
             }
-            // Which interiors those cores belong to: everything beyond the sweep
-            // that a core can reach without crossing back into it.
+            // WHICH INTERIORS ARE ROOMS, AND WHICH ARE CAVITIES.
+            //
+            // Everything the ball cannot get into is beyond its sweep, and that is
+            // not only the rooms. It is the inside of the reception desk, the void
+            // between a suspended ceiling and the slab, the cavity in a stud wall,
+            // the space under a fixed bench. Every one of them is enclosed, deeper
+            // than the offset, and — being sealed — entirely unobserved, so each
+            // comes back as a solid mass of unobserved voxels: a scatter through
+            // the furniture and a sheet just below the ceiling.
+            //
+            // The instrument says which is which. It stood in the rooms and it
+            // never stood inside a desk, so the interiors that are the question are
+            // the ones a setup is standing in. Seeded there and spread through the
+            // interior — and CONFINED TO IT, which is what makes this safe: the
+            // sweep bounds the spread, so it cannot run out of an open door into
+            // the site the way a spread bounded only by the barrier did.
+            //
+            // With no setup inside any interior — no positions given, or every one
+            // of them swept — the cores seed it instead, which is the old rule and
+            // is all that is left to go on.
+            bool seeded = false;
+            for (size_t i = 0; i + 2 < setupsXYZ.size(); i += 3) {
+                int64_t c[3];
+                bool inGrid = true;
+                for (int k = 0; k < 3; ++k) {
+                    c[k] = int64_t(std::floor(setupsXYZ[i + size_t(k)] / grid.cell)) - grid.lo[k];
+                    if (c[k] < 0 || c[k] >= int64_t(grid.dim[k])) { inGrid = false; break; }
+                }
+                if (!inGrid) continue;
+                const size_t j = grid.index(uint32_t(c[0]), uint32_t(c[1]), uint32_t(c[2]));
+                if (grid.inDomain[j] & kSeed) continue;        // swept: not an interior
+                grid.inDomain[j] |= kKeptIn;
+                seeded = true;
+            }
+            if (!seeded)
+                for (size_t i = 0; i < grid.inDomain.size(); ++i)
+                    if (grid.inDomain[i] & kCore) grid.inDomain[i] |= kKeptIn;
+            // Blocked by the surfaces as well as by the sweep. The sweep alone
+            // lets the spread walk straight through the side of a desk and claim
+            // its inside as part of the room — measured, with the desk's cavity
+            // and the ceiling void both still in the domain.
+            spreadThrough(grid, kKeptIn, uint8_t(kSeed | kOccupied | kEnvelope));
+            // A core outside every room is a cavity: keep only the cores the rooms
+            // themselves hold.
             for (size_t i = 0; i < grid.inDomain.size(); ++i)
-                if (grid.inDomain[i] & kCore) grid.inDomain[i] |= kKeptIn;
-            spreadThrough(grid, kKeptIn, kSeed);
+                if (!(grid.inDomain[i] & kKeptIn)) grid.inDomain[i] = uint8_t(grid.inDomain[i] & ~kCore);
             for (uint8_t& b : grid.inDomain) b = uint8_t(b & ~kSeed);
 
             // How much of the site was enclosed at all, against how much of that

@@ -813,8 +813,65 @@ static void testAnOpenEndedSurveyFallsBackAndSaysSo() {
     CHECK(!w.contains(4.0, -0.8, 1.5), "and nothing beyond it is");
 }
 
+// A ROOM WITH A DESK IN IT AND A VOID ABOVE IT.
+//
+// Everything the ball cannot get into is beyond its sweep, and that is not only
+// the rooms: it is the inside of the desk, the space between a suspended ceiling
+// and the slab, the cavity in a stud wall. Each is enclosed, deeper than the
+// offset, and — being sealed — entirely unobserved, so each comes back as a solid
+// mass of unobserved voxels. A scatter of them through the furniture and a sheet
+// just below the ceiling is what that looks like on a real job.
+//
+// The instrument says which interiors are the question. It stood in the room; it
+// never stood inside the desk.
+static void testACavityIsNotARoom() {
+    std::printf("a cavity is not a room, however enclosed it is\n");
+
+    const double lo[3] = {0, 0, 0}, hi[3] = {12, 10, 3.4};
+    wrap::Options opt;
+    opt.buffer   = -0.2;
+    opt.spanGaps = 5.0;
+    wrap::Grid g;
+    std::string err;
+    CHECK(wrap::size(lo, hi, opt, g, err), err.empty() ? "sized" : err.c_str());
+    // The cell follows the sweep for a negative buffer, not the offset: a 0.2 m
+    // offset used to force 5 cm cells and 52 M of them on this one room, where the
+    // answer's own scale is the 2.5 m sweep. 0.9 M cells and 89 ms against 8.4 s.
+    CHECK(g.cellCount() < 4ull << 20, "a small offset does not force an enormous grid");
+
+    const double t = g.cell;
+    for (uint32_t z = 0; z < g.dim[2]; ++z)
+        for (uint32_t y = 0; y < g.dim[1]; ++y)
+            for (uint32_t x = 0; x < g.dim[0]; ++x) {
+                double c[3];
+                g.cellCentre(x, y, z, c);
+                bool mark = false;
+                if (c[0] > -0.05 && c[0] < 12.05 && c[1] > -0.05 && c[1] < 10.05 &&
+                    c[2] > -0.05 && c[2] < 3.45) {
+                    if (c[0] < t || c[0] > 12.0 - t || c[1] < t || c[1] > 10.0 - t ||
+                        c[2] < t || c[2] > 3.4 - t) mark = true;
+                    if (std::fabs(c[2] - 2.8) < t) mark = true;      // suspended ceiling
+                }
+                if (c[0] > 4.0 && c[0] < 6.0 && c[1] > 4.0 && c[1] < 5.0 &&
+                    c[2] < 0.8 + t) {                                // a closed desk
+                    if (c[0] < 4.0 + t || c[0] > 6.0 - t || c[1] < 4.0 + t ||
+                        c[1] > 5.0 - t || c[2] > 0.8 - t) mark = true;
+                }
+                if (mark) g.inDomain[g.index(x, y, z)] |= 1u;
+            }
+    const std::vector<double> setups = {6.0, 2.0, 1.5};
+    wrap::build(opt, g, setups);
+
+    CHECK(g.pulledInCells > 0, "the room was pulled in");
+    CHECK(g.contains(2.0, 2.0, 1.5), "the room's air is the question");
+    CHECK(!g.contains(5.0, 4.5, 0.4), "the inside of the desk is not");
+    CHECK(!g.contains(6.0, 5.0, 3.1), "nor is the void above the suspended ceiling");
+    CHECK(!g.contains(-1.0, 5.0, 1.5), "nor is anything outside the room");
+}
+
 int main() {
     std::printf("E57 Coverage Checker — shrinkwrap tests\n\n");
+    testACavityIsNotARoom();
     testEachEnclosedRegionIsJudgedOnItsOwn();
     testAnOpenEndedSurveyFallsBackAndSaysSo();
     testTheShellBridgesAnOpeningAndStaysOutside();
