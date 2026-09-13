@@ -37,6 +37,10 @@ struct GpuSetup {
     float maxRange, surfaceMargin;
     uint32_t rows, cols;
     uint32_t nElBins, nAzBins;
+    // The forward tables' lengths. Normally rows and cols, but carried
+    // separately so the footprint walk below can be bounds-checked against what
+    // was actually uploaded rather than against what it should have been.
+    uint32_t nElRows, nAzCols;
     uint32_t mapValid;
     uint32_t earlyOut;      // 0 none, 1 saturated, 2 any evidence
 };
@@ -58,7 +62,9 @@ struct ImageBuffer {
     id<MTLBuffer> buffer;     // cells
     id<MTLBuffer> rowOfEl;    // the mapping's reverse index, uploaded with it
     id<MTLBuffer> colOfAz;
-    uint64_t      bytes = 0;  // all three, so eviction accounts for what it frees
+    id<MTLBuffer> elByRow;    // and the forward tables, for the footprint's step
+    id<MTLBuffer> azByCol;
+    uint64_t      bytes = 0;  // all five, so eviction accounts for what it frees
     uint64_t      lastUse = 0;
 };
 
@@ -106,6 +112,7 @@ struct GpuSetup {
     float maxRange, surfaceMargin;
     uint  rows, cols;
     uint  nElBins, nAzBins;
+    uint  nElRows, nAzCols;
     uint  mapValid;
     uint  earlyOut;
 };
@@ -127,6 +134,36 @@ static bool settled(uchar bits, uint mode) {
     return false;
 }
 
+// What one measured ray says about a voxel at distance r along it. Mirrors
+// carve::verdictFor.
+static uchar verdictFor(uint status, float surface, float r, float margin, float maxRange) {
+    if (status == 0u) {            // Hit
+        if (r < surface - margin)       return kVisible;
+        if (r <= surface + margin)      return kOccupied;
+        return 0;
+    }
+    if (status == 1u) {            // NoReturn
+        return (r <= min(surface, maxRange)) ? kVisible : uchar(0);
+    }
+    return 0;                      // OutsideFov contributes nothing
+}
+
+// The rings of a voxel's angular footprint. Mirrors carve::kFootprintRings and
+// kRingOffsets — see the reference for why seventeen rays.
+//
+// The half-extents are arithmetic on the raster's local angular step, so float
+// and double can put a ring one cell apart where the quotient falls on an
+// integer. Replayed against the double reference over 200,000 directions on
+// APAL__0005's geometry, the two chose an identical set of footprint cells for
+// 99.999% of them — a tenth of the existing float-noise allowance, and a
+// one-cell shift changes a verdict only for a voxel whose sixteen other rays all
+// said nothing.
+constant int kFootprintRings = 2;
+constant int2 kRingOffsets[8] = {
+    int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1),
+    int2(-1, -1), int2(-1, 1), int2(1, -1), int2(1, 1),
+};
+
 kernel void carveVoxels(device uchar             *state   [[buffer(0)]],
                         constant GpuSetup        &s       [[buffer(1)]],
                         constant GpuTile         &t       [[buffer(2)]],
@@ -134,6 +171,8 @@ kernel void carveVoxels(device uchar             *state   [[buffer(0)]],
                         device atomic_uint       *tests   [[buffer(4)]],
                         device const int         *rowOfEl [[buffer(5)]],
                         device const int         *colOfAz [[buffer(6)]],
+                        device const float       *elByRow [[buffer(7)]],
+                        device const float       *azByCol [[buffer(8)]],
                         uint3                     gid     [[thread_position_in_grid]],
                         uint                      lane    [[thread_index_in_simdgroup]])
 {
@@ -199,17 +238,54 @@ kernel void carveVoxels(device uchar             *state   [[buffer(0)]],
             int ci = colOfAz[cbi];
 
             if (ri >= 0 && ri < int(s.rows) && ci >= 0 && ci < int(s.cols)) {
-                uint  cell    = cells[uint(ri) * s.cols + uint(ci)];
-                float surface = float(cell & 0xFFFFu) * 0.01f;
-                uint  status  = (cell >> 16) & 0xFFu;
+                // The ray through the voxel's centre.
+                uint  cell = cells[uint(ri) * s.cols + uint(ci)];
+                uchar e = verdictFor((cell >> 16) & 0xFFu, float(cell & 0xFFFFu) * 0.01f,
+                                     r, s.surfaceMargin, s.maxRange);
 
-                if (status == 0u) {            // Hit
-                    if (r < surface - s.surfaceMargin)       bits |= kVisible;
-                    else if (r <= surface + s.surfaceMargin) bits |= kOccupied;
-                } else if (status == 1u) {     // NoReturn
-                    if (r <= min(surface, s.maxRange)) bits |= kVisible;
+                // And where it does not decide, the rest of the rays the scanner
+                // fired through this voxel. A voxel is a volume: four hundred of
+                // them pass through a five-centimetre voxel at two metres, and
+                // asking only about the centre left a third of the air in front of
+                // a densely sampled wall unobserved wherever a scan demoted a
+                // third of its directions. See carve::evidenceAt.
+                float rho = 0.5f * t.voxelSize;
+                if (e == 0u && rho < 0.5f * r &&
+                    uint(ri) < s.nElRows && uint(ci) < s.nAzCols &&
+                    s.nElRows >= 2u && s.nAzCols >= 2u) {
+                    float dEl = fabs(uint(ri) + 1u < s.nElRows
+                                         ? elByRow[uint(ri) + 1u] - elByRow[uint(ri)]
+                                         : elByRow[uint(ri)] - elByRow[uint(ri) - 1u]);
+                    float dAz = fabs(uint(ci) + 1u < s.nAzCols
+                                         ? azByCol[uint(ci) + 1u] - azByCol[uint(ci)]
+                                         : azByCol[uint(ci)] - azByCol[uint(ci) - 1u]);
+                    if (dEl > 0.0f && dAz > 0.0f) {
+                        float alpha = asin(clamp(rho / r, -1.0f, 1.0f));
+                        float ce = cos(min(fabs(el) + alpha, 1.5707963267948966f));
+                        float sinHalf = ce > 1e-9f ? sin(alpha) / ce : 2.0f;
+                        float azHalf  = sinHalf < 1.0f ? asin(sinHalf) : 0.0f;
+                        int hr = int(alpha / dEl);
+                        int hc = int(azHalf / dAz);
+                        for (int ring = 1; ring <= kFootprintRings && e == 0u; ++ring) {
+                            int sr = hr * ring / kFootprintRings;
+                            int sc = hc * ring / kFootprintRings;
+                            // A narrow footprint collapses the inner ring onto the
+                            // centre, which has already answered.
+                            if (sr == 0 && sc == 0) continue;
+                            for (int k = 0; k < 8 && e == 0u; ++k) {
+                                int rr = ri + kRingOffsets[k].x * sr;
+                                int cc = ci + kRingOffsets[k].y * sc;
+                                if (rr < 0 || rr >= int(s.rows)) continue;
+                                if (cc < 0 || cc >= int(s.cols)) continue;
+                                uint cn = cells[uint(rr) * s.cols + uint(cc)];
+                                e = verdictFor((cn >> 16) & 0xFFu,
+                                               float(cn & 0xFFFFu) * 0.01f,
+                                               r, s.surfaceMargin, s.maxRange);
+                            }
+                        }
+                    }
                 }
-                // OutsideFov contributes nothing, which is the point of it.
+                bits |= e;
             }
         }
     }
@@ -343,9 +419,15 @@ static NSString *g_unavailable = @"not initialised";
     if (count == 0) return ImageBuffer{};
     const size_t nrow = image->map.rowOfEl.size(), ncol = image->map.colOfAz.size();
     if (nrow == 0 || ncol == 0) return ImageBuffer{};
+    // And the forward tables, which the footprint walk reads for the raster's
+    // local angular step. Doubles on the CPU, floats here: the step they are
+    // differenced for is 2.4e-3 rad against float's 1.2e-7 at these magnitudes.
+    const size_t nel = image->map.elByRow.size(), naz = image->map.azByCol.size();
+    if (nel == 0 || naz == 0) return ImageBuffer{};
     const uint64_t cellBytes = uint64_t(count) * 4;
     const uint64_t idxBytes  = uint64_t(nrow + ncol) * sizeof(int32_t);
-    const uint64_t bytes     = cellBytes + idxBytes;
+    const uint64_t tabBytes  = uint64_t(nel + naz) * sizeof(float);
+    const uint64_t bytes     = cellBytes + idxBytes + tabBytes;
     if (cellBytes > _device.maxBufferLength) return ImageBuffer{};
 
     // Evict until it fits. Dropping an image is free — it is a copy of data the
@@ -374,10 +456,23 @@ static NSString *g_unavailable = @"not initialised";
                                              options:MTLResourceStorageModeShared];
     if (!rbuf || !cbuf) return ImageBuffer{};
 
+    std::vector<float> elT(nel), azT(naz);
+    for (size_t i = 0; i < nel; ++i) elT[i] = float(image->map.elByRow[i]);
+    for (size_t i = 0; i < naz; ++i) azT[i] = float(image->map.azByCol[i]);
+    id<MTLBuffer> ebuf = [_device newBufferWithBytes:elT.data()
+                                              length:nel * sizeof(float)
+                                             options:MTLResourceStorageModeShared];
+    id<MTLBuffer> abuf = [_device newBufferWithBytes:azT.data()
+                                              length:naz * sizeof(float)
+                                             options:MTLResourceStorageModeShared];
+    if (!ebuf || !abuf) return ImageBuffer{};
+
     ImageBuffer rec;
     rec.buffer  = buf;
     rec.rowOfEl = rbuf;
     rec.colOfAz = cbuf;
+    rec.elByRow = ebuf;
+    rec.azByCol = abuf;
     rec.bytes   = bytes;
     rec.lastUse = ++_clock;
     _images[image->uid] = rec;
@@ -503,7 +598,8 @@ static NSString *g_unavailable = @"not initialised";
     for (size_t si : reach) {
         const carve::SetupView &s = setups[si];
         const ImageBuffer img = [self buffersForImage:s.image];
-        if (!img.buffer || !img.rowOfEl || !img.colOfAz) { return NO; }   // nothing committed yet
+        if (!img.buffer || !img.rowOfEl || !img.colOfAz ||
+            !img.elByRow || !img.azByCol) { return NO; }   // nothing committed yet
 
         const viewer::Rigid &R = s.worldToScanner;
         const rimg::RangeImage &im = *s.image;
@@ -547,6 +643,8 @@ static NSString *g_unavailable = @"not initialised";
         gs.cols          = im.cols;
         gs.nElBins       = uint32_t(im.map.rowOfEl.size());
         gs.nAzBins       = uint32_t(im.map.colOfAz.size());
+        gs.nElRows       = uint32_t(im.map.elByRow.size());
+        gs.nAzCols       = uint32_t(im.map.azByCol.size());
         gs.mapValid      = im.map.valid ? 1u : 0u;
         gs.earlyOut      = (p.earlyOut == carve::EarlyOut::Saturated)   ? 1u
                          : (p.earlyOut == carve::EarlyOut::AnyEvidence) ? 2u : 0u;
@@ -561,6 +659,8 @@ static NSString *g_unavailable = @"not initialised";
         [enc setBuffer:slot->tests offset:0 atIndex:4];
         [enc setBuffer:img.rowOfEl offset:0 atIndex:5];
         [enc setBuffer:img.colOfAz offset:0 atIndex:6];
+        [enc setBuffer:img.elByRow offset:0 atIndex:7];
+        [enc setBuffer:img.azByCol offset:0 atIndex:8];
         [enc dispatchThreadgroups:grid threadsPerThreadgroup:group];
         [enc endEncoding];
     }

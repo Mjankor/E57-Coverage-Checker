@@ -177,6 +177,34 @@ line fitted through each. The maximum deviation from that line is reported, so
 a scanner that is not a uniform raster shows up as a large residual rather than
 as quietly misplaced lookups.
 
+### A voxel is a volume, so it is asked about as one
+
+The per-voxel test (`carve::evidenceAt`) resolves a direction to a raster cell
+and compares the voxel's range with that cell's. One cell — and a voxel is much
+larger than a cell over most of the range that matters. At 5 cm against the
+~0.14° cells these instruments produce, a voxel subtends 2.86/*r* degrees: 445
+rays pass through it at 1 m, 111 at 2 m, 27 at 4 m, and it takes about 16 m
+before one ray is the whole story.
+
+That matters because of the resolution order above. Everything left over after
+the blind cone, the minimum range and the sky is demoted to `OUTSIDE_FOV`, which
+establishes nothing — and on a real indoor station that is a third of the raster.
+Asking about one direction per voxel therefore left a third of the air between a
+station and a wall sampled more densely than the voxel unobserved, at every
+range: measured at 29.6% on APAL__0005's raster geometry, with hundreds of
+measured rays passing through each of those voxels to that same wall.
+
+So the test asks the other rays too, whenever the centre ray does not decide:
+seventeen rays over two rings of the voxel's own angular footprint, inside out,
+stopping at the first that decides. The footprint is the cone of the voxel's
+**inscribed** sphere, so every ray in it passes through the voxel itself. This
+widens nothing about what counts as evidence — each ray is one the instrument
+really fired — and it degrades in exactly the direction physics requires: a dead
+patch **wider** than the voxel's footprint still blocks, which is why the blind
+cone and a dark wall are unaffected, while scattered dead cells no longer punch a
+voxel-sized hole through observed space. Both properties are asserted in
+`tests/test_carve.cpp`.
+
 ### Other construction details
 
 - Bin resolution is chosen at slightly finer than the scan's native angular

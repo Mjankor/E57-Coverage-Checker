@@ -684,6 +684,132 @@ static void testEarlyStop() {
     CHECK(st.voxels == 3ull * 8 * 8 * 8, "and only those tiles were carved");
 }
 
+// A raster at the angular resolution the instruments this reads actually
+// produce: 1250 rows over the 168.6 degrees APAL__0005 covers, 2640 columns over
+// a turn. Cells of about 0.14 degrees, against the 2.86/r degrees a five
+// centimetre voxel subtends — which is the whole point of these two tests. The
+// synthetic rasters above are 2 degrees a cell, where a voxel is smaller than a
+// cell at every range and the footprint has nothing to add.
+static rimg::RangeImage fineImage(double range) {
+    const uint32_t rows = 1250, cols = 2640;
+    rimg::RangeImage im;
+    im.rows = rows;
+    im.cols = cols;
+    im.cells.assign(im.cellCount(),
+                    rimg::Cell{uint16_t(range * 100.0 + 0.5), uint8_t(rimg::Status::Hit)});
+    im.map = rimg::uniformMapping(rows, cols,
+                                  -78.71 * 3.14159265358979324 / 180.0,
+                                  168.62 * 3.14159265358979324 / 180.0 / double(rows - 1),
+                                  0.0, kTau / double(cols));
+    im.map.valid = true;
+    im.hasPose = false;
+    im.diag.usedGrid = true;
+    im.diag.furthestReturn = range;
+    im.diag.nearestReturn  = range;
+    return im;
+}
+
+// A wall sampled far more densely than the voxel, in a scan that could explain
+// only two thirds of its own directions. Every voxel between the setup and that
+// wall must be cleared, and the share that is not is the bug this reproduces.
+//
+// This is APAL__0005: one station, a room, no sky, and a third of the raster
+// demoted to OutsideFov by the only-sky policy. The carve asked about one
+// direction per voxel, so a third of the voxels landed on a demoted cell and came
+// back unobserved — 29.6% of the air between the setup and a wall at eight
+// metres, at every range from half a metre out, with four hundred measured rays
+// passing through each of them to that same wall.
+static void testAWallSeenPastDeadCells() {
+    std::printf("a wall seen past dead cells\n");
+
+    carve::Params p;
+    p.voxelSize = 0.05;
+    p.maxRange  = 60.0;
+    p.surfaceMargin = 0.5 * std::sqrt(3.0) * p.voxelSize;
+
+    rimg::RangeImage im = fineImage(8.0);
+    // Scattered, which is how a speckled interior and a partly absorbing surface
+    // leave them. A third of the raster, as measured on that scan.
+    uint32_t seed = 12345u;
+    uint64_t dead = 0;
+    for (size_t i = 0; i < im.cells.size(); ++i) {
+        seed = seed * 1664525u + 1013904223u;
+        if (double(seed >> 8) / 16777216.0 < 0.30) {
+            im.cells[i].status  = uint8_t(rimg::Status::OutsideFov);
+            im.cells[i].rangeCm = 0;
+            ++dead;
+        }
+    }
+    CHECK(dead > im.cells.size() / 4, "a third of the directions explain nothing");
+    rimg::buildPyramid(im);
+
+    const carve::SetupView s = carve::makeSetupView(im);
+
+    // Out along +x at the setup's own height, and off-axis, from half a metre to
+    // just short of the wall.
+    uint64_t total = 0, left = 0;
+    for (double x = 0.5; x < 7.6; x += p.voxelSize) {
+        for (double y = -1.0; y < 1.0; y += p.voxelSize) {
+            for (double z = -0.5; z < 0.5; z += p.voxelSize) {
+                if (std::sqrt(x * x + y * y + z * z) > 7.6) continue;
+                ++total;
+                if (!(carve::evidenceAt(s, p, x, y, z) & carve::kVisible)) ++left;
+            }
+        }
+    }
+    CHECK(total > 50000, "the probe covered a real volume");
+    CHECK(left == 0, "every voxel between the setup and the wall is cleared");
+
+    // And the wall itself is still a wall: on it is occupied, behind it silence.
+    CHECK(carve::evidenceAt(s, p, 8.0, 0, 0) == carve::kOccupied,
+          "the surface is still measured where it is");
+    CHECK(carve::evidenceAt(s, p, 12.0, 0, 0) == 0,
+          "and nothing is claimed behind it");
+}
+
+// The other half of the same rule: where the scan explains nothing over a patch
+// WIDER than the voxel's footprint, the space in front of it stays unobserved.
+//
+// This is what keeps the fix from becoming a licence to carve through the thing
+// the user is looking for. A voxel's footprint is its own angular size, 2.86/r
+// degrees — so a dead patch two degrees across blocks every voxel nearer than
+// about a metre and a half to it, and the blind cone under the tripod, forty-five
+// degrees of it, blocks everything.
+static void testADeadZoneWiderThanTheFootprintStillBlocks() {
+    std::printf("a dead zone wider than the footprint still blocks\n");
+
+    carve::Params p;
+    p.voxelSize = 0.05;
+    p.maxRange  = 60.0;
+    p.surfaceMargin = 0.5 * std::sqrt(3.0) * p.voxelSize;
+
+    rimg::RangeImage im = fineImage(8.0);
+    // A contiguous patch about the equator: ten degrees of azimuth by ten of
+    // elevation, which is seventy cells either way.
+    const uint32_t rowMid = uint32_t(im.rows * 78.71 / 168.62);   // elevation zero
+    const uint32_t half   = 37;
+    for (uint32_t r = rowMid - half; r <= rowMid + half; ++r) {
+        for (uint32_t c = 0; c <= 2 * half; ++c) {
+            const size_t i = size_t(r) * im.cols + c;
+            im.cells[i].status  = uint8_t(rimg::Status::OutsideFov);
+            im.cells[i].rangeCm = 0;
+        }
+    }
+    rimg::buildPyramid(im);
+    const carve::SetupView s = carve::makeSetupView(im);
+
+    // Straight down the middle of the patch — column zero is azimuth zero, which
+    // is +x — at ranges where the footprint is far narrower than ten degrees.
+    for (double x : {1.0, 2.0, 4.0, 6.0, 7.5}) {
+        CHECK(carve::evidenceAt(s, p, x, 0, 0) == 0,
+              "no evidence anywhere along a direction the scan cannot explain");
+    }
+    // And one voxel out of the patch, where the wall was measured, is cleared —
+    // so this is the patch blocking and not the probe missing the raster.
+    CHECK(carve::evidenceAt(s, p, 4.0, 1.0, 0) & carve::kVisible,
+          "the same range beside the patch is cleared");
+}
+
 int main() {
     testOneSetupAlongARay();
     testNoReturnClearsToMaxRange();
@@ -696,6 +822,8 @@ int main() {
     testDomainClipping();
     testAnyEvidenceKeepsTheUnknownSet();
     testEarlyStop();
+    testAWallSeenPastDeadCells();
+    testADeadZoneWiderThanTheFootprintStillBlocks();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

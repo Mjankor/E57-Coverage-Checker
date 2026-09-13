@@ -60,6 +60,52 @@ SetupView makeSetupView(const rimg::RangeImage& image) {
     return s;
 }
 
+namespace {
+
+// What one measured ray says about a voxel at distance `r` along it.
+uint8_t verdictFor(rimg::Status st, double surface, double r, const Params& p) {
+    switch (st) {
+    case rimg::Status::OutsideFov:
+        // The scanner never looked here. Silence, not emptiness — this is the
+        // distinction DESIGN.md §4 turns on.
+        return 0;
+
+    case rimg::Status::NoReturn:
+        // The ray was fired and came back empty, so everything along it out to
+        // the clearing distance was seen through. That distance is whichever is
+        // nearer of this run's setting and what the image was built with.
+        return (r <= std::min(surface, p.maxRange)) ? kVisible : 0;
+
+    case rimg::Status::Hit:
+        // In front of the measured surface: line of sight. Straddling it: the
+        // surface is inside this voxel. Behind it: occluded, and this setup
+        // says nothing at all.
+        if (r < surface - p.surfaceMargin) return kVisible;
+        if (r <= surface + p.surfaceMargin) return kOccupied;
+        return 0;
+    }
+    return 0;
+}
+
+// The rings of a voxel's angular footprint, in units of its half-extent: the
+// centre ray, then eight rays half way out, then eight grazing the voxel's
+// inscribed sphere. Asked inside out, because the centre ray is the most
+// representative of the voxel and the grazing ones the least.
+//
+// Seventeen rays, and the count is what the dead-cell share on real scans
+// requires rather than a round number. A scan that reports a fraction f of its
+// directions as unexplained leaves a voxel wrongly unobserved only if EVERY ray
+// through it landed on one of them, which is f^17 for independent cells: six in
+// a thousand million at the third of the raster APAL__0005 demotes, against
+// three in ten for the single ray this replaces. Nine rays would leave two in a
+// hundred thousand, which over a hundred million voxels is still thousands.
+constexpr int kFootprintRings = 2;
+constexpr int kRingOffsets[8][2] = {
+    {-1, 0}, {1, 0}, {0, -1}, {0, 1}, {-1, -1}, {-1, 1}, {1, -1}, {1, 1},
+};
+
+} // namespace
+
 uint8_t evidenceAt(const SetupView& s, const Params& p,
                    double wx, double wy, double wz) {
     if (!s.image) return 0;
@@ -80,29 +126,80 @@ uint8_t evidenceAt(const SetupView& s, const Params& p,
     // where the direction is meaningless.
     if (r > p.maxRange || r < 1e-9) return 0;
 
-    rimg::Status st;
-    double surface;
-    if (!s.image->sample(az, el, st, surface)) return 0;   // outside the raster
+    const rimg::RangeImage& im = *s.image;
+    uint32_t r0, c0;
+    if (!im.cellOf(az, el, r0, c0)) return 0;              // outside the raster
 
-    switch (st) {
-    case rimg::Status::OutsideFov:
-        // The scanner never looked here. Silence, not emptiness — this is the
-        // distinction DESIGN.md §4 turns on.
-        return 0;
+    // The ray through the voxel's centre. Where it decides, it is the answer —
+    // this is the whole of what the carve used to ask, and nothing below can
+    // overturn a verdict it reaches.
+    const uint8_t mid = verdictFor(im.statusAt(r0, c0), im.rangeAt(r0, c0), r, p);
+    if (mid) return mid;
 
-    case rimg::Status::NoReturn:
-        // The ray was fired and came back empty, so everything along it out to
-        // the clearing distance was seen through. That distance is whichever is
-        // nearer of this run's setting and what the image was built with.
-        return (r <= std::min(surface, p.maxRange)) ? kVisible : 0;
+    // And where it does not decide, the rest of the rays the scanner fired
+    // through this voxel.
+    //
+    // A voxel is a volume, not a point. At five centimetres it subtends 2.86/r
+    // degrees, against raster cells of about 0.14 degrees on the instruments this
+    // reads: four hundred rays pass through a voxel at two metres, a hundred at
+    // four, and it takes twenty metres before one ray is the whole story. Asking
+    // only about the centre threw the other four hundred away — and with a third
+    // of a scan's directions unexplained, demoted to OutsideFov, which says
+    // nothing at all, a third of the air in front of a wall sampled far more
+    // densely than the voxel came back unobserved. Measured on APAL__0005's
+    // raster geometry: 29.6% of the space between the setup and a wall at eight
+    // metres, at every range from half a metre out. See testAWallSeenPastDeadCells.
+    //
+    // This does not widen what counts as evidence. Every ray asked about here is
+    // one the instrument really fired, and each is asked only whether it passed
+    // through THIS voxel, which is what the footprint bounds. The footprint comes
+    // from the voxel's INSCRIBED sphere, so a direction inside it passes within
+    // half a voxel of the centre and therefore through the voxel itself; the
+    // circumscribed sphere would admit rays that only clip a corner.
+    const double rho = 0.5 * p.voxelSize;
+    if (!(rho < 0.5 * r)) return 0;     // a voxel as near as its own size: no cone
 
-    case rimg::Status::Hit:
-        // In front of the measured surface: line of sight. Straddling it: the
-        // surface is inside this voxel. Behind it: occluded, and this setup
-        // says nothing at all.
-        if (r < surface - p.surfaceMargin) return kVisible;
-        if (r <= surface + p.surfaceMargin) return kOccupied;
-        return 0;
+    const rimg::Mapping& m = im.map;
+    if (r0 >= m.elByRow.size() || c0 >= m.azByCol.size()) return 0;
+    if (m.elByRow.size() < 2 || m.azByCol.size() < 2) return 0;
+    // The local step of each measured table. Local rather than averaged because
+    // neither axis is uniform — see Mapping.
+    const double dEl = std::fabs(r0 + 1 < m.elByRow.size()
+                                     ? m.elByRow[r0 + 1] - m.elByRow[r0]
+                                     : m.elByRow[r0] - m.elByRow[r0 - 1]);
+    const double dAz = std::fabs(c0 + 1 < m.azByCol.size()
+                                     ? m.azByCol[c0 + 1] - m.azByCol[c0]
+                                     : m.azByCol[c0] - m.azByCol[c0 - 1]);
+    if (!(dEl > 0.0) || !(dAz > 0.0)) return 0;
+
+    const double alpha = std::asin(std::clamp(rho / r, -1.0, 1.0));
+    // On a small circle at elevation e an angular radius alpha spans an azimuth
+    // half-width of asin(sin alpha / cos e) — the same widening boundBrick does.
+    // It diverges at the pole, where every bearing is inside the cone; there the
+    // elevation rings alone carry the footprint.
+    const double ce = std::cos(std::min(std::fabs(el) + alpha, 1.5707963267948966));
+    const double sinHalf = ce > 1e-9 ? std::sin(alpha) / ce : 2.0;
+    const double azHalf = sinHalf < 1.0 ? std::asin(sinHalf) : 0.0;
+
+    const int64_t hr = int64_t(alpha / dEl);
+    const int64_t hc = int64_t(azHalf / dAz);
+    if (hr == 0 && hc == 0) return 0;   // the voxel really is one cell wide
+
+    for (int ring = 1; ring <= kFootprintRings; ++ring) {
+        const int64_t sr = hr * ring / kFootprintRings;
+        const int64_t sc = hc * ring / kFootprintRings;
+        // A narrow footprint collapses the inner ring onto the centre, which has
+        // already answered. Eight reads of a cell whose verdict is known.
+        if (sr == 0 && sc == 0) continue;
+        for (const auto& off : kRingOffsets) {
+            const int64_t rr = int64_t(r0) + off[0] * sr;
+            const int64_t cc = int64_t(c0) + off[1] * sc;
+            if (rr < 0 || rr >= int64_t(im.rows)) continue;
+            if (cc < 0 || cc >= int64_t(im.cols)) continue;
+            const uint8_t e = verdictFor(im.statusAt(uint32_t(rr), uint32_t(cc)),
+                                         im.rangeAt(uint32_t(rr), uint32_t(cc)), r, p);
+            if (e) return e;
+        }
     }
     return 0;
 }
