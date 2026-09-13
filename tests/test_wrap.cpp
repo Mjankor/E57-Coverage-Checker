@@ -543,8 +543,94 @@ static void testNoReturnsMeansNoWrap() {
     CHECK(!g.contains(0, 0, 0), "and the wrap does not claim the site");
 }
 
+// A room with a window in it, and the shell that ought to go past the window
+// rather than into it.
+//
+// THE CLOSING DOES NOT WORK HERE, and it is worth saying why, because it is the
+// textbook answer. Dilate by r and erode by r fills a hole in a SOLID; it cannot
+// fill one in a surface. A ball of radius r always fits through a hole of radius
+// a by sitting at sqrt(r*r - a*a) from the plane, so the erosion takes back
+// exactly what the dilation bridged. Measured on a wall with a 1.2 m window: at a
+// 1.4 m closing, 24 cells filled, and the middle of the window open at every
+// radius tried.
+//
+// The flood does work, because it asks a different question: a barrier half an
+// opening wide blocks a path through it, and what the flood cannot reach is
+// enclosed. The cells of that region touching the outside are the shell's
+// surface, openings included. No ball has to fit anywhere.
+//
+// Which also means this only has meaning for a shell that ENCLOSES something. A
+// lone wall with a hole in it has no inside, so there is nothing for an opening
+// to be an opening into.
+static void testTheShellBridgesAnOpeningAndStaysOutside() {
+    std::printf("an opening is bridged, and the shell stays outside it\n");
+
+    // A closed 4 x 4 x 3 m room with a 1.2 m window in the +x wall, cells at
+    // 0.1 m, and a setup standing in the middle of it.
+    const double lo[3] = {-2, -2, 0}, hi[3] = {2, 2, 3};
+    auto buildRoom = [&](double spanGaps, double buffer, wrap::Grid& g) {
+        wrap::Options opt;
+        opt.buffer   = buffer;
+        opt.cell     = 0.1;
+        opt.spanGaps = spanGaps;
+        std::string err;
+        CHECK(wrap::size(lo, hi, opt, g, err), err.empty() ? "sized" : err.c_str());
+        for (uint32_t z = 0; z < g.dim[2]; ++z)
+            for (uint32_t y = 0; y < g.dim[1]; ++y)
+                for (uint32_t x = 0; x < g.dim[0]; ++x) {
+                    double c[3];
+                    g.cellCentre(x, y, z, c);
+                    if (c[0] < -2.05 || c[0] > 2.05 || c[1] < -2.05 || c[1] > 2.05 ||
+                        c[2] < -0.05 || c[2] > 3.05) continue;
+                    const bool face = std::fabs(c[0]) > 1.95 || std::fabs(c[1]) > 1.95 ||
+                                      c[2] < 0.1 || c[2] > 2.9;
+                    if (!face) continue;
+                    if (c[0] > 1.95 && std::fabs(c[1]) < 0.6 &&
+                        c[2] > 0.9 && c[2] < 2.1) continue;      // the window
+                    g.inDomain[g.index(x, y, z)] |= 1u;          // kOccupied
+                }
+        const std::vector<double> setup = {0.0, 0.0, 1.5};
+        wrap::build(opt, g, setup);
+    };
+
+    // Not asked to bridge anything: the flood walks in through the window and
+    // reaches the setup, which is the leak the check exists to catch.
+    wrap::Grid open;
+    buildRoom(0.0, -0.5, open);
+    CHECK(open.occupiedCells > 0, "the room was marked");
+    CHECK(open.sealLeaked, "a 1.2 m window lets the outside into the room");
+    CHECK(open.bridgedCells == 0, "and nothing was bridged");
+
+    // Asked for a wider opening than the window, the envelope closes over it.
+    wrap::Grid closed;
+    buildRoom(1.6, -0.5, closed);
+    CHECK(!closed.sealLeaked, "bridged, the outside stays out");
+    CHECK(closed.bridgedCells > 0, "and the opening is part of the envelope");
+    CHECK(closed.contains(0.0, 0.0, 1.5), "the room's air is the question");
+    CHECK(!closed.contains(2.0, 0.0, 1.5), "the window is not, being the shell itself");
+    CHECK(!closed.contains(3.0, 0.0, 1.5), "and neither is anything outside");
+    CHECK(closed.domainCells < open.domainCells,
+          "a shell pulled in asks about far less than a leak did");
+
+    // The same bridge with a POSITIVE buffer: the skin crosses the window instead
+    // of following the reveal inward.
+    wrap::Grid skin;
+    buildRoom(1.6, 0.3, skin);
+    CHECK(skin.contains(2.0, 0.0, 1.5), "the skin spans the opening");
+    CHECK(skin.bridgedCells == closed.bridgedCells,
+          "off the same envelope, whichever way the buffer points");
+
+    // Narrower than the opening, and it stays open — which is what stops a bridge
+    // set for a doorway from swallowing a courtyard.
+    wrap::Grid narrow;
+    buildRoom(0.6, -0.5, narrow);
+    CHECK(narrow.sealLeaked, "a bridge narrower than the opening does not close it");
+    CHECK(narrow.bridgedCells == 0, "so there is no envelope to speak of");
+}
+
 int main() {
     std::printf("E57 Coverage Checker — shrinkwrap tests\n\n");
+    testTheShellBridgesAnOpeningAndStaysOutside();
     testDilationIsExactlyEuclidean();
     testOutsideTheGridIsOutsideTheQuestion();
     testBoxAgreesWithContains();

@@ -277,6 +277,13 @@ static void testEndToEnd() {
     // hide a whole unobserved region whose boundary was never observed either —
     // see vis::Options::solid.
     opt.solid      = false;
+    // And the EXACT carve over the BOX, because this measures volumes. The
+    // defaults are what the run sheet ships with — first-evidence, which makes
+    // `visible` a lower bound, over the shrinkwrap, which is a different region —
+    // and neither is the thing under test here.
+    opt.earlyOut   = carve::EarlyOut::Saturated;
+    opt.domain     = vis::DomainMode::MeasuredExtent;
+    opt.domainMargin = 2.0;
 
     vis::Result frontier;
     std::string err;
@@ -722,6 +729,10 @@ static void testImageBudgetAndWhatCoarseningCosts() {
     opt.voxelSize  = 0.25;
     opt.maxRange   = 8.0;
     opt.tileVoxels = 32;
+    // Exact, over the box: this compares carved volumes between budgets.
+    opt.earlyOut   = carve::EarlyOut::Saturated;
+    opt.domain     = vis::DomainMode::MeasuredExtent;
+    opt.domainMargin = 2.0;
 
     vis::Result full;
     std::string err;
@@ -774,6 +785,10 @@ static void testShadingVariesWithShapeAndHeight() {
     opt.voxelSize  = 0.25;
     opt.maxRange   = 8.0;
     opt.tileVoxels = 32;
+    // Exact, over the box: this compares one run against another voxel for voxel.
+    opt.earlyOut   = carve::EarlyOut::Saturated;
+    opt.domain     = vis::DomainMode::MeasuredExtent;
+    opt.domainMargin = 2.0;
 
     auto run = [&](uint8_t shading, vis::Result& r) {
         vis::Options o = opt;
@@ -1491,37 +1506,54 @@ static void testANegativeMarginAsksAboutLess() {
               "nothing is reported unobserved in a domain that holds nothing");
     }
 
-    // The wrap. A negative margin means what interiorOnly means, so the two agree.
+    // The wrap, and what the sign of the margin now means. Positive is a skin
+    // around the measured surfaces; negative is the region the survey encloses,
+    // pulled in by that much, so the boundary sits inside the outer face of the
+    // walls. There is no tick box any more — the distance says it.
     {
         vis::Options neg = base;
         neg.domain = vis::DomainMode::Shrinkwrap;
         neg.wrapCell = 0.25;
-        neg.domainMargin = -2.0;
+        neg.domainMargin = -0.5;
+        // The envelope has to be closed before the flood can be trusted to stay
+        // outside it — see wrap::Options::spanGaps. A metre bridges the gaps a
+        // raster leaves in a wall, and the shadows two setups leave behind an interior
+        // wall and a cupboard.
+        neg.wrapSpanGaps = 2.0;
         vis::Result rneg;
         CHECK(vis::run({path}, neg, nullptr, rneg, err), err.empty() ? "ran" : err.c_str());
 
-        vis::Options tick = base;
-        tick.domain = vis::DomainMode::Shrinkwrap;
-        tick.wrapCell = 0.25;
-        tick.domainMargin = 2.0;
-        tick.wrapInteriorOnly = true;
-        vis::Result rtick;
-        CHECK(vis::run({path}, tick, nullptr, rtick, err), err.empty() ? "ran" : err.c_str());
+        vis::Options pos = neg;
+        pos.domainMargin = 0.5;
+        vis::Result rpos;
+        CHECK(vis::run({path}, pos, nullptr, rpos, err), err.empty() ? "ran" : err.c_str());
 
-        CHECK(rneg.wrapGrid.interiorOnly, "a negative margin asks for interior only");
-        CHECK(rneg.wrapGrid.buffer == 2.0, "with the magnitude as the buffer");
-        CHECK(rneg.wrapGrid.domainCells == rtick.wrapGrid.domainCells,
-              "so it is the same wrap the tick box produces");
-        CHECK(rneg.stats.unknown == rtick.stats.unknown, "and the same answer");
+        CHECK(rneg.wrapGrid.pulledIn, "a negative margin pulls the shell in");
+        CHECK(rneg.wrapGrid.interiorOnly, "which is the interior question, asked as a distance");
+        CHECK(!rpos.wrapGrid.pulledIn, "a positive one does not");
+        CHECK(rneg.wrapGrid.domainCells > 0, "and there is an interior to ask about");
 
-        // And it really does drop something relative to the same buffer kept both
-        // sides of every surface.
-        vis::Options both = tick;
-        both.wrapInteriorOnly = false;
-        vis::Result rboth;
-        CHECK(vis::run({path}, both, nullptr, rboth, err), "ran");
-        CHECK(rneg.wrapGrid.domainCells < rboth.wrapGrid.domainCells,
-              "the outside really is left out");
+        CHECK(!rneg.wrapGrid.sealLeaked, "the shell held, so this is not the fallback");
+
+        // The point of it. The room runs x in [-5,5], y in [-4,4], z in [0,3], so
+        // the domain holds the air inside it and stops short of the walls, and
+        // nothing beyond them is in the question at all.
+        CHECK(rneg.wrapGrid.contains(0.0, 2.0, 1.5), "the air inside the room is in it");
+        CHECK(!rneg.wrapGrid.contains(4.8, 2.0, 1.5),
+              "the last half metre before the wall is not");
+        CHECK(!rneg.wrapGrid.contains(7.0, 2.0, 1.5), "and neither is anything outside");
+        CHECK(rpos.wrapGrid.contains(5.2, 2.0, 1.5),
+              "where the positive question keeps a skin on the outer face");
+
+        // Deeper in leaves less. The magnitude is a distance and has to behave
+        // like one, rather than switching a mode on.
+        vis::Options deeper = neg;
+        deeper.domainMargin = -1.0;
+        vis::Result rdeep;
+        CHECK(vis::run({path}, deeper, nullptr, rdeep, err), "ran");
+        CHECK(!rdeep.wrapGrid.sealLeaked, "the shell held there too");
+        CHECK(rdeep.wrapGrid.domainCells < rneg.wrapGrid.domainCells,
+              "pulling in further leaves a smaller region");
     }
 }
 

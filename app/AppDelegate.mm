@@ -563,6 +563,10 @@ const char *kindLabel(check::Kind k) {
                      keyEquivalent:@""];
     _useGpu = ([CarveGpu shared] != nil);
     gpuItem.state = _useGpu ? NSControlStateValueOn : NSControlStateValueOff;
+    // On by default, with the shrinkwrap as the default region: without it the
+    // answer is a blanket of unobserved voxels out to the range limit, wrapped
+    // round everything and hiding it.
+    _intersectWrap = YES;
     // Greyed out when there is no device — see validateMenuItem:, which is what
     // actually decides. Setting `enabled` here would not survive: menus
     // autoenable, and an item whose target implements its action is switched
@@ -1298,9 +1302,9 @@ const char *kindLabel(check::Kind k) {
     // adding a control by eyeballing a y is how the region popup ended up drawn
     // over the fourth parameter row.
     //
-    //   348 320 292 264 236 208 180 152   eight label/value rows, 28 apart
-    //   121                                the region popup, 24 tall, clearing 152 by seven
-    //    96  74  52  30   8                five tick boxes, 22 apart
+    //   354 326 298 270 242 214 186 158 130   nine label/value rows, 28 apart
+    //    99                                    the region popup, 24 tall, clearing 130 by 7
+    //    74  52  30   8                        four tick boxes, 22 apart
     //
     // The stack grows UPWARDS as things are added: a new tick box pushes the popup
     // and the rows up, a new row pushes only the top of the view. Nothing below a
@@ -1311,7 +1315,7 @@ const char *kindLabel(check::Kind k) {
     // means rather than naming it, so they are sentences, and at 220 they were
     // being clipped mid-word — "Buffer / margin past the last return (m," — which
     // is worse than a short label would have been.
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 620, 376)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 620, 382)];
     struct { NSString *label; NSString *value; } rows[] = {
         {@"Voxel size (m)",     [NSString stringWithFormat:@"%.3f", _visOptions.voxelSize]},
         {@"Maximum range (m)",  [NSString stringWithFormat:@"%.1f", _visOptions.maxRange]},
@@ -1322,6 +1326,17 @@ const char *kindLabel(check::Kind k) {
         // Negative is allowed and useful: it pulls the question inside the walls.
         {@"Buffer / margin past the last return (m, may be −)",
                                 [NSString stringWithFormat:@"%.1f", _visOptions.domainMargin]},
+        // How wide an opening the shrinkwrap may bridge, in metres of OPENING —
+        // the width of the hole, which is what an operator can measure on site.
+        // Without it the wrap dips into every window reveal and runs through every
+        // open door, threading itself into the rooms behind; with it the shell
+        // stays on the outside of the building. It is also what makes the envelope
+        // watertight enough for a negative buffer to mean anything, since that
+        // asks which side of the shell a cell is on. Ask for a little more than
+        // the hole: the barrier has to exceed half of it, so 1.2 does not quite
+        // close a 1.2 m window and 1.6 does.
+        {@"Bridge openings in the shell up to (m wide)",
+                                [NSString stringWithFormat:@"%g", _visOptions.wrapSpanGaps]},
         // The cap on voxels DRAWN, not on voxels found. Over it the frontier is
         // sampled, which is the one setting whose effect looks like a bug: a
         // large site at 5 cm has tens of millions of frontier voxels and six
@@ -1360,8 +1375,8 @@ const char *kindLabel(check::Kind k) {
                                  _visOptions.darkBorderFraction]},
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
-    for (int i = 0; i < 8; ++i) {
-        const CGFloat y = 348 - i * 28;
+    for (int i = 0; i < 9; ++i) {
+        const CGFloat y = 354 - i * 28;
         [acc addSubview:[self labelWithText:rows[i].label frame:NSMakeRect(0, y, 380, 20)]];
         NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(390, y - 3, 90, 22)];
         [acc addSubview:f];
@@ -1370,9 +1385,9 @@ const char *kindLabel(check::Kind k) {
 
     // What region the question covers — the setting that changes the answer more
     // than any other, so it is a choice rather than a tick box.
-    [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 124, 60, 20)]];
+    [acc addSubview:[self labelWithText:@"Region" frame:NSMakeRect(0, 102, 60, 20)]];
     NSPopUpButton *region =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 121, 556, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 99, 556, 24) pullsDown:NO];
     [region addItemsWithTitles:@[@"Shrinkwrap of the returns (tightest)",
                                  @"Box around the surveyed extent",
                                  @"Everything in range of a setup"]];
@@ -1388,7 +1403,7 @@ const char *kindLabel(check::Kind k) {
     // the scan could name it as its own sky, and every other reason a cell is
     // empty gets told apart by elimination, which is wrong in the direction that
     // clears a pencil of space through a wall.
-    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 96, 620, 20)];
+    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 620, 20)];
     skyOnly.title = @"Clear only where the scan saw its own sky — untick to let every "
                     @"unexplained empty cell clear";
     [skyOnly setButtonType:NSButtonTypeSwitch];
@@ -1396,15 +1411,11 @@ const char *kindLabel(check::Kind k) {
     skyOnly.state = _visOptions.skyOnly ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:skyOnly];
 
-    NSButton *interior = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 620, 20)];
-    interior.title = @"Scanned entirely indoors — leaves the space outside the walls out "
-                     @"(same as a negative margin)";
-    [interior setButtonType:NSButtonTypeSwitch];
-    interior.font = [NSFont systemFontOfSize:11];
-    interior.state = _visOptions.wrapInteriorOnly ? NSControlStateValueOn
-                                                  : NSControlStateValueOff;
-    [acc addSubview:interior];
-
+    // "Scanned entirely indoors" is gone. It asked for the space outside the shell
+    // to be dropped, which a NEGATIVE buffer says better: as a distance, in the
+    // units the rest of the sheet uses, and by moving the boundary inside the wall
+    // rather than leaving the domain hugging both of its faces. The tick box could
+    // only say whether; the number says how far.
     NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 620, 20)];
     firstHit.title = @"Stop at the first evidence — faster, and visible and occupied "
                      @"become lower bounds";
@@ -1442,9 +1453,24 @@ const char *kindLabel(check::Kind k) {
     a.informativeText =
         @"Marks every voxel some setup could see through or measured a surface in, and "
         @"reports the rest: space in range of a scanner that nothing observed.\n\n"
-        @"Limiting to the surveyed extent asks only about a box around what the scans "
-        @"actually returned. Leave it on for an interior job: the range spheres otherwise "
-        @"reach tens of metres out through every wall, and the answer becomes mostly sky.\n\n"
+        @"The shrinkwrap is the tightest region and the one that makes the fraction "
+        @"mean something: the space near what the scans actually returned, rather than a "
+        @"box with corners nobody reached.\n\n"
+        @"The buffer's SIGN chooses the question. Positive is a skin that thick around "
+        @"every measured surface — what a survey looking outward wants, where the shadow "
+        @"behind a wall is part of the answer. NEGATIVE is the region the survey "
+        @"encloses, pulled in by that much, so the boundary sits inside the outer face of "
+        @"the walls and nothing beyond them is in the answer at all. That is what a job "
+        @"conducted entirely indoors wants, and it is why there is no longer a tick box "
+        @"for it: the number says how far in to come, which a tick box could not.\n\n"
+        @"Bridging openings is what keeps the shell on the outside of a building. There "
+        @"is no return in a window or an open door for the wrap to go round, so without "
+        @"it the shell dips into every reveal and threads itself into the rooms behind. "
+        @"Give it a little more than the widest hole you want closed — 1.2 does not quite "
+        @"close a 1.2 m window, 1.6 does — and the shell crosses the opening instead of "
+        @"following it inward. It only means anything for a shell that encloses "
+        @"something: a lone wall with a hole in it has no inside. A negative buffer needs "
+        @"this, since it has to know which side of the shell a cell is on.\n\n"
         @"The instrument minimum range matters more than it looks: a surface closer than "
         @"that returns nothing, and an empty cell that is really a wall at arm's length "
         @"would otherwise clear space straight through it, out to the maximum range.\n\n"
@@ -1477,10 +1503,11 @@ const char *kindLabel(check::Kind k) {
     const double range = fields[1].doubleValue;
     const long   tile   = fields[2].integerValue;
     const double margin = fields[3].doubleValue;
-    const double drawnM = fields[4].doubleValue;
-    const double minRng = fields[5].doubleValue;
-    const double skyDeg = fields[6].doubleValue;
-    const double darkSh = fields[7].doubleValue;
+    const double bridge = fields[4].doubleValue;
+    const double drawnM = fields[5].doubleValue;
+    const double minRng = fields[6].doubleValue;
+    const double skyDeg = fields[7].doubleValue;
+    const double darkSh = fields[8].doubleValue;
     // The margin may be NEGATIVE — see vis::Options::domainMargin. On an indoor
     // job that is how the space past the walls is left out of the question in the
     // first place, rather than filtered out of the answer afterwards.
@@ -1499,6 +1526,12 @@ const char *kindLabel(check::Kind k) {
     // in both places — the test never fires — because that is what rimg already
     // does with it, and a number the library treats as off should not be refused
     // here.
+    if (!(bridge >= 0.0) || bridge > 50.0) {
+        _status.stringValue =
+            @"The opening the shell may bridge is a width in metres, from 0 (bridge "
+             "nothing) to 50. A door is 0.9, a window 1.5, a shopfront 3.";
+        return;
+    }
     if (!(skyDeg >= 0.0) || skyDeg >= 180.0 || !(darkSh >= 0.0) || darkSh > 1.0) {
         _status.stringValue =
             @"The sky opening must be between 0 and 180 degrees and the dark border "
@@ -1511,6 +1544,7 @@ const char *kindLabel(check::Kind k) {
     opt.tileVoxels   = uint32_t(tile);
     opt.domainMargin = margin;
     opt.minRange     = minRng;
+    opt.wrapSpanGaps = bridge;
     opt.skyMinExtentDeg    = skyDeg;
     opt.darkBorderFraction = darkSh;
     if (drawnM > 0.0)
@@ -1523,7 +1557,6 @@ const char *kindLabel(check::Kind k) {
         opt.domain = (i >= 0 && i < 3) ? order[i] : vis::DomainMode::Shrinkwrap;
     }
     opt.skyOnly          = (skyOnly.state == NSControlStateValueOn);
-    opt.wrapInteriorOnly = (interior.state == NSControlStateValueOn);
     _intersectWrap   = (insideWrap.state == NSControlStateValueOn);
     const BOOL intersectWrap = _intersectWrap;
     opt.solid        = (solid.state == NSControlStateValueOn);
@@ -1654,8 +1687,23 @@ const char *kindLabel(check::Kind k) {
                     @"   ·   wrap: %llu cells at %.2f m, from %llu holding returns (⌘3)",
                     (unsigned long long)result->wrapGrid.domainCells, result->wrapGrid.cell,
                     (unsigned long long)result->wrapGrid.occupiedCells];
-        if (result->domain.kind == carve::Domain::Kind::Wrap && result->wrapGrid.interiorOnly &&
-            !result->wrapGrid.sealLeaked)
+        if (result->domain.kind == carve::Domain::Kind::Wrap &&
+            result->wrapGrid.spanGaps > 0.0)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   openings up to %.2f m bridged, %llu cells added to the envelope",
+                    result->wrapGrid.spanGaps,
+                    (unsigned long long)result->wrapGrid.bridgedCells];
+        if (result->domain.kind == carve::Domain::Kind::Wrap && result->wrapGrid.pulledIn)
+            warn = [warn stringByAppendingFormat:
+                    result->wrapGrid.sealLeaked
+                        ? @"   ·   ⚠︎ THE SHELL LEAKED: the flood reached a setup, so the "
+                           "boundary could not be pulled %.2f m in and the skin around every "
+                           "surface was used instead. Widen the opening the shell may bridge."
+                        : @"   ·   the boundary sits %.2f m inside the outer face of the shell, "
+                           "so nothing beyond it is in the question",
+                    std::fabs(result->wrapGrid.buffer)];
+        else if (result->domain.kind == carve::Domain::Kind::Wrap &&
+                 result->wrapGrid.interiorOnly && !result->wrapGrid.sealLeaked)
             warn = [warn stringByAppendingFormat:
                     @"   ·   interior only: %llu wrap cells outside the shell dropped",
                     (unsigned long long)result->wrapGrid.droppedOutside];

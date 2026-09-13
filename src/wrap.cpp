@@ -15,6 +15,9 @@ constexpr uint8_t kOccupied = 1u << 0;   // holds at least one return
 constexpr uint8_t kInDomain = 1u << 1;   // within the buffer of an occupied cell
 constexpr uint8_t kOutside  = 1u << 3;   // the flood reached it
 constexpr uint8_t kBarrier  = 1u << 4;   // sealed: what the flood cannot cross
+// The watertight surface of the surveyed shell: the measured returns, plus the
+// cells that close the openings between them. See the envelope note in build().
+constexpr uint8_t kEnvelope = 1u << 5;
 
 // WHAT STOPS THE INTERIOR-ONLY FLOOD, and how the outside is then peeled back.
 //
@@ -329,9 +332,13 @@ int Grid::testBox(const double blo[3], const double bhi[3]) const {
 bool size(const double lo[3], const double hi[3], const Options& opt, Grid& grid,
           std::string& err) {
     grid = Grid{};
-    double cell = (opt.cell > 0) ? opt.cell : opt.buffer / 4.0;
-    if (!(cell > 0)) { err = "wrap: the buffer must be positive"; return false; }
-    if (!(opt.buffer > 0)) { err = "wrap: the buffer must be positive"; return false; }
+    // The MAGNITUDE sizes the grid. A negative buffer is a shell pulled in rather
+    // than grown out — see Options::buffer — and it wants the same resolution and
+    // the same clearance at the boundary as the positive one.
+    const double reach = std::fabs(opt.buffer);
+    double cell = (opt.cell > 0) ? opt.cell : reach / 4.0;
+    if (!(cell > 0)) { err = "wrap: the buffer must not be zero"; return false; }
+    if (!(reach > 0)) { err = "wrap: the buffer must not be zero"; return false; }
     for (int k = 0; k < 3; ++k)
         if (!(hi[k] >= lo[k])) { err = "wrap: the site's extent is empty"; return false; }
 
@@ -343,8 +350,12 @@ bool size(const double lo[3], const double hi[3], const Options& opt, Grid& grid
     // — and the interior rule then drops nothing at all, silently, having decided
     // that the whole site is inside. Measured before this was fixed: a 3 m seal
     // on a grid padded 1.5 m dropped zero cells where a 1 m seal dropped 44,412.
-    const double seal = (opt.seal > 0.0) ? opt.seal : 0.5 * opt.buffer;
-    const double pad = opt.buffer + seal + 2.0 * cell;
+    // The closing is in here too: it dilates before it erodes, and a dilation that
+    // reached the boundary would touch the grid's own edge and be eroded back
+    // against it rather than against open air.
+    const double seal = (opt.seal > 0.0) ? opt.seal
+                                        : std::max(0.5 * reach, 0.5 * opt.spanGaps);
+    const double pad = reach + seal + 0.5 * std::max(0.0, opt.spanGaps) + 2.0 * cell;
     for (;;) {
         uint64_t cells = 1;
         bool fits = true;
@@ -435,13 +446,19 @@ void markScan(const MarkSource& src, Grid& grid) {
 void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ) {
     if (grid.empty()) return;
     grid.buffer = opt.buffer;
-    grid.interiorOnly = opt.interiorOnly;
+    grid.interiorOnly = opt.interiorOnly || opt.buffer < 0.0;
+    grid.pulledIn = opt.buffer < 0.0;
     grid.occupiedCells = 0;
     for (uint8_t b : grid.inDomain) if (b & kOccupied) ++grid.occupiedCells;
     if (grid.occupiedCells == 0) return;   // nothing marked: leave the domain empty
 
-    // The domain: everything within the buffer of a measured return.
-    const double bufCells = opt.buffer / grid.cell;
+    grid.spanGaps = 0.0;
+    grid.bridgedCells = 0;
+    // The domain: everything within the buffer of a measured return — or, where
+    // the buffer is negative, the region the survey encloses pulled in by that
+    // much. See Options::buffer. The magnitude sizes everything either way.
+    const bool   pullIn   = opt.buffer < 0.0;
+    const double bufCells = std::fabs(opt.buffer) / grid.cell;
     const double bufSq    = bufCells * bufCells;
     // The seal: how wide a hole in the survey the flood is not allowed through.
     // Half the buffer by default, so it closes holes up to a buffer wide — a
@@ -450,16 +467,31 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
     // rather than a cell count, because a doorway is a doorway whatever
     // resolution the grid happens to be at. The same distance field answers this
     // and the buffer, so the seal costs nothing beyond the comparison.
-    const double sealCells = ((opt.seal > 0.0) ? opt.seal : 0.5 * opt.buffer) / grid.cell;
+    // Derived from the OPENING the shell was told to bridge where there is one,
+    // and from the buffer otherwise. The seal is a statement about how wide a hole
+    // in the envelope counts as a portal, which is the same statement spanGaps
+    // makes — and tying it to the buffer alone breaks as soon as the buffer is
+    // small: half a metre of buffer gives a quarter metre of seal, and the flood
+    // walks in through the first raster-sized gap in a wall.
+    const double sealCells =
+        ((opt.seal > 0.0) ? opt.seal
+                          : std::max(0.5 * std::fabs(opt.buffer), 0.5 * opt.spanGaps)) /
+        grid.cell;
     const double sealSq    = sealCells * sealCells;
     grid.seal = sealCells * grid.cell;
     const std::vector<double> d2 = distanceTo(grid, kOccupied);
     for (size_t i = 0; i < grid.inDomain.size(); ++i) {
-        if (d2[i] <= bufSq)  grid.inDomain[i] |= kInDomain;
+        // Pulling in, the domain is not a skin around the surfaces at all, and it
+        // cannot be decided here: it is what the flood below does not reach, less
+        // the magnitude. Only the barrier is set now.
+        if (!pullIn && d2[i] <= bufSq) grid.inDomain[i] |= kInDomain;
         if (d2[i] <= sealSq) grid.inDomain[i] |= kBarrier;
     }
 
-    if (opt.interiorOnly) {
+    // Pulling in IS the interior question, and asks for the same flood.
+    // The flood runs whenever the answer depends on which side of the shell a cell
+    // is on: to pull the boundary in, to drop the outside, or to span an opening.
+    if (opt.interiorOnly || pullIn || opt.spanGaps > 0.0) {
         floodOutside(grid);
         // Back to the surfaces the seal held it away from — see growOutside.
         growOutside(grid, d2);
@@ -484,16 +516,91 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
             }
         }
 
-        if (!grid.sealLeaked) {
-            // A domain cell the flood reached is on the outside of the surveyed
-            // shell. Occupied cells are never dropped: they hold measured
-            // surface, and a surface is not unobserved space whichever side it
-            // was seen from.
-            for (size_t i = 0; i < grid.inDomain.size(); ++i) {
-                const uint8_t b = grid.inDomain[i];
-                if ((b & kInDomain) && (b & kOutside) && !(b & kOccupied)) {
-                    grid.inDomain[i] = uint8_t(b & ~kInDomain);
-                    ++grid.droppedOutside;
+        // THE ENVELOPE: the watertight surface of the surveyed shell.
+        //
+        // This is what spans an opening, and it is a topological answer rather
+        // than a morphological one because morphology cannot give it. A closing —
+        // dilate by r, erode by r — is the textbook way to fill a hole, and it
+        // does not work on a SURFACE: a ball of radius r always fits through a
+        // hole of radius a by sitting at sqrt(r*r - a*a) from the plane, so the
+        // erosion takes back exactly what the dilation bridged. Measured on a wall
+        // with a 1.2 m window: at a 1.4 m closing, 24 cells filled, and the middle
+        // of the window open at every radius tried.
+        //
+        // The flood does work, because it asks a different question. A barrier
+        // half an opening wide blocks a 6-connected path through it, so whatever
+        // the flood cannot reach is enclosed — and the cells of that region that
+        // touch the outside ARE the shell's surface, openings included. No ball
+        // has to fit anywhere.
+        //
+        // Marked here, between the flood and the domain, and only where an opening
+        // was asked to be spanned: without spanGaps the envelope is the occupancy
+        // and this is the shape it has always been.
+        if (opt.spanGaps > 0.0 && !grid.sealLeaked) {
+            const int64_t X = grid.dim[0], Y = grid.dim[1], Z = grid.dim[2];
+            for (int64_t z = 0; z < Z; ++z)
+                for (int64_t y = 0; y < Y; ++y)
+                    for (int64_t x = 0; x < X; ++x) {
+                        const size_t i = grid.index(uint32_t(x), uint32_t(y), uint32_t(z));
+                        const uint8_t b = grid.inDomain[i];
+                        if (b & (kOutside | kOccupied)) continue;
+                        static const int64_t d[6][3] = {{1,0,0},{-1,0,0},{0,1,0},
+                                                        {0,-1,0},{0,0,1},{0,0,-1}};
+                        for (const auto& n : d) {
+                            const int64_t nx = x + n[0], ny = y + n[1], nz = z + n[2];
+                            if (nx < 0 || ny < 0 || nz < 0 || nx >= X || ny >= Y || nz >= Z)
+                                continue;
+                            if (!(grid.inDomain[grid.index(uint32_t(nx), uint32_t(ny),
+                                                           uint32_t(nz))] & kOutside))
+                                continue;
+                            grid.inDomain[i] = uint8_t(b | kEnvelope);
+                            ++grid.bridgedCells;
+                            break;
+                        }
+                    }
+            grid.spanGaps = 2.0 * sealCells * grid.cell;
+        }
+
+        if (grid.sealLeaked && pullIn) {
+            // Pulling in has nothing to fall back on: the domain IS what the flood
+            // did not reach, and a flood that got inside leaves almost nothing.
+            // So the whole region within the magnitude of a surface is used
+            // instead — the positive question, which is merely too generous —
+            // and the leak is reported.
+            for (size_t i = 0; i < grid.inDomain.size(); ++i)
+                if (d2[i] <= bufSq) grid.inDomain[i] |= kInDomain;
+        } else if (pullIn) {
+            // THE SHELL, PULLED IN. Everything the flood did not reach is what the
+            // survey encloses — its interior and the walls around it — and eroding
+            // that by the magnitude is keeping the cells further than it from the
+            // outside. The boundary then sits that far inside the outer face of
+            // the wall, so the wall and everything beyond it are out of the
+            // question and no point from outside can be in the answer.
+            const std::vector<double> dOut = distanceTo(grid, kOutside);
+            for (size_t i = 0; i < grid.inDomain.size(); ++i)
+                if (dOut[i] > bufSq) grid.inDomain[i] |= kInDomain;
+        } else {
+            // The skin, now measured from the envelope rather than from the bare
+            // returns, so it crosses an opening instead of following it inward.
+            if (opt.spanGaps > 0.0 && !grid.sealLeaked) {
+                const std::vector<double> dEnv =
+                    distanceTo(grid, uint8_t(kOccupied | kEnvelope));
+                for (size_t i = 0; i < grid.inDomain.size(); ++i)
+                    if (dEnv[i] <= bufSq) grid.inDomain[i] |= kInDomain;
+            }
+            if (grid.sealLeaked) {
+                // Nothing to drop and nothing to trust: the skin stands as it is.
+            } else if (opt.interiorOnly) {
+                // A domain cell the flood reached is on the outside of the
+                // surveyed shell. Occupied cells are never dropped: they hold
+                // measured surface, and a surface is not unobserved space
+                // whichever side it was seen from.
+                for (size_t i = 0; i < grid.inDomain.size(); ++i) {
+                    const uint8_t b = grid.inDomain[i];
+                    if ((b & kInDomain) && (b & kOutside) && !(b & kOccupied)) {
+                        grid.inDomain[i] = uint8_t(b & ~kInDomain);
+                        ++grid.droppedOutside;
+                    }
                 }
             }
         }

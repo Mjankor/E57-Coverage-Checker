@@ -167,13 +167,23 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
                     "%s\n"
                     "            %.0f m^3, against %.0f m^3 of range spheres (%.0fx smaller)\n",
                     g.cell, g.buffer,
-                    g.interiorOnly ? ", interior only" : ", both sides of every surface",
+                    g.pulledIn ? " pulled INSIDE the shell"
+                               : ", both sides of every surface",
                     (unsigned long long)g.occupiedCells,
                     (unsigned long long)g.domainCells,
                     g.coarsened ? "  (cells were coarsened to fit the budget)" : "",
                     res.domainVolume, res.sphereVolume,
                     res.domainVolume > 0 ? res.sphereVolume / res.domainVolume : 0.0);
-        if (g.interiorOnly && !g.sealLeaked)
+        if (g.spanGaps > 0.0)
+            std::printf("            openings up to %.2f m bridged, %llu cells added to the "
+                        "envelope\n", g.spanGaps, (unsigned long long)g.bridgedCells);
+        if (g.pulledIn)
+            std::printf("            the boundary sits %.2f m inside the outer face of the "
+                        "shell,\n            so nothing beyond it is in the question%s\n",
+                        std::fabs(g.buffer),
+                        g.sealLeaked ? " — BUT THE SHELL LEAKED, so the skin around every"
+                                       " surface was used instead" : "");
+        else if (g.interiorOnly && !g.sealLeaked)
             std::printf("            %llu cells dropped as outside the surveyed shell\n",
                         (unsigned long long)g.droppedOutside);
     } else if (res.domain.kind == carve::Domain::Kind::Box) {
@@ -439,14 +449,18 @@ void usage() {
         "          rather than as mostly sky. Read the number knowing what it is:\n"
         "          roughly the margin times the area of surface not seen from both\n"
         "          sides, so doubling the margin roughly doubles it.\n"
-        "  --interior\n"
-        "          (carve, with --domain wrap) The survey was conducted entirely\n"
-        "          inside a building, so the space outside the walls is not the\n"
-        "          question. Without it the margin applies on both sides of every\n"
-        "          surface, which is what an outward-looking survey wants: the shadow\n"
-        "          behind a wall is part of the answer. With it, a shell of unobserved\n"
-        "          voxels is not wrapped round the outside of the building, hiding\n"
-        "          everything within it.\n"
+        "          A NEGATIVE margin is a different question, not a smaller one: the\n"
+        "          region the survey encloses, pulled in by that much, so the boundary\n"
+        "          sits inside the outer face of the walls and nothing beyond them —\n"
+        "          no point, no shadow — is in the answer. That is what a job\n"
+        "          conducted entirely indoors wants, and it replaces --interior.\n"
+        "  --span-gaps <m>\n"
+        "          (carve, with --domain wrap) How wide an opening the shell may\n"
+        "          bridge. A closing of the occupancy, so it fills a hole up to TWICE\n"
+        "          this wide and changes nothing else: a metre bridges a two metre\n"
+        "          door or window and leaves a wall's shape alone. Without it the wrap\n"
+        "          dips into every reveal and runs through every open door, threading\n"
+        "          itself into the rooms behind.\n"
         "  --wrap-cell <m>\n"
         "          (carve, with --domain wrap) Cell size of the occupancy grid.\n"
         "          Default 0, a quarter of the margin: fine enough that the dilation\n"
@@ -550,10 +564,17 @@ int main(int argc, char** argv) {
             }
             continue;
         }
-        // The one switch that separates the two kinds of survey. See
-        // vis::Options::wrapInteriorOnly.
+        // --interior is gone: a NEGATIVE margin says the same thing better, as a
+        // distance rather than as a switch. See wrap::Options::buffer.
         if (std::strcmp(argv[i], "--interior") == 0) {
-            co.wrapInteriorOnly = true;
+            std::printf("--interior is gone: pass a negative --margin instead, which "
+                        "pulls the\nshrinkwrap that far inside the outer face of the "
+                        "walls\n");
+            return 2;
+        }
+        if (std::strcmp(argv[i], "--span-gaps") == 0 && i + 1 < argc) {
+            co.wrapSpanGaps = std::strtod(argv[++i], nullptr);
+            if (co.wrapSpanGaps < 0.0) { std::printf("--span-gaps must not be negative\n"); return 2; }
             continue;
         }
         if (std::strcmp(argv[i], "--wrap-cell") == 0 && i + 1 < argc) {

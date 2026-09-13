@@ -106,26 +106,31 @@ struct Options {
     bool     solid      = true;
 
     // See carve::EarlyOut. Saturated is exact; AnyEvidence is exact for the
-    // unknown set only and has to be asked for.
-    carve::EarlyOut earlyOut = carve::EarlyOut::Saturated;
+    // unknown set only, which is the set being reported, and it is much faster —
+    // so it is the default and `visible` and `occupied` are read as lower bounds.
+    carve::EarlyOut earlyOut = carve::EarlyOut::AnyEvidence;
 
-    DomainMode domain = DomainMode::MeasuredExtent;
+    // The tightest region, and the one that makes the fraction mean something.
+    DomainMode domain = DomainMode::Shrinkwrap;
 
     // Shrinkwrap settings; ignored unless `domain` is Shrinkwrap. The buffer is
     // `domainMargin` — the same parameter, meaning the same thing, applied to a
-    // wrap instead of a box.
+    // wrap instead of a box, and SIGNED: see wrap::Options::buffer.
     //
-    // `wrapInteriorOnly` is the one switch that distinguishes the two kinds of
-    // survey. False for one that looks outward, where the shadow behind a wall is
-    // part of the answer and the buffer is what stops it running to the horizon.
-    // True for one conducted entirely inside a building, where the space outside
-    // the walls is not the question — and where a shell of unobserved voxels
-    // wrapped round the outside hides everything within it.
+    // There is no interior-only switch any more. It said "leave out the space
+    // past the walls", which a negative margin says better: as a distance, in the
+    // units the rest of the sheet already uses, and by moving the boundary inside
+    // the wall rather than by hugging both of its faces.
     //
-    // It is a switch rather than something inferred, because getting it wrong
-    // silently would either hide a building's interior or hide nothing at all,
-    // and neither announces itself in the picture.
-    bool     wrapInteriorOnly = false;
+    // `wrapSpanGaps` is how wide an opening the shell may bridge — see
+    // wrap::Options::spanGaps. Without it a wrap dips into every window reveal
+    // and runs through every open door, which threads it into the rooms behind.
+    // Two metres: a door, a window, and the gaps a raster leaves in a wall at a
+    // grazing angle are all narrower than that, and a lane between two buildings
+    // is wider. On by default because the negative buffer depends on it — that
+    // question asks which side of the shell a cell is on, and an envelope with a
+    // hole in it has no sides.
+    double   wrapSpanGaps = 2.0;
     double   wrapCell     = 0.0;             // 0 derives it from the buffer
     uint64_t wrapMaxCells = 64ull << 20;
     // How far past the last measured return the question still applies. Two
@@ -146,11 +151,14 @@ struct Options {
     //   each axis so the box cannot invert — an inverted box would carve nothing
     //   and report perfect coverage.
     //
-    //   Shrinkwrap. The buffer is a dilation radius and cannot be negative, so
-    //   the magnitude is used and the sign is read as a request to drop the
-    //   space outside the surveyed shell — which is wrapInteriorOnly. Same
-    //   meaning, expressed in the units the rest of the run sheet uses.
-    double   domainMargin = 2.0;
+    //   Shrinkwrap. The sign goes straight through — see wrap::Options::buffer.
+    //   Positive is a skin around the measured surfaces; negative is the region
+    //   the survey encloses, pulled in by that much, so the boundary sits inside
+    //   the outer face of the walls and nothing beyond them is in the question.
+    //
+    // Half a metre by default, which is a tight question: it asks about the space
+    // close to what was measured and nothing else.
+    double   domainMargin = 0.5;
 
     // The instrument's rated MINIMUM range, in metres, passed through to
     // rimg::Options. A surface inside it returns nothing, and believing that

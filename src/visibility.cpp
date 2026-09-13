@@ -851,21 +851,22 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         // it can decide which of them the survey reached.
         if (have && opt.domain == DomainMode::Shrinkwrap) {
             wrap::Options wo;
-            // A negative margin on a wrap means the same thing it means on a box
-            // — leave out the space past the walls — and for a wrap that is
-            // exactly what interiorOnly already does. The wrap's own buffer has
-            // to stay positive: it is a dilation radius, and the domain is the
-            // space within it of a return, which is not a quantity that can be
-            // negative. So the magnitude sets the buffer and the sign asks for
-            // the outside to be dropped.
+            // The sign goes STRAIGHT THROUGH now, because the wrap understands it
+            // — see wrap::Options::buffer. Positive is a skin around the measured
+            // surfaces; negative is the region the survey encloses, pulled in by
+            // that much, so the boundary sits inside the outer face of the walls
+            // and everything beyond them is out of the question.
             //
-            // Which is why a negative margin makes the "scanned entirely
-            // indoors" tick box unnecessary rather than redundant: it is the same
-            // request, made in the units the rest of the sheet already uses.
-            wo.buffer       = std::fabs(opt.domainMargin);
+            // It used to arrive here as a magnitude plus a request to drop the
+            // outside, which is a different and blunter thing: it removed the
+            // space past the shell but left the domain hugging both faces of every
+            // wall, so points from outside stayed in the answer. A distance says
+            // how far in to come, which is what was being asked for.
+            wo.buffer       = opt.domainMargin;
+            wo.spanGaps     = opt.wrapSpanGaps;
             wo.cell         = opt.wrapCell;
             wo.maxCells     = opt.wrapMaxCells;
-            wo.interiorOnly = opt.wrapInteriorOnly || opt.domainMargin < 0.0;
+            wo.interiorOnly = opt.domainMargin < 0.0;
             std::string werr;
             if (!wrap::size(lo, hi, wo, out.wrapGrid, werr)) {
                 // A wrap that cannot be sized is not a reason to refuse the run:

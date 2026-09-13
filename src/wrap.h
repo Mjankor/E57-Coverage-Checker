@@ -78,10 +78,63 @@
 namespace wrap {
 
 struct Options {
-    // How far past the last measured return the question still applies. The
-    // dilation radius, in metres, and the only parameter with a physical meaning
-    // — everything else here is derived from it.
+    // How far past the last measured return the question still applies, in
+    // metres, and the only parameter with a physical meaning — everything else
+    // here is derived from its magnitude.
+    //
+    // SIGNED, and the sign chooses between two shapes rather than scaling one:
+    //
+    //   POSITIVE — a shell around the measured surfaces: every cell within the
+    //   buffer of a return. A survey that looks outward wants this. The middle of
+    //   a large room is not in it, which is right for the question: unobserved
+    //   space collects against surfaces, and the volume is closer to buffer x
+    //   (area seen from one side) than to a volume of space.
+    //
+    //   NEGATIVE — the region the survey ENCLOSES, pulled in by the magnitude, so
+    //   the boundary sits that far inside the outer face of the walls. Everything
+    //   outside the building, and the wall itself, is then out of the question,
+    //   which is what a job conducted entirely indoors wants — said as a distance
+    //   instead of as a switch, and with the wall thickness under the operator's
+    //   hand. It needs the flood that finds the outside, so it implies
+    //   interiorOnly and does not need it set.
+    //
+    // The magnitudes are not comparable across the sign: +2 asks about a two
+    // metre skin around everything measured; -2 asks about a whole interior less
+    // a two metre skin. Both are useful, and they are different questions.
     double buffer = 2.0;
+
+    // How wide an opening the shell may bridge, in METRES OF OPENING. Zero leaves
+    // the measured surfaces as they are.
+    //
+    // The width of the hole, not a radius: a doorway is 0.9, a window 1.5, a
+    // shopfront 3. That is the number an operator can measure on site, so it is
+    // the number asked for; the closing radius underneath is half of it, and the
+    // cell count underneath that is nobody's business.
+    //
+    // NOT A CLOSING, though that is the textbook answer and it was tried. Dilate
+    // by r and erode by r fills a hole in a SOLID; it cannot fill one in a
+    // surface, because a ball of radius r always fits through a hole of radius a
+    // by sitting at sqrt(r*r - a*a) from the plane, so the erosion takes back
+    // exactly what the dilation bridged. Measured on a wall with a 1.2 m window:
+    // at a 1.4 m closing, 24 cells filled, and the middle of the window still open
+    // at every radius tried.
+    //
+    // TOPOLOGY INSTEAD. A barrier half an opening wide blocks a path through it,
+    // so whatever the flood cannot reach from the grid's boundary is enclosed —
+    // and the cells of that enclosed region that touch the outside are the shell's
+    // surface, openings included. No ball has to fit anywhere. That surface is
+    // what the buffer is then measured from, so the shell crosses a window instead
+    // of following the reveal inward and threading the wrap into the room behind.
+    //
+    // Which means this only means anything for a shell that ENCLOSES something. A
+    // lone wall with a hole in it has no inside, so there is nothing for an
+    // opening to be an opening into, and nothing is bridged.
+    //
+    // Ask for a little more than the widest hole to be closed: the barrier has to
+    // exceed half the opening, so 1.2 does not quite close a 1.2 m window and 1.6
+    // does. Too large starts bridging things that are genuinely apart, a lane
+    // between two buildings being the obvious one.
+    double spanGaps = 0.0;
 
     // Cell size, in metres. Zero derives it from the buffer.
     //
@@ -146,6 +199,14 @@ struct Grid {
     // where one that has deleted the interior is not.
     bool     sealLeaked = false;
     double   seal = 0.0;           // the sealing radius actually used, in metres
+    // The closing that bridged the openings, in metres, and the cells it added to
+    // the occupancy — a window, a doorway, a stretch of wall nobody reached. See
+    // Options::spanGaps.
+    double   spanGaps = 0.0;
+    uint64_t bridgedCells = 0;
+    // The shell was pulled IN rather than grown out: the buffer was negative, so
+    // the domain is what the survey encloses less that much. See Options::buffer.
+    bool     pulledIn = false;
     bool     coarsened = false;    // the cell size grew to fit the budget
     bool     interiorOnly = false; // which rule was applied
     double   buffer = 0.0;
