@@ -1022,6 +1022,44 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
         return std::fabs(im.map.elByRow[r] * kDeg - poleEl);
     };
 
+    // AND THE SKY STOPS AT THE HORIZON. From the world's zenith down to the world's
+    // horizon can be sky; below that, never. Whatever is down there is ground, or a
+    // building, or a surface the instrument could not read — and it is certainly
+    // not a ray that went out and found nothing, which is the only thing this test
+    // is entitled to name.
+    //
+    // The horizon is the WORLD'S, not the raster's. The cells are about the
+    // instrument's own axis, which the levelling correction deliberately keeps them
+    // about, so a row is not a line of constant world elevation: with the tripod
+    // leaning 0.66 degrees the two differ by that much, and they differ by the
+    // whole pose for an instrument mounted any other way. So world up is carried
+    // into the frame the cells are in — through the pose, then through the tilt —
+    // and a cell is at or above the horizon when its own direction has a
+    // non-negative component along it. Which makes this a per-CELL test rather than
+    // a per-row one: near the horizon the answer changes with azimuth, and that is
+    // the lean of the instrument, not noise.
+    double ux = 0.0, uy = 0.0, uz = (poleEl >= 0.0) ? 1.0 : -1.0;
+    if (im.hasPose) {
+        // World up in the scanner's frame is the third row of the scanner-to-world
+        // rotation; the tilt then takes it into the instrument's.
+        const viewer::Rigid R = viewer::rigidFromPose(im.pose);
+        ux = R.R[6]; uy = R.R[7]; uz = R.R[8];
+        im.toInstrument(ux, uy, uz);
+    }
+    std::vector<double> sinEl(im.rows), cosEl(im.rows), cosAz(im.cols), sinAz(im.cols);
+    for (uint32_t r = 0; r < im.rows; ++r) {
+        sinEl[r] = std::sin(im.map.elByRow[r]);
+        cosEl[r] = std::cos(im.map.elByRow[r]);
+    }
+    for (uint32_t c = 0; c < im.cols; ++c) {
+        cosAz[c] = std::cos(im.map.azByCol[c]);
+        sinAz[c] = std::sin(im.map.azByCol[c]);
+    }
+    auto aboveHorizon = [&](int64_t r, int64_t c) {
+        return cosEl[size_t(r)] * (cosAz[size_t(c)] * ux + sinAz[size_t(c)] * uy) +
+               sinEl[size_t(r)] * uz >= 0.0;
+    };
+
     // How many cells a bridge may span, in each direction, from the measured step.
     const double elStepDeg = std::fabs(im.map.elByRow.size() > 1
                                        ? (im.map.elByRow.back() - im.map.elByRow.front()) * kDeg /
@@ -1116,6 +1154,7 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
     for (uint32_t c = 0; c < im.cols; ++c) {
         const size_t i = size_t(poleRow) * im.cols + c;
         if (Status(im.cells[i].status) != Status::NoReturn || !open[i] || sky[i]) continue;
+        if (!aboveHorizon(int64_t(poleRow), int64_t(c))) continue;
         sky[i] = 1;
         stack.push_back(i);
     }
@@ -1148,6 +1187,8 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
                 if (st == Status::OutsideFov) break;       // never cross the cone
                 if (st == Status::Hit) continue;           // a branch: step over it
                 if (!open[j]) break;   // an empty cell, but not an opening: a speck
+                // And the sky ends at the horizon, whatever is open below it.
+                if (!aboveHorizon(nr, nc)) { ++rep.belowHorizon; break; }
                 if (!sky[j]) { sky[j] = 1; stack.push_back(j); }
                 break;                                     // reached open sky again
             }
@@ -2499,6 +2540,7 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         out.diag.skyPoleFromCone   = rep.fromCone;
         out.diag.skyPoleDisputed   = rep.poseDisagreesWithCone;
         out.diag.skyPoleAtFirstRow = rep.poleAtFirstRow;
+        out.diag.skyBelowHorizon   = rep.belowHorizon;
         // How far the region got and how big it was, whether or not it was
         // believed. A rejected region is the more interesting of the two: an
         // opening that reached most of the raster and was thrown out for not

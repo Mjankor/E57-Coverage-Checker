@@ -318,6 +318,12 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                                     "cells with returns all around them, which\n                "
                                     "  is a speckled surface and not a view of the sky\n");
                     }
+                    if (img.diag.skyBelowHorizon) {
+                        o.add("                  it stopped at the world's horizon: %llu open "
+                                    "cells below it were\n                  refused, being ground "
+                                    "or building rather than a view of the sky\n",
+                                    (unsigned long long)img.diag.skyBelowHorizon);
+                    }
                     // Which way was up, and what said so. The pose is the world's
                     // answer and is followed; the cone is the fallback. A scan
                     // where the two disagree is a scan to go and look at.

@@ -572,6 +572,32 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
         CHECK(rep.poseDisagreesWithCone, "and the disagreement is reported, not hidden");
     }
 
+    // THE SKY STOPS AT THE HORIZON. A scan on open ground with nothing standing in
+    // it returns from the ground and from nothing else, so the empty region runs
+    // from the zenith all the way down past the horizon to the instrument's own
+    // cone. Everything above zero is sky; everything below it is ground the
+    // instrument could not read, and naming that sky clears rays into the earth.
+    {
+        // Empty from the zenith to the bottom of the sweep: 135 degrees on offer.
+        rimg::RangeImage im = build(180, false, false);
+        im.hasPose = true;
+        im.pose = e57::Pose{};                       // upright and level
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.isSky, "the opening above is the sky");
+        CHECK(rep.extentDeg > 85.0 && rep.extentDeg <= 90.5,
+              "reaching the horizon and stopping there, not the 135 degrees on offer");
+        CHECK(rep.belowHorizon > 0, "the cells below it were refused, and counted");
+
+        // Cell by cell: the zenith and the open sky above the horizon are sky; a
+        // few degrees below it, nothing is.
+        CHECK(sky[size_t(im.rows - 1) * im.cols] == 1, "the zenith is sky");
+        CHECK(sky[size_t(120) * im.cols] == 1,        // el +45.3
+              "so is the open sky above the horizon");
+        CHECK(sky[size_t(55) * im.cols] == 0,         // el -3.5
+              "and nothing below the horizon is");
+    }
+
     // An INTERIOR, speckled with single empty cells — grazing incidence, dark
     // trim, a glazed panel — and nothing open anywhere. Every speck is within a
     // bridge of the next, so a fill that only asked "is there an empty cell within

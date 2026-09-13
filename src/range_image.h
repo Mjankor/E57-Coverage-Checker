@@ -461,6 +461,8 @@ struct Diagnostics {
     bool     skyPoleFromCone = false;
     bool     skyPoleDisputed = false;
     bool     skyPoleAtFirstRow = false;
+    // Open cells the sky fill refused for sitting below the world's horizon.
+    uint64_t skyBelowHorizon = 0;
     uint64_t skyCells = 0;
     double   skyExtentDeg = 0.0;
     // And what it cost the opening at the pole to fall short of the angle: those
@@ -782,6 +784,11 @@ struct SkyReport {
     bool     poseDisagreesWithCone = false;
     uint64_t cells = 0;
     double   extentDeg = 0.0;       // how far from the pole the region reaches
+    // Open cells the fill refused because they sit below the world's horizon. The
+    // sky runs from the zenith down to the horizon and stops: what is below it is
+    // ground, or a building, or a surface that could not be read, and none of
+    // those is a ray that went out and found nothing.
+    uint64_t belowHorizon = 0;
     // Cells demoted because the opening at the pole was NOT sky. An opening there
     // is a view of the sky and clears, or it is a hole in whatever the instrument
     // was under and establishes nothing; there is no third thing for it to be.
