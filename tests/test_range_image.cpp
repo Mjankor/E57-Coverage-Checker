@@ -598,6 +598,48 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
               "and nothing below the horizon is");
     }
 
+    // A BAND OF COLUMNS THE FILE HAS NO DATA FOR, which is what the fill was
+    // really walking down. The declared grid says 2640 columns and the file writes
+    // 2568 lines; the other 72 are cells the grid promises and no record lands in,
+    // so the fill calls every one of them a ray that came back empty — 1250 of
+    // them in a column, from below the instrument's feet to its zenith. Adjacent,
+    // they are a full-height open corridor from the zenith to the floor, and a sky
+    // that reached the zenith walked straight down it. That is how a small void
+    // overhead came back as 135 degrees of sky holding every empty cell in the
+    // scan, and why cutting it at the horizon only halved the problem.
+    {
+        rimg::RangeImage im = build(20, false, false);     // a 15 degree void, no sky
+        for (uint32_t c = 100; c < 130; ++c)               // and a band of no data
+            for (uint32_t r = 0; r < im.rows; ++r)
+                im.cells[size_t(r) * im.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+        im.hasPose = true;
+        im.pose = e57::Pose{};
+
+        // Left as no-returns, the corridor runs the void down to the bottom.
+        rimg::RangeImage believed = im;
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport bad = rimg::identifySky(believed, opt, sky);
+        CHECK(bad.extentDeg > 80.0,
+              "an empty column band carries the fill the length of the raster");
+
+        // Marked unsampled, it is not a path and not a no-return.
+        rimg::RangeImage fixed = im;
+        CHECK(rimg::markUnsampledColumns(fixed) == 30, "the band is found, column by column");
+        CHECK(fixed.statusAt(90, 115) == rimg::Status::OutsideFov,
+              "and every cell of it establishes nothing");
+        CHECK(fixed.statusAt(90, 99) == rimg::Status::Hit, "the columns beside it are untouched");
+        std::vector<uint8_t> sky2;
+        const rimg::SkyReport good = rimg::identifySky(fixed, opt, sky2);
+        CHECK(good.extentDeg < 20.0, "and the void overhead is only as big as it is");
+        CHECK(!good.isSky, "so it is not sky");
+
+        // A column that returned anything at all is data, not a gap.
+        rimg::RangeImage one = im;
+        one.cells[size_t(90) * one.cols + 115] = rimg::Cell{300, uint8_t(rimg::Status::Hit)};
+        CHECK(rimg::markUnsampledColumns(one) == 29, "one return is enough to keep a column");
+    }
+
     // An INTERIOR, speckled with single empty cells — grazing incidence, dark
     // trim, a glazed panel — and nothing open anywhere. Every speck is within a
     // bridge of the next, so a fill that only asked "is there an empty cell within

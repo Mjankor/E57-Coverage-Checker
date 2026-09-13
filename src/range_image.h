@@ -463,6 +463,9 @@ struct Diagnostics {
     bool     skyPoleAtFirstRow = false;
     // Open cells the sky fill refused for sitting below the world's horizon.
     uint64_t skyBelowHorizon = 0;
+    // Columns of the declared grid holding no return anywhere in their sweep, so
+    // the file has no data for them. See markUnsampledColumns.
+    uint64_t emptyColumns = 0;
     uint64_t skyCells = 0;
     double   skyExtentDeg = 0.0;
     // And what it cost the opening at the pole to fall short of the angle: those
@@ -824,6 +827,11 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
 uint64_t filterDarkBorderedZones(RangeImage& im, const std::vector<float>& intensity,
                                  const std::vector<uint8_t>& sky, const Options& opt);
 void markBlindCone(RangeImage& im, const Options& opt);
+// Marks every column of the declared grid that holds no return anywhere along its
+// sweep as unsampled — the file has no data for it, and a column of invented
+// no-returns is a full-height wedge that clears to the rated range and a path a
+// sky fill walks from the zenith to the floor. Returns the columns marked.
+uint64_t markUnsampledColumns(RangeImage& im);
 
 const char* statusName(Status s);
 

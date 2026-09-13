@@ -586,6 +586,19 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                         o.add("      bands     : %u leading and %u trailing grid rows hold no "
                                     "returns\n                  %s\n", lead, trail, believed);
                     }
+                    // The same thing on the other axis, and not ambiguous at all:
+                    // a column runs the whole sweep, so one that returned nothing
+                    // anywhere along it is data the file does not have.
+                    if (img.diag.emptyColumns) {
+                        o.add("      no data   : %llu of %u grid columns hold no return anywhere "
+                                    "in their\n                  sweep — the file has no data for "
+                                    "them, so they are unsampled\n                  rather than "
+                                    "rays that came back empty. Believed, each is a\n            "
+                                    "      full-height wedge clearing to the rated range, and a "
+                                    "path a\n                  sky fill walks from the zenith to "
+                                    "the floor.\n",
+                                    (unsigned long long)img.diag.emptyColumns, img.cols);
+                    }
                 } else {
                     o.add("      grid      : range image failed — %s\n", rerr.c_str());
                     ++failures;

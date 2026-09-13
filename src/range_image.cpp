@@ -1404,6 +1404,60 @@ uint64_t filterDarkBorderedZones(RangeImage& im, const std::vector<float>& inten
     return demoted;
 }
 
+// Columns of the declared grid that the file holds no data for.
+//
+// The grid says 2640 columns; the file writes 2568 lines. The other 72 are cells
+// the declared grid promises and no record ever lands in, and the fill has no
+// choice but to call each of them a ray that came back empty — 1250 of them in a
+// column, running the instrument's whole sweep from below its own feet to its
+// zenith.
+//
+// THEY ARE NOT NO-RETURNS, and the argument is the blind cone's, one axis over. A
+// column spans -78.7 to +89.9 degrees: on any terrestrial setup it crosses the
+// floor a metre or two away, and often a wall and a ceiling as well. A column
+// that returned NOTHING over all of that did not look at an empty world; the file
+// simply has no data for it. Believed, each is a full-height wedge of space
+// clearing to the rated range in every direction at once — a vertical slab from
+// the ceiling down through the floor — and if the missing columns are adjacent,
+// which they were, the slab is as wide as their whole band. It is also a path: a
+// fill starting at the zenith walks straight down an empty column to the cone,
+// which is how an opening at the zenith came to be 135 degrees across and to hold
+// every empty cell in the scan.
+//
+// So they are marked unsampled: the instrument did not look there, and nothing is
+// established. Columns only. A fully empty ROW is the ambiguous case — a band of
+// sky at one end of the sweep looks exactly like the instrument's own mount at the
+// other, which is what markBlindCone exists to decide — and this must not pre-empt
+// it.
+//
+// The one scan this would be wrong about is one where a column genuinely returned
+// nothing over its entire sweep, which needs the instrument to see neither ground
+// nor structure in that whole vertical plane. If such a scan exists, this costs it
+// the clearing down that column and reports the count, which is the conservative
+// direction and a visible one.
+uint64_t markUnsampledColumns(RangeImage& im) {
+    if (im.rows == 0 || im.cols == 0) return 0;
+    uint64_t columns = 0;
+    for (uint32_t c = 0; c < im.cols; ++c) {
+        bool any = false;
+        for (uint32_t r = 0; r < im.rows && !any; ++r)
+            any = Status(im.cells[size_t(r) * im.cols + c].status) == Status::Hit;
+        if (any) continue;
+        ++columns;
+        for (uint32_t r = 0; r < im.rows; ++r) {
+            Cell& cell = im.cells[size_t(r) * im.cols + c];
+            if (Status(cell.status) == Status::OutsideFov) continue;
+            if (Status(cell.status) == Status::NoReturn) {
+                im.diag.noReturns -= std::min<uint64_t>(1, im.diag.noReturns);
+                ++im.diag.outsideFov;
+            }
+            cell.status  = uint8_t(Status::OutsideFov);
+            cell.rangeCm = 0;
+        }
+    }
+    return columns;
+}
+
 // Finds and marks the instrument's blind cone, from this scan and nothing else.
 //
 // The cone is an unsampled band running off one end of the raster, and which end
@@ -2521,6 +2575,10 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         out.cells[i].rangeCm = uint16_t(std::min(opt.maxRange * 100.0, 65535.0));
         ++out.diag.noReturns;
     }
+    // Columns the file holds no data for at all — see markUnsampledColumns.
+    // Before the cone, because a column of nothing is not a band of sky and must
+    // not be reasoned about as one.
+    out.diag.emptyColumns = markUnsampledColumns(out);
     // The blind cone under the tripod: never sampled, so it establishes nothing.
     // Everything else empty is a ray that was fired and came back with nothing,
     // and clears along its path — whatever it passed through on the way.
