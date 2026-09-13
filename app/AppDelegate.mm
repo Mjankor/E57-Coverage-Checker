@@ -1699,6 +1699,13 @@ const char *kindLabel(check::Kind k) {
                     @"   ·   openings up to %.2f m bridged, %llu cells added to the envelope",
                     result->wrapGrid.spanGaps,
                     (unsigned long long)result->wrapGrid.bridgedCells];
+        if (result->domain.kind == carve::Domain::Kind::Wrap &&
+            result->wrapGrid.offsetQuantised)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   the wrap's cells coarsened to %.2f m to fit the budget, past the "
+                     "%.2f m offset — so the boundary came in by a cell rather than by the "
+                     "distance asked for",
+                    result->wrapGrid.cell, std::fabs(result->wrapGrid.buffer)];
         if (result->domain.kind == carve::Domain::Kind::Wrap && result->wrapGrid.pulledIn)
             warn = [warn stringByAppendingFormat:
                     @"   ·   pulled in %.2f m: %llu cells inside the shells that were deep "

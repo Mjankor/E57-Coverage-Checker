@@ -421,8 +421,10 @@ bool size(const double lo[3], const double hi[3], const Options& opt, Grid& grid
     // against it rather than against open air.
     const double seal = (opt.seal > 0.0) ? opt.seal
                                         : std::max(0.5 * reach, 0.5 * opt.spanGaps);
-    const double pad = reach + seal + 0.5 * std::max(0.0, opt.spanGaps) + 2.0 * cell;
     for (;;) {
+        // Recomputed as the cell grows: the two cells of slack are two of whatever
+        // the cell is now, not two of what it was when the first try was made.
+        const double pad = reach + seal + 0.5 * std::max(0.0, opt.spanGaps) + 2.0 * cell;
         uint64_t cells = 1;
         bool fits = true;
         int64_t glo[3];
@@ -446,16 +448,30 @@ bool size(const double lo[3], const double hi[3], const Options& opt, Grid& grid
         }
         cell *= 2.0;
         grid.coarsened = true;
-        // A cell coarser than the buffer stops being a wrap at all: the dilation
-        // would have less than one cell of radius and the shape would be the
-        // grid's rather than the site's. Better to say so than to hand back a
-        // domain shaped like its own bookkeeping.
-        if (cell > opt.buffer) {
+        // The cell has outgrown the offset, so the offset is now quantised to it:
+        // a boundary asked to come in 0.2 m comes in whatever the cell is instead.
+        // REPORTED, NOT REFUSED.
+        //
+        // It used to refuse, and the test was `cell > opt.buffer` — written when
+        // the buffer could only be positive. A NEGATIVE buffer makes that
+        // comparison true on the first doubling whatever the cell is, so any
+        // pull-in whose grid did not fit at the first try was turned away outright
+        // and the caller fell back to the box. A small offset with a wide bridge is
+        // exactly that case: the offset sets the cell at a quarter of 0.2 m, and
+        // the bridge's radius is added to the padding on all six sides.
+        //
+        // And refusing was the wrong answer even with the sign right. A blunt wrap
+        // is a worse question than a sharp one; the box is a worse question than
+        // either. Coarsen, say so, and let the answer stand.
+        if (cell > reach) grid.offsetQuantised = true;
+        // The one genuine failure left: a site so large, or a budget so small, that
+        // no cell size fits. A metre-per-cell wrap of a city block is still a wrap;
+        // a kilometre-per-cell one is not.
+        if (cell > 1000.0) {
             char buf[220];
             std::snprintf(buf, sizeof(buf),
-                          "wrap: the site needs cells coarser than the %.2f m buffer to fit "
-                          "%llu cells — raise the budget or the buffer",
-                          opt.buffer, (unsigned long long)opt.maxCells);
+                          "wrap: no cell size fits %llu cells over this site",
+                          (unsigned long long)opt.maxCells);
             err = buf;
             return false;
         }
@@ -559,6 +575,28 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
     // is on: to pull the boundary in, to drop the outside, or to span an opening.
     if (opt.interiorOnly || pullIn || opt.spanGaps > 0.0) {
         floodOutside(grid);
+        // WHERE THE BALL'S CENTRE CAN GO, captured before the label is walked in.
+        //
+        // The flood is a rolling ball: the barrier is the occupancy dilated by the
+        // seal, so a cell the flood reached is a position the ball's CENTRE can
+        // occupy while staying clear of every measured surface. That is not the
+        // exterior. The exterior is everything the ball SWEEPS — within a radius
+        // of one of those centres — and the difference between the two is a shell
+        // one radius thick, wrapped around the outside of every wall on the site.
+        //
+        // Left as it was, that shell is "not outside", and a boundary pulled in by
+        // less than the radius keeps almost all of it: at a 5 m bridge and a 0.2 m
+        // offset, open ground a metre and a half from a freestanding wall came back
+        // inside the domain, and nothing was skinned at all. It got worse as the
+        // bridge widened, which is the signature — the shell is the radius less
+        // the offset thick, so a 20 m bridge swallows nearly ten metres of open
+        // ground.
+        //
+        // So the distance to the centres is kept, and the pull-in measures from it:
+        // the exterior is within a radius of a centre, the interior is beyond that,
+        // and the core is beyond that by the offset as well. The ball's size then
+        // decides only what counts as a way in, which is the one thing it is for.
+        const std::vector<double> dCentre = distanceTo(grid, kOutside);
         // Back to the surfaces the seal held it away from — see growOutside.
         growOutside(grid, d2);
 
@@ -665,13 +703,20 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
             // negative buffer quietly doing nothing. `enclosedRegions` and
             // `coredRegions` are reported so that case is visible as a number
             // rather than as a picture that looks like the positive answer.
-            const std::vector<double> dOut = distanceTo(grid, kOutside);
+            // Beyond the ball's sweep is the interior; beyond it by the offset as
+            // well is the core the boundary is pulled back to.
+            const double coreCells = sealCells + bufCells;
+            const double coreSq    = coreCells * coreCells;
+            for (size_t i = 0; i < grid.inDomain.size(); ++i) {
+                if (dCentre[i] <= sealSq) grid.inDomain[i] |= kSeed;   // swept: exterior
+                else if (dCentre[i] > coreSq) grid.inDomain[i] |= kCore;
+            }
+            // Which interiors those cores belong to: everything beyond the sweep
+            // that a core can reach without crossing back into it.
             for (size_t i = 0; i < grid.inDomain.size(); ++i)
-                if (!(grid.inDomain[i] & kOutside) && dOut[i] > bufSq)
-                    grid.inDomain[i] |= uint8_t(kCore | kKeptIn);
-            // Which enclosed regions those cores belong to: everything reachable
-            // from a core without crossing the outside.
-            spreadThrough(grid, kKeptIn, kOutside);
+                if (grid.inDomain[i] & kCore) grid.inDomain[i] |= kKeptIn;
+            spreadThrough(grid, kKeptIn, kSeed);
+            for (uint8_t& b : grid.inDomain) b = uint8_t(b & ~kSeed);
 
             // How much of the site was enclosed at all, against how much of that
             // was deep enough to pull into. Two numbers rather than one because
@@ -706,6 +751,9 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
             // wall of the building has the building on one side and is left to the
             // erosion, while a freestanding wall bounds nothing and keeps its skin.
             uint64_t seeds = 0;
+            const std::vector<double> dKept = distanceTo(grid, kKeptIn);
+            const double boundsCells = coreCells + 1.0;   // the gap, and a cell of slack
+            const double boundsSq    = boundsCells * boundsCells;
             const int64_t X = grid.dim[0], Y = grid.dim[1], Z = grid.dim[2];
             for (int64_t z = 0; z < Z; ++z)
                 for (int64_t y = 0; y < Y; ++y)
@@ -713,20 +761,16 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
                         const size_t i = grid.index(uint32_t(x), uint32_t(y), uint32_t(z));
                         const uint8_t b = grid.inDomain[i];
                         if (!(b & (kOccupied | kEnvelope))) continue;
-                        bool bounds = false;
-                        static const int64_t d[6][3] = {{1,0,0},{-1,0,0},{0,1,0},
-                                                        {0,-1,0},{0,0,1},{0,0,-1}};
-                        for (const auto& n : d) {
-                            const int64_t nx = x + n[0], ny = y + n[1], nz = z + n[2];
-                            if (nx < 0 || ny < 0 || nz < 0 || nx >= X || ny >= Y || nz >= Z)
-                                continue;
-                            if (grid.inDomain[grid.index(uint32_t(nx), uint32_t(ny),
-                                                         uint32_t(nz))] & kKeptIn) {
-                                bounds = true;
-                                break;
-                            }
-                        }
-                        if (!bounds) { grid.inDomain[i] |= kSeed; ++seeds; }
+                        // WITHIN REACH of a kept interior, not touching one. The
+                        // interior begins a radius inside the surface — the ball
+                        // sweeps that much — plus the offset it was pulled in by,
+                        // so nothing that bounds an interior is ever adjacent to
+                        // it. Asking for adjacency skins every wall of every
+                        // building that was correctly pulled in, and the skin puts
+                        // the wall and its surroundings straight back in.
+                        if (dKept[i] <= boundsSq) continue;
+                        grid.inDomain[i] |= kSeed;
+                        ++seeds;
                     }
             grid.skinnedSurfaces = seeds;
             if (seeds) {

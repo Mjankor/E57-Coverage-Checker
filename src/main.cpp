@@ -171,7 +171,10 @@ int carveCorpus(const std::vector<std::string>& paths, const vis::Options& opt) 
                                : ", both sides of every surface",
                     (unsigned long long)g.occupiedCells,
                     (unsigned long long)g.domainCells,
-                    g.coarsened ? "  (cells were coarsened to fit the budget)" : "",
+                    g.offsetQuantised
+                        ? "  (cells coarsened past the offset to fit the budget: the boundary "
+                          "came in by a cell, not by the distance asked for)"
+                        : (g.coarsened ? "  (cells were coarsened to fit the budget)" : ""),
                     res.domainVolume, res.sphereVolume,
                     res.domainVolume > 0 ? res.sphereVolume / res.domainVolume : 0.0);
         if (g.spanGaps > 0.0)

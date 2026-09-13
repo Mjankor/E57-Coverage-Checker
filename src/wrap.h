@@ -243,6 +243,10 @@ struct Grid {
     uint64_t setupsSeen = 0;
     uint64_t setupsPulledIn = 0;
     bool     coarsened = false;    // the cell size grew to fit the budget
+    // And grew past the offset itself, so the boundary came in by a cell rather
+    // than by the distance asked for. Reported rather than refused: a blunt wrap
+    // is a worse question than a sharp one, and the box is worse than either.
+    bool     offsetQuantised = false;
     bool     interiorOnly = false; // which rule was applied
     double   buffer = 0.0;
 

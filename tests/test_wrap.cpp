@@ -773,6 +773,40 @@ static void testAnOpenEndedSurveyFallsBackAndSaysSo() {
     wrap::build(wide, w, setups);
 
     CHECK(w.pulledInCells > 0, "the outside cannot roll in, so the corridor is interior");
+    // And a WIDER ball must not swallow more of the outside. The ball's size says
+    // what counts as a way in and nothing else: the exterior is what it sweeps,
+    // which reaches every surface however fat it is. Measuring the interior from
+    // the ball's CENTRE instead left a shell one radius thick around the outside
+    // of every wall, and a boundary pulled in by less than that radius kept nearly
+    // all of it — at a 5 m bridge and a 0.2 m offset, open ground a metre and a
+    // half from a freestanding wall came back inside the domain.
+    for (double bridge : {5.0, 10.0, 20.0}) {
+        wrap::Options fat = wide;
+        fat.spanGaps = bridge;
+        fat.buffer   = -0.2;
+        wrap::Grid f;
+        CHECK(wrap::size(lo, hi, fat, f, err), err.empty() ? "sized" : err.c_str());
+        for (uint32_t z = 0; z < f.dim[2]; ++z)
+            for (uint32_t y = 0; y < f.dim[1]; ++y)
+                for (uint32_t x = 0; x < f.dim[0]; ++x) {
+                    double c[3];
+                    f.cellCentre(x, y, z, c);
+                    if (c[0] < -0.05 || c[0] > 8.05 || c[1] < -0.05 || c[1] > 3.05 ||
+                        c[2] < -0.05 || c[2] > 3.05) continue;
+                    if (c[1] < 0.1 || c[1] > 2.9 || c[2] < 0.1 || c[2] > 2.9)
+                        f.inDomain[f.index(x, y, z)] |= 1u;
+                }
+        wrap::build(fat, f, setups);
+        CHECK(f.pulledInCells > 0, "a fatter ball still finds the interior");
+        CHECK(!f.contains(4.0, -0.8, 1.5),
+              "and the open ground outside stays out however fat the ball is");
+        // The corridor's own air, where the grid still resolves it. At 20 m the
+        // padding pushes the grid past its budget, the cell doubles, and THIS
+        // FIXTURE's walls — painted by cell centre — thin from 14,514 cells to
+        // 1,160. That is the fixture's marking, not the wrap's: markScan marks
+        // every cell a return lands in, so a real scan's walls survive coarsening.
+        if (!f.coarsened) CHECK(f.contains(4.0, 1.5, 1.5), "which is still the corridor's air");
+    }
     CHECK(w.setupsPulledIn == 1, "and the instrument is standing in it");
     CHECK(w.contains(4.0, 1.5, 1.5), "the corridor's air is the question");
     CHECK(!w.contains(4.0, 0.05, 1.5), "the wall and its surface are not");
