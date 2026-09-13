@@ -448,6 +448,22 @@ void usage() {
         "          fan out through it to the rated range. Zones of empty cells\n"
         "          whose bordering returns sit at nearly this range are read as\n"
         "          too close and establish nothing. 0 switches the test off.\n"
+        "  --sky-extent <deg>\n"
+        "          (carve) How far from a scan's own zenith an opening has to\n"
+        "          reach before it is the sky. Default 25. Reach it and the\n"
+        "          region is open air and clears; fall short and it is a hole in\n"
+        "          whatever the instrument was under and clears nothing. An\n"
+        "          opening whose own border is inside --min-range never counts,\n"
+        "          whatever angle it reaches: that is a ceiling the scanner is\n"
+        "          parked too close to see. 0 names no sky at all.\n"
+        "  --sky-arc <0..1>\n"
+        "          (carve) Over what share of the bearings around the zenith\n"
+        "          --sky-extent has to be reached. Default 0.10. Reaching the\n"
+        "          angle at one bearing is a spike, not an opening: a door\n"
+        "          frame's reveal returns nothing all the way up and, joined to\n"
+        "          a dead spot at the zenith, carried the whole region past the\n"
+        "          angle and cleared a pencil of space up the frame. 0 restores\n"
+        "          the single-bearing test.\n"
         "  --blind-cone auto|none|first|last|both\n"
         "          (carve) Which end of each raster holds the instrument's own\n"
         "          blind cone, where no ray was fired. Default auto, and every\n"
@@ -565,6 +581,22 @@ int main(int argc, char** argv) {
         if (std::strcmp(argv[i], "--min-range") == 0 && i + 1 < argc) {
             co.minRange = std::strtod(argv[++i], nullptr);
             if (co.minRange < 0.0) { std::printf("--min-range cannot be negative\n"); return 2; }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--sky-extent") == 0 && i + 1 < argc) {
+            co.skyMinExtentDeg = std::strtod(argv[++i], nullptr);
+            if (!(co.skyMinExtentDeg >= 0.0) || co.skyMinExtentDeg >= 180.0) {
+                std::printf("--sky-extent must be an angle from 0 to 180 degrees\n");
+                return 2;
+            }
+            continue;
+        }
+        if (std::strcmp(argv[i], "--sky-arc") == 0 && i + 1 < argc) {
+            co.skyMinArcShare = std::strtod(argv[++i], nullptr);
+            if (!(co.skyMinArcShare >= 0.0) || co.skyMinArcShare > 1.0) {
+                std::printf("--sky-arc must be a share from 0 to 1\n");
+                return 2;
+            }
             continue;
         }
         if (std::strcmp(argv[i], "--early-out") == 0 && i + 1 < argc) {

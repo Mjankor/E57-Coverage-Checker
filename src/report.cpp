@@ -291,26 +291,43 @@ int scanReport(const std::string& path, const Options& opt, std::string& out) {
                     }
                     if (img.diag.skyFound) {
                         o.add("      sky       : the opening at this instrument's own zenith "
-                                    "reaches %.0f deg\n                  across %llu cells, so "
-                                    "it is sky and clears — and is exempt from\n                "
-                                    "  the dark-border test, whose whole difficulty is that a "
-                                    "skyline\n                  is the darkest thing in an "
-                                    "outdoor scan\n",
+                                    "reaches %.0f deg across\n                  %llu cells, "
+                                    "%.1f%% of bearings making the %.0f deg asked for, bordered "
+                                    "at\n                  %.2f m — so it is sky and clears, and "
+                                    "is exempt from the\n                  dark-border test, "
+                                    "whose whole difficulty is that a skyline is\n               "
+                                    "   the darkest thing in an outdoor scan\n",
                                     img.diag.skyExtentDeg,
-                                    (unsigned long long)img.diag.skyCells);
+                                    (unsigned long long)img.diag.skyCells,
+                                    100.0 * img.diag.skyArcShare, ro.skyMinExtentDeg,
+                                    img.diag.skyBorderMedianM);
                     } else if (img.diag.skyCells) {
-                        // Said out loud, because "no sky" and "the sky ran away
-                        // with the whole raster" look identical from the outside
-                        // and the second one is what silently disarmed the
-                        // dark-border test on an indoor scan.
+                        // WHICH of the three tests it failed, because they mean
+                        // different things about the scan and the report used to
+                        // blame the angle for all of them. Said out loud at all
+                        // because "no sky" and "the sky ran away with the whole
+                        // raster" look identical from the outside, and the second is
+                        // what silently disarmed the dark-border test indoors.
+                        const char* why =
+                            img.diag.skyBorderTooClose
+                                ? "its own border is inside the instrument's minimum range, so it "
+                                  "is a\n                  ceiling this scanner is parked too "
+                                  "close to see"
+                            : (ro.skyMinArcShare > 0.0 &&
+                               img.diag.skyArcShare < ro.skyMinArcShare)
+                                ? "it reaches that far along too few bearings to be an opening — a "
+                                  "spike,\n                  which is what a dead strip up a door "
+                                  "frame or a wall edge leaves"
+                                : "it is a hole in whatever this instrument was under";
                         o.add("      sky       : the opening at this instrument's own zenith "
-                                    "reaches only %.0f deg\n                  across %llu cells, "
-                                    "against the %.0f deg asked for, so it is a hole in\n        "
-                                    "          whatever this instrument was under and not a view "
-                                    "of the sky:\n                  %llu cells demoted, clearing "
-                                    "nothing\n",
+                                    "reaches %.0f deg across\n                  %llu cells, "
+                                    "%.1f%% of bearings making the %.0f deg asked for, bordered "
+                                    "at\n                  %.2f m — and it is not the sky: %s.\n"
+                                    "                  %llu cells demoted, clearing nothing\n",
                                     img.diag.skyExtentDeg,
-                                    (unsigned long long)img.diag.skyCells, ro.skyMinExtentDeg,
+                                    (unsigned long long)img.diag.skyCells,
+                                    100.0 * img.diag.skyArcShare, ro.skyMinExtentDeg,
+                                    img.diag.skyBorderMedianM, why,
                                     (unsigned long long)img.diag.zenithDemoted);
                     } else {
                         o.add("      sky       : nothing at this instrument's own zenith is open "

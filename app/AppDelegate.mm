@@ -732,6 +732,7 @@ const char *kindLabel(check::Kind k) {
     ro.blindCone        = _visOptions.blindCone;
     ro.minRange         = _visOptions.minRange;
     ro.skyMinExtentDeg    = _visOptions.skyMinExtentDeg;
+    ro.skyMinArcShare     = _visOptions.skyMinArcShare;
     ro.darkBorderFraction = _visOptions.darkBorderFraction;
 
     auto paths = std::make_shared<std::vector<std::string>>(_paths);
@@ -795,6 +796,7 @@ const char *kindLabel(check::Kind k) {
     ro.blindCone        = _visOptions.blindCone;
     ro.minRange         = _visOptions.minRange;
     ro.skyMinExtentDeg    = _visOptions.skyMinExtentDeg;
+    ro.skyMinArcShare     = _visOptions.skyMinArcShare;
     ro.darkBorderFraction = _visOptions.darkBorderFraction;
 
     auto paths = std::make_shared<std::vector<std::string>>(_paths);
@@ -1315,7 +1317,7 @@ const char *kindLabel(check::Kind k) {
     // labels now name a setting instead of explaining it, so they fit in 330 and
     // the sheet fits on a laptop screen — which the version that explained every
     // setting in its own text did not.
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 410)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 438)];
     // Label, value, and the explanation — which lives in a TOOLTIP rather than in
     // the sheet. Every one of these settings needs a paragraph to use well and
     // none of them needs it on screen at once: put them all in the sheet's own
@@ -1372,8 +1374,21 @@ const char *kindLabel(check::Kind k) {
          @"What a gap at a scan's own zenith means. Reach this far from the zenith "
          @"and it is open air and clears; fall short and it is a hole in whatever "
          @"the instrument was under — a rooflight, a dark patch of ceiling — and it "
-         @"clears nothing.\n\nThe angle only has to be reached in ONE direction, so "
-         @"a branch across it or a verandah down one side does not disqualify it."},
+         @"clears nothing.\n\nA gap whose own border is inside the instrument's "
+         @"minimum range never counts, whatever angle it reaches: that is a ceiling "
+         @"the scanner is parked too close to see, not a view of the sky."},
+        {@"…over this share of the bearings (0–1, 0 = any one)",
+         [NSString stringWithFormat:@"%g", _visOptions.skyMinArcShare],
+         @"The other half of the angle above: how much of the way around the zenith "
+         @"has to reach it.\n\nReaching the angle at a single bearing is a spike, not "
+         @"an opening. A door frame's reveal is seen at a grazing angle all the way "
+         @"up, returns nothing, and leaves a narrow dead strip from the door to the "
+         @"ceiling; joined to a small dead spot at the zenith it carried the whole "
+         @"region past the angle, and a pencil of space cleared to the rated range "
+         @"straight up the frame.\n\nA real opening reaches the angle at nearly every "
+         @"bearing. A tenth is 36 degrees of bearing — wide enough that a slot "
+         @"between a canopy and a parapet still counts, narrow enough that the edge of "
+         @"one surface does not. 0 restores the single-bearing test."},
         {@"Dark border share that stops a clear (0–1, 0 = off)",
          [NSString stringWithFormat:@"%g", _visOptions.darkBorderFraction],
          @"OFF, and shipped off. It stopped a clear where the returns around a gap "
@@ -1384,8 +1399,8 @@ const char *kindLabel(check::Kind k) {
          @"intensity is worth trusting: a quarter is what it ran at."},
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
-    for (int i = 0; i < 9; ++i) {
-        const CGFloat y = 382 - i * 28;
+    for (int i = 0; i < 10; ++i) {
+        const CGFloat y = 410 - i * 28;
         NSTextField *l = [self labelWithText:rows[i].label frame:NSMakeRect(0, y, 330, 20)];
         l.toolTip = rows[i].tip;
         [acc addSubview:l];
@@ -1545,7 +1560,8 @@ const char *kindLabel(check::Kind k) {
     const double drawnM = fields[5].doubleValue;
     const double minRng = fields[6].doubleValue;
     const double skyDeg = fields[7].doubleValue;
-    const double darkSh = fields[8].doubleValue;
+    const double skyArc = fields[8].doubleValue;
+    const double darkSh = fields[9].doubleValue;
     // The margin may be NEGATIVE — see vis::Options::domainMargin. On an indoor
     // job that is how the space past the walls is left out of the question in the
     // first place, rather than filtered out of the answer afterwards.
@@ -1570,11 +1586,14 @@ const char *kindLabel(check::Kind k) {
              "nothing) to 50. A door is 0.9, a window 1.5, a shopfront 3.";
         return;
     }
-    if (!(skyDeg >= 0.0) || skyDeg >= 180.0 || !(darkSh >= 0.0) || darkSh > 1.0) {
+    if (!(skyDeg >= 0.0) || skyDeg >= 180.0 || !(skyArc >= 0.0) || skyArc > 1.0 ||
+        !(darkSh >= 0.0) || darkSh > 1.0) {
         _status.stringValue =
-            @"The sky opening must be between 0 and 180 degrees and the dark border "
-             "share between 0 and 1. Zero switches either test off: no opening is "
-             "then named as sky, and no border is too dark to believe.";
+            @"The sky opening must be between 0 and 180 degrees, and the share of "
+             "bearings that must reach it and the dark border share both between 0 "
+             "and 1. Zero switches a test off: no opening is then named as sky, one "
+             "bearing reaching the angle is enough, and no border is too dark to "
+             "believe.";
         return;
     }
     opt.voxelSize    = voxel;
@@ -1584,6 +1603,7 @@ const char *kindLabel(check::Kind k) {
     opt.minRange     = minRng;
     opt.wrapSpanGaps = bridge;
     opt.skyMinExtentDeg    = skyDeg;
+    opt.skyMinArcShare     = skyArc;
     opt.darkBorderFraction = darkSh;
     if (drawnM > 0.0)
         opt.displayCap = uint64_t(std::min(drawnM, 512.0) * 1048576.0);

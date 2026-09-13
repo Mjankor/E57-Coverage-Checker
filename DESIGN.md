@@ -189,6 +189,44 @@ Resolution order, as implemented in `src/range_image.cpp`:
 `e57cov info` reports which path a file affords, the grid fill, the no-return
 count, and whether the raster is regular enough for exact lookups.
 
+### What makes an opening at the zenith the sky
+
+Only the sky clears (`Options::skyOnly`), so naming it is the one positive
+identification the pipeline makes and the only place an empty cell earns the right
+to clear space. Three tests, and a region has to pass all three:
+
+1. **Reach** — it opens at least `skyMinExtentDeg` (25°) from the instrument's own
+   zenith, measured from the pole row's own elevation. An opening that wide about
+   the pole is not a hole in a surface at any plausible distance.
+2. **Breadth** — it reaches that far over at least `skyMinArcShare` (0.10) of the
+   bearings the scan sampled. Reaching the angle at one bearing is a spike, not an
+   opening: a door frame's reveal is seen at a grazing angle all the way up, returns
+   nothing, and leaves a narrow dead strip from the door to the ceiling. Joined to a
+   small dead spot at the zenith — which alone would be demoted for being too small
+   — that strip carried the region's furthest reach past the angle, and the whole of
+   it then cleared: a pencil of space to the rated range straight up the frame. A
+   real opening makes the angle at nearly every bearing; a strip makes it at a
+   handful. The denominator is the bearings the scan sampled, not every column, so a
+   scan is not charged for columns its file holds no data for.
+3. **Border** — more than half of what the instrument measured around it lies
+   OUTSIDE the minimum range. A scanner set up hard under a ceiling sees none of it,
+   because all of it is inside the minimum range, so the zenith comes back empty and
+   wide open at every bearing: it passes reach and breadth, and it is a ceiling. The
+   border is what separates them — a surface too close to measure is bounded by
+   itself where it crosses out of the minimum range, so its returns sit just past
+   that bar (`minRange · tooCloseFactor`, 0.60 m), where a band of real sky is
+   bordered by eaves and branches metres off. The median, not the nearest: a scanner
+   on open ground half a metre under a beam is bordered close along the beam and far
+   everywhere else, and that is still sky.
+
+Failing any of the three demotes the region rather than merely leaving it
+unprotected, because there is no third thing it can be: an opening at the zenith is
+a view of the sky and clears, or it is a hole in a roof, a strip up a door frame, or
+a ceiling too close to see — and every one of those, believed, clears a ray to the
+rated range straight through a surface. `Diagnostics` carries all three numbers and
+the report names which test failed, so a rejected opening can be read rather than
+guessed at.
+
 The `(row, col)` → `(azimuth, elevation)` mapping is declared nowhere, so it is
 **measured**: mean elevation per row, circular-mean azimuth per column, then a
 line fitted through each. The maximum deviation from that line is reported, so

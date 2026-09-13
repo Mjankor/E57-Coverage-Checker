@@ -179,6 +179,14 @@ struct Options {
     // much of a roofless or open-sided scene clears. See rimg::identifySky.
     double   skyMinExtentDeg = rimg::Options{}.skyMinExtentDeg;
 
+    // And over what share of the bearings around the zenith that angle has to be
+    // reached, passed through to rimg::Options. Surfaced beside the angle because
+    // it is the other half of the same judgement: the angle says how far the
+    // opening must reach, this says how much of the way around it must reach that
+    // far. 0 leaves the single-angle test, which a dead strip up a door frame
+    // satisfies at one bearing. See rimg::Options::skyMinArcShare.
+    double   skyMinArcShare = rimg::Options{}.skyMinArcShare;
+
     // What share of a no-return zone's bordering returns has to be near the
     // bottom of this scan's own intensity distribution before the zone is
     // disbelieved, passed through to rimg::Options. 0 switches the test off and 1

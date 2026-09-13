@@ -1163,12 +1163,20 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
 
     double extent = 0.0;
     uint64_t cells = 0;
+    // How far the region reaches from the pole along each bearing, kept per column
+    // rather than collapsed into one maximum. One number per column, filled as the
+    // flood passes through it, which is what lets the breadth test below ask how
+    // much of the way around the pole the region actually opens — see
+    // Options::skyMinArcShare.
+    std::vector<float> reachByCol(size_t(cols), -1.0f);
     while (!stack.empty()) {
         const size_t i = stack.back();
         stack.pop_back();
         ++cells;
         const int64_t r = int64_t(i) / cols, c = int64_t(i) % cols;
-        extent = std::max(extent, fromPole(uint32_t(r)));
+        const double fp = fromPole(uint32_t(r));
+        extent = std::max(extent, fp);
+        if (float(fp) > reachByCol[size_t(c)]) reachByCol[size_t(c)] = float(fp);
 
         // The four directions, each allowed to step over a bounded run of returns.
         // Never over an unsampled cell: the instrument's own cone is not a branch,
@@ -1197,16 +1205,91 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
 
     rep.cells     = cells;
     rep.extentDeg = extent;
-    rep.isSky     = extent >= opt.skyMinExtentDeg;
+
+    // HOW MUCH OF THE WAY AROUND THE POLE THE REGION OPENS.
+    //
+    // The extent above is one number for the whole region, so one bearing carries
+    // it: a dead strip up a door frame reaches the angle at a handful of columns and
+    // the region passed on that alone. The reach is per bearing, so the test is too.
+    //
+    // The denominator is the bearings this scan SAMPLED, not every column of the
+    // raster. A column the file holds no data for at all — markUnsampledColumns
+    // found 88 to 94 of 2640 on the instrument this was built against — is not a
+    // bearing where the sky was looked for and found absent; it is a bearing nobody
+    // looked along, and counting it would charge the scan for its own gaps.
+    {
+        uint64_t sampled = 0, made = 0;
+        for (int64_t c = 0; c < cols; ++c) {
+            bool any = false;
+            for (int64_t r = 0; r < rows && !any; ++r)
+                any = Status(im.cells[size_t(r) * size_t(cols) + size_t(c)].status)
+                      != Status::OutsideFov;
+            if (!any) continue;
+            ++sampled;
+            if (double(reachByCol[size_t(c)]) >= opt.skyMinExtentDeg) ++made;
+        }
+        rep.arcShare = sampled ? double(made) / double(sampled) : 0.0;
+    }
+
+    // AND WHAT THE INSTRUMENT MEASURED ALL AROUND IT.
+    //
+    // A scanner set up hard under a ceiling sees none of it: the whole of it is
+    // inside the minimum range, so it returns nothing, and the zenith comes back
+    // empty and wide open — which is exactly what sky looks like, and it passes both
+    // the angle and the breadth. What tells them apart is the border. A surface too
+    // close to measure is bounded by ITSELF at the point where it crosses out of the
+    // minimum range, so the returns around such a region sit just past that bar;
+    // a band of real sky is bordered by eaves, parapets and branches, and the
+    // nearest of those is metres away.
+    //
+    // The same bar filterNoReturnsTooClose uses, for the same reason, so there is
+    // one definition of "too close to measure" in this file and not two. The median
+    // rather than the nearest: a scanner on open ground half a metre under a beam is
+    // bordered close along the beam and far everywhere else, and that is still sky.
+    // More than half the border inside the bar is a ceiling.
+    if (opt.minRange > 0.0 && opt.tooCloseFactor > 0.0 && cells > 0) {
+        const double bar = opt.minRange * opt.tooCloseFactor;
+        std::vector<uint16_t> border;
+        border.reserve(1024);
+        for (size_t i = 0; i < sky.size(); ++i) {
+            if (!sky[i]) continue;
+            const int64_t r = int64_t(i) / cols, c = int64_t(i) % cols;
+            const int64_t dr[4] = {-1, 1, 0, 0}, dc[4] = {0, 0, -1, 1};
+            for (int a = 0; a < 4; ++a) {
+                const int64_t nr = r + dr[a];
+                if (nr < 0 || nr >= rows) continue;
+                int64_t nc = c + dc[a];
+                nc -= cols * (nc >= cols ? 1 : 0);
+                nc += cols * (nc < 0 ? 1 : 0);
+                const size_t j = size_t(nr) * size_t(cols) + size_t(nc);
+                if (Status(im.cells[j].status) != Status::Hit) continue;
+                border.push_back(im.cells[j].rangeCm);
+            }
+        }
+        if (!border.empty()) {
+            const size_t mid = border.size() / 2;
+            std::nth_element(border.begin(), border.begin() + mid, border.end());
+            rep.borderMedianM  = double(border[mid]) * 0.01;
+            rep.borderTooClose = rep.borderMedianM < bar;
+        }
+    }
+
+    rep.isSky = extent >= opt.skyMinExtentDeg &&
+                (opt.skyMinArcShare <= 0.0 || rep.arcShare >= opt.skyMinArcShare) &&
+                !rep.borderTooClose;
     if (rep.isSky) return rep;
 
-    // SHORT OF THE ANGLE, SO IT CLEARS NOTHING. The test at the pole decides
-    // whether the opening there is a view of the sky, and if it is not then the
-    // only other thing it can be is a hole in whatever the instrument was under —
-    // a rooflight, a dark patch of ceiling, an open hatch two metres up. Believed,
-    // each of those cells clears a ray to the rated range straight through a roof.
-    // So the region is demoted rather than merely left unprotected: an opening at
-    // the zenith is sky and clears, or it is not and it establishes nothing.
+    // NOT SKY, SO IT CLEARS NOTHING. One path out for all three ways of failing —
+    // too small, too narrow, or bordered inside the minimum range — because the
+    // conclusion is the same in each case and it is not a weak one. The test at the
+    // pole decides whether the opening there is a view of the sky, and if it is not
+    // then the only other things it can be are a hole in whatever the instrument was
+    // under — a rooflight, a dark patch of ceiling, an open hatch two metres up — a
+    // strip up the side of a door frame, or a ceiling the instrument is too close to
+    // see. Believed, every one of those cells clears a ray to the rated range
+    // straight through a surface. So the region is demoted rather than merely left
+    // unprotected: an opening at the zenith is sky and clears, or it is not and it
+    // establishes nothing.
     //
     // Dilated back by the window the openness test eroded it with, over no-returns
     // only, so the patch is demoted to its own edge rather than leaving a ring of
@@ -2605,6 +2688,9 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         // being open is the reading that says the fill is percolating.
         out.diag.skyCells     = rep.cells;
         out.diag.skyExtentDeg = rep.extentDeg;
+        out.diag.skyArcShare       = rep.arcShare;
+        out.diag.skyBorderMedianM  = rep.borderMedianM;
+        out.diag.skyBorderTooClose = rep.borderTooClose;
         out.diag.zenithDemoted = rep.demotedCells;
         filterDarkBorderedZones(out, cellIntensity, sky, opt);
 

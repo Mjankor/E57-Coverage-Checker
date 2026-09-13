@@ -501,6 +501,102 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
               "and only the open half of it is the region");
     }
 
+    // A SCANNER HARD UNDER A CEILING. The ceiling is inside the instrument's
+    // minimum range, so none of it comes back, and the zenith reads as a wide open
+    // region forty-five degrees across at every bearing: it passes the angle and it
+    // passes the breadth. What it does not pass is its own border. A surface too
+    // close to measure is bounded by ITSELF where it crosses out of the minimum
+    // range, so the returns around such a region sit just past that bar, where a
+    // band of real sky is bordered by eaves and branches metres off.
+    {
+        rimg::RangeImage im = build(60, false, false);
+        // Every return brought in to half a metre, inside the 0.60 m bar.
+        for (rimg::Cell& c : im.cells)
+            if (rimg::Status(c.status) == rimg::Status::Hit) c.rangeCm = 50;
+        im.diag.nearestReturn = 0.5; im.diag.furthestReturn = 0.5;
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.reachedPole, "the zenith holds no returns");
+        CHECK(rep.extentDeg > 40.0, "and the opening is wide enough to be the sky");
+        CHECK(rep.arcShare > 0.9, "at every bearing, so the breadth test passes too");
+        CHECK(rep.borderMedianM > 0.4 && rep.borderMedianM < 0.6,
+              "but the instrument measured half a metre all around it");
+        CHECK(rep.borderTooClose, "which is inside the minimum range");
+        CHECK(!rep.isSky, "so it is a ceiling, not the sky");
+        uint64_t protectedCells = 0;
+        for (uint8_t v : sky) protectedCells += v;
+        CHECK(protectedCells == 0, "and nothing is protected");
+        CHECK(rep.demotedCells >= 60 * im.cols, "the whole of it is demoted");
+        CHECK(im.statusAt(im.rows - 1, 0) == rimg::Status::OutsideFov,
+              "so the cell at the zenith clears nothing");
+    }
+
+    // The same region with the border where a real sky's border is. The only thing
+    // that changed is the distance, which is the point: this rule reads the border
+    // and nothing else.
+    {
+        rimg::RangeImage im = build(60, false, false);
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.borderMedianM > 2.5, "bordered at three metres");
+        CHECK(!rep.borderTooClose, "which is well outside the minimum range");
+        CHECK(rep.isSky, "so the same opening is the sky");
+    }
+
+    // A DEAD STRIP UP A DOOR FRAME, which is what the single-angle test could not
+    // see. The frame's reveal is seen at a grazing angle all the way up and returns
+    // nothing, leaving a narrow strip from the door to the ceiling; at the top it
+    // joins a dead spot at the zenith that on its own is eleven degrees across and
+    // would be demoted for it. Joined, the strip carries the region's furthest reach
+    // to ninety degrees and the old test passed the whole thing — clearing a pencil
+    // of space to the rated range straight up the door frame, and the zenith spot
+    // with it.
+    //
+    // The reach is per bearing, so eight columns of 240 make the angle and 232 do
+    // not: three per cent of the way around the pole, against the tenth required.
+    {
+        rimg::RangeImage im = build(15, false, false);     // 11 degrees at the zenith
+        for (uint32_t r = 60; r < im.rows; ++r)
+            for (uint32_t c = 100; c < 108; ++c)
+                im.cells[size_t(r) * im.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, opt, sky);
+        CHECK(rep.reachedPole, "the zenith spot is still an opening");
+        CHECK(rep.extentDeg > 80.0,
+              "and the strip takes the region's reach right down to the horizon");
+        CHECK(rep.arcShare > 0.0 && rep.arcShare < 0.06,
+              "but it makes that reach at a handful of bearings");
+        CHECK(!rep.isSky, "so the region is not the sky");
+        uint64_t protectedCells = 0;
+        for (uint8_t v : sky) protectedCells += v;
+        CHECK(protectedCells == 0, "and nothing is protected");
+        CHECK(im.statusAt(im.rows - 1, 104) == rimg::Status::OutsideFov,
+              "the zenith spot clears nothing");
+        CHECK(im.statusAt(100, 104) == rimg::Status::OutsideFov,
+              "and neither does the strip up the frame");
+        CHECK(im.statusAt(100, 150) == rimg::Status::Hit,
+              "while the wall beside it is untouched");
+    }
+
+    // And the breadth test is what rejected it: the same fixture with the share set
+    // to zero is judged on the single angle alone and passes, which is the behaviour
+    // this replaced.
+    {
+        rimg::RangeImage im = build(15, false, false);
+        for (uint32_t r = 60; r < im.rows; ++r)
+            for (uint32_t c = 100; c < 108; ++c)
+                im.cells[size_t(r) * im.cols + c] =
+                    rimg::Cell{4500, uint8_t(rimg::Status::NoReturn)};
+        rimg::Options loose = opt;
+        loose.skyMinArcShare = 0.0;
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, loose, sky);
+        CHECK(rep.isSky, "one bearing reaching the angle was the whole of the old test");
+        CHECK(im.statusAt(100, 104) == rimg::Status::NoReturn,
+              "and the strip up the door frame cleared to the rated range");
+    }
+
     // WHICH WAY IS UP COMES FROM THE WORLD. The sky is up, and the only thing in
     // the file that says where up is once the scan is placed is its pose. An
     // upright instrument's own axis points at the world's zenith, so the sky is at

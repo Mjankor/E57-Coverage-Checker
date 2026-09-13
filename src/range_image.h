@@ -141,12 +141,31 @@ struct Options {
     //
     // How far from the instrument's own zenith an unsampled region has to reach
     // before it is the sky. Twenty-five degrees: an opening that wide about the
-    // pole is not a hole in a surface at any plausible distance, and the test only
-    // needs it in ONE direction — a verandah, a parapet or a canopy cuts the
-    // opening off on one side and it is still the sky on the other. 0 switches the
+    // pole is not a hole in a surface at any plausible distance. 0 switches the
     // identification off, which leaves the dark-border test with nothing to
     // exempt and takes the sky out of every outdoor scan, so do not.
     double   skyMinExtentDeg = 25.0;
+    // AND OVER HOW MUCH OF THE WAY AROUND THE POLE it has to reach that far.
+    //
+    // Reaching skyMinExtentDeg at a single bearing is not an opening, it is a
+    // spike, and real scans are full of them. A door frame's reveal is seen at a
+    // grazing angle all the way up, returns nothing, and leaves a narrow dead strip
+    // running from the door to the ceiling. Joined to a small dead spot at the
+    // zenith — which on its own would be demoted for being too small — that strip
+    // carries the region's furthest reach past the angle, and then the whole of it
+    // clears: a pencil of space to the rated range straight up the door frame, and
+    // the zenith spot with it. This is what the single-angle test could not see,
+    // because one cell at twenty-five degrees satisfied it.
+    //
+    // So the reach is measured per bearing, and the region has to make the angle
+    // over this share of the bearings the scan sampled. A real opening at the
+    // zenith makes it at every one; a strip makes it at a handful. A tenth, which
+    // is 36 degrees of bearing: wide enough that a slot between a canopy and a
+    // parapet still counts — the reason the old comment here said the angle was
+    // needed in only one direction — and narrow enough that nothing the edge of one
+    // surface produces does. 0 switches the breadth test off and leaves the
+    // single-angle test alone.
+    double   skyMinArcShare = 0.10;
     // How wide a run of returns the sky fill may step over. A branch, a cable, a
     // flagpole: each returns along a line a couple of degrees wide with open sky
     // both sides, and a fill that stopped at one would report a dozen small
@@ -468,8 +487,17 @@ struct Diagnostics {
     uint64_t emptyColumns = 0;
     uint64_t skyCells = 0;
     double   skyExtentDeg = 0.0;
-    // And what it cost the opening at the pole to fall short of the angle: those
-    // cells are a hole in a roof, not a view of the sky, so they clear nothing.
+    // And over how much of the way around the pole it reached that far, and what
+    // the instrument measured all around it. The three together are why an opening
+    // was or was not believed, and a report that printed only the angle said the
+    // wrong thing about two of the three ways of failing. See Options::skyMinArcShare
+    // and SkyReport::borderTooClose.
+    double   skyArcShare = 0.0;
+    double   skyBorderMedianM = -1.0;
+    bool     skyBorderTooClose = false;
+    // And what it cost the opening at the pole not to be sky: those cells are a
+    // hole in a roof, a strip up a door frame or a ceiling the instrument is parked
+    // too close to see, not a view of the sky, so they clear nothing.
     uint64_t zenithDemoted = 0;
     // Empty cells that nothing named as sky, demoted under Options::skyOnly. On an
     // indoor scan this is very nearly every no-return in the file, which is the
@@ -787,6 +815,23 @@ struct SkyReport {
     bool     poseDisagreesWithCone = false;
     uint64_t cells = 0;
     double   extentDeg = 0.0;       // how far from the pole the region reaches
+    // And over how much of the way around the pole it reaches skyMinExtentDeg:
+    // the share of the bearings this scan sampled whose own reach makes the angle.
+    // A real opening is near 1; a dead strip up a door frame is a few thousandths.
+    // See Options::skyMinArcShare.
+    double   arcShare = 0.0;
+    // What the instrument measured all around the region, and whether that puts the
+    // region INSIDE the minimum range rather than outside everything.
+    //
+    // A scanner set up hard under a ceiling sees nothing of it — the whole of it is
+    // inside the minimum range — so the zenith comes back empty and wide open, which
+    // is what sky looks like. The difference is the border: the ceiling's returns
+    // start where it crosses out of the minimum range, so they sit just past it,
+    // where a band of real sky is bordered by eaves and branches metres away.
+    // borderTooClose is true when more than half the region's border is inside the
+    // too-close bar, which is Options::minRange times Options::tooCloseFactor.
+    double   borderMedianM  = -1.0;
+    bool     borderTooClose = false;
     // Open cells the fill refused because they sit below the world's horizon. The
     // sky runs from the zenith down to the horizon and stops: what is below it is
     // ground, or a building, or a surface that could not be read, and none of
