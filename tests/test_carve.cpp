@@ -536,6 +536,71 @@ static void testAnyEvidenceKeepsTheUnknownSet() {
           "and they really are lower, not incidentally equal");
 }
 
+// A CARVER THAT CANNOT TEST THE DOMAIN, which is the one in the app: the kernel
+// is handed a box or nothing, so a SHRINKWRAP reached it as "unbounded" and every
+// tile that went to the GPU carved the whole range sphere. On a real room that
+// was 57.8 M unobserved voxels against the 5.9 M actually inside the wrap, an
+// unobserved fraction of 68% that was mostly space nobody had asked about, and an
+// answer that depended on which tiles happened to reach the GPU.
+//
+// The guard belongs here rather than in the carver, so that every carver gets it
+// and so that a machine with no Metal can test it.
+static void testACarverThatIgnoresTheDomainIsCorrectedAfterwards() {
+    std::printf("a carver that ignores the domain is corrected before it is tallied\n");
+
+    carve::Params p;
+    p.voxelSize = 0.5;
+    p.tileVoxels = 8;
+    p.domain.kind = carve::Domain::Kind::Box;
+    p.domain.lo[0] = 0; p.domain.lo[1] = 0; p.domain.lo[2] = 0;
+    p.domain.hi[0] = 2; p.domain.hi[1] = 2; p.domain.hi[2] = 2;
+
+    // A tile spanning the domain's corner, filled as a kernel that knew nothing
+    // about the domain would leave it: every voxel reachable and unobserved.
+    carve::Tile t;
+    t.dim = 8;
+    t.apron = 0;
+    t.core = t.dim;                    // no apron: the whole cube is the interior
+    t.origin[0] = 0; t.origin[1] = 0; t.origin[2] = 0;
+    t.state.assign(size_t(t.dim) * t.dim * t.dim, carve::kReachable);
+
+    // The tally counts the tile's interior, the apron belonging to its neighbour.
+    carve::Stats before{};
+    carve::tallyTile(t, before);
+    CHECK(before.unknown > 0, "left alone, the whole tile is reported unobserved");
+
+    // The same tile, with the domain applied the way the CPU path applies it.
+    carve::Tile t2 = t;
+    const uint64_t cleared = carve::applyDomain(t2, p);
+    CHECK(cleared > 0, "the voxels outside the domain are cleared");
+    carve::Stats after{};
+    carve::tallyTile(t2, after);
+    CHECK(after.unknown < before.unknown, "so fewer are reported unobserved");
+    CHECK(after.reachable < before.reachable,
+          "and fewer are counted as having been asked about at all");
+
+    // Every voxel that survived is one the domain contains, and every voxel the
+    // domain contains survived.
+    uint64_t wrong = 0;
+    for (uint32_t z = 0; z < t2.dim; ++z)
+        for (uint32_t y = 0; y < t2.dim; ++y)
+            for (uint32_t x = 0; x < t2.dim; ++x) {
+                double c[3];
+                t2.centre(x, y, z, p.voxelSize, c);
+                const bool in   = p.domain.contains(c[0], c[1], c[2]);
+                const bool kept = t2.state[t2.index(x, y, z)] != 0;
+                if (in != kept) ++wrong;
+            }
+    CHECK(wrong == 0, "exactly the contained voxels are kept");
+
+    // A tile the domain holds entirely is not walked at all.
+    carve::Params wide = p;
+    wide.domain.hi[0] = 100; wide.domain.hi[1] = 100; wide.domain.hi[2] = 100;
+    carve::Tile t3 = t;
+    CHECK(carve::applyDomain(t3, wide) == 0, "a tile wholly inside costs nothing");
+    CHECK(t3.state == t.state, "and is left exactly as it was");
+}
+
 static void testDomainClipping() {
     std::printf("domain clipping\n");
 
@@ -627,6 +692,7 @@ int main() {
     testDomainIsTheUnionOfSpheres();
     testTilingDoesNotChangeTheAnswer();
     testFastPathMatchesReference();
+    testACarverThatIgnoresTheDomainIsCorrectedAfterwards();
     testDomainClipping();
     testAnyEvidenceKeepsTheUnknownSet();
     testEarlyStop();

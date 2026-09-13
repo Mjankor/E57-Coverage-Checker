@@ -464,6 +464,14 @@ static NSString *g_unavailable = @"not initialised";
     GpuTile gt{};
     gt.voxelSize  = float(p.voxelSize);
     gt.dim        = dim;
+    // The kernel knows a box and nothing else. A SHRINKWRAP is applied on the way
+    // back instead — see below — and must not be passed as "unbounded" and left
+    // there, which is what this did: Kind::Wrap fell to 0, every tile that went to
+    // the GPU ignored the wrap entirely, and the carve asked about the whole range
+    // sphere. On one room that was 57.8 M unobserved voxels against the 5.9 M
+    // actually inside the wrap, and an unobserved fraction of 68% that was mostly
+    // space nobody had asked about. Worse, it made the answer depend on which
+    // tiles happened to reach the GPU.
     gt.domainKind = (p.domain.kind == carve::Domain::Kind::Box) ? 1u : 0u;
     if (gt.domainKind) {
         // The domain box in the tile's local frame, differenced in double before
@@ -562,6 +570,14 @@ static NSString *g_unavailable = @"not initialised";
     if (cb.error) return NO;
 
     std::memcpy(out.state.data(), slot->state.contents, voxels);
+
+    // THE SHRINKWRAP, APPLIED ON THE WAY BACK. The kernel is told a box and
+    // nothing else, so a wrap cannot be tested inside it; carve::applyDomain makes
+    // the same test the CPU path makes, once per voxel, and only for a tile the
+    // domain does not wholly contain. Before the tally, because the tally is what
+    // turns state into the counts.
+    carve::applyDomain(out, p);
+
     stats.setupTests += *static_cast<const uint32_t *>(slot->tests.contents);
     carve::tallyTile(out, stats);
     ++_tilesCarved;

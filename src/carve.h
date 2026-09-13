@@ -295,6 +295,21 @@ void carveTileReference(const TileKey& key, const std::vector<SetupView>& setups
 // state some other way — the GPU — still has to count it the same way.
 void tallyTile(const Tile& t, Stats& stats);
 
+// Clears every voxel of a tile the domain does not contain, and returns how many
+// it cleared. A no-op where the domain holds the whole tile, which is most tiles
+// of a building's interior.
+//
+// FOR CARVERS THAT CANNOT TEST THE DOMAIN THEMSELVES. carveTile skips an
+// excluded voxel outright, so its state stays zero and it is neither reachable
+// nor unobserved — an excluded voxel was never asked about. A carver working from
+// a kernel cannot always do that: the GPU one is told a box and nothing else, so
+// a SHRINKWRAP reached it as "unbounded" and it carved the whole range sphere.
+// Measured on one room: 57.8 M unobserved voxels against the 5.9 M actually
+// inside the wrap, an unobserved fraction of 68% that was mostly space nobody had
+// asked about, and an answer that depended on which tiles happened to reach the
+// GPU. Call this before tallying and the two paths agree again.
+uint64_t applyDomain(Tile& t, const Params& p);
+
 // An alternative implementation of carveTile, installed from outside.
 //
 // This is the seam the Metal path plugs into, and it is a "try" rather than a

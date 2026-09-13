@@ -198,6 +198,30 @@ std::vector<size_t> prepareTile(const TileKey& key, const std::vector<SetupView>
 // Split out because the fast path fills the state in a different order from the
 // reference and cannot count as it goes — and because the GPU path fills it
 // somewhere else entirely and still has to count it identically.
+uint64_t applyDomain(Tile& t, const Params& p) {
+    if (t.dim == 0 || p.domain.kind == Domain::Kind::Unbounded) return 0;
+    double blo[3], bhi[3];
+    for (int k = 0; k < 3; ++k) {
+        blo[k] = t.origin[k];
+        bhi[k] = t.origin[k] + double(t.dim) * p.voxelSize;
+    }
+    if (p.domain.testBox(blo, bhi) == Overlap::Full) return 0;
+
+    uint64_t cleared = 0;
+    for (uint32_t z = 0; z < t.dim; ++z)
+        for (uint32_t y = 0; y < t.dim; ++y)
+            for (uint32_t x = 0; x < t.dim; ++x) {
+                uint8_t& cell = t.state[t.index(x, y, z)];
+                if (!cell) continue;
+                double c[3];
+                t.centre(x, y, z, p.voxelSize, c);
+                if (p.domain.contains(c[0], c[1], c[2])) continue;
+                cell = 0;
+                ++cleared;
+            }
+    return cleared;
+}
+
 void tallyTile(const Tile& t, Stats& stats) {
     for (uint32_t z = t.interiorBegin(); z < t.interiorEnd(); ++z) {
         for (uint32_t y = t.interiorBegin(); y < t.interiorEnd(); ++y) {
