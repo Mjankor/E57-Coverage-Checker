@@ -244,6 +244,14 @@ Measured on the fixture raster (180 × 240, a 45° cap at the zenith):
 The last two both pass the reach, and the old single-angle test passed both.
 
 
+These are per scan, and so is the verdict: `Result::setupSky` carries one record a
+setup — outdoor, whether there was an opening at the zenith at all, and the three
+numbers — which is what the app's **Sky** column shows. `Options::skyPolicy`
+overrules the tests for one scan when the operator marks it, with one thing it
+cannot do: ForceOutdoor on a scan whose zenith holds returns leaves it indoors,
+because there is no opening there to believe and inventing one clears a cone
+through a roof.
+
 Failing any of the three demotes the region rather than merely leaving it
 unprotected, because there is no third thing it can be: an opening at the zenith is
 a view of the sky and clears, or it is a hole in a roof, a strip up a door frame, or

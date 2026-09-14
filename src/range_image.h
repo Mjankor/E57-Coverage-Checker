@@ -59,6 +59,25 @@ enum class BlindCone {
     BothEnds,
 };
 
+// Whether this scan's own sky test decides, or an operator has.
+//
+// The three tests in identifySky are good and they are not infallible: a station
+// in a glazed atrium reads as indoors, one in a doorway can read as out. The
+// operator knows which of their own setups were outside, and this is how they say
+// so — per scan, because it is a property of where that tripod stood.
+enum class SkyPolicy : uint8_t {
+    // The tests decide. The default, and the only setting that can be defended
+    // from the file alone.
+    Auto,
+    // Believe the opening at the zenith, whatever the tests make of it. Does NOT
+    // invent one: a scan whose zenith holds returns has no opening to believe, and
+    // this leaves it with none — which the table then shows, rather than claiming
+    // a sky that was never seen.
+    ForceOutdoor,
+    // Believe none of it, however wide the opening looks.
+    ForceIndoor,
+};
+
 // What the scans decided about their own blind cones, gathered up for reporting.
 //
 // A TALLY, not a decision. Each scan identifies its own cone from its own raster
@@ -172,6 +191,10 @@ struct Options {
     // test off and leaves the single-angle test alone; 360 asks for an opening all
     // the way round.
     double   skyMinArcDeg = 135.0;
+    // Whether the three tests above decide for this scan, or an operator already
+    // has. Per scan, so vis::run copies these Options once per job — see
+    // vis::Options::skyOverrides.
+    SkyPolicy skyPolicy = SkyPolicy::Auto;
     // How wide a run of returns the sky fill may step over. A branch, a cable, a
     // flagpole: each returns along a line a couple of degrees wide with open sky
     // both sides, and a fill that stopped at one would report a dozen small
@@ -501,6 +524,12 @@ struct Diagnostics {
     double   skyArcDeg = 0.0;
     double   skyBorderMedianM = -1.0;
     bool     skyBorderTooClose = false;
+    // Whether there was an opening at the zenith at all, and whether the verdict
+    // on it came from the tests or from an operator. `skyFound` says what was
+    // believed; these two say how it was arrived at, which is what stops a forced
+    // answer from being indistinguishable from a measured one.
+    bool     skyReachedPole = false;
+    bool     skyOverridden  = false;
     // And what it cost the opening at the pole not to be sky: those cells are a
     // hole in a roof, a strip up a door frame or a ceiling the instrument is parked
     // too close to see, not a view of the sky, so they clear nothing.
@@ -847,6 +876,8 @@ struct SkyReport {
     // is a view of the sky and clears, or it is a hole in whatever the instrument
     // was under and establishes nothing; there is no third thing for it to be.
     uint64_t demotedCells = 0;
+    // Set when Options::skyPolicy, rather than the three tests, decided isSky.
+    bool     overridden = false;
 };
 
 // One zone of no-returns that survived the build and is therefore believed: every

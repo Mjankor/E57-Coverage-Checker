@@ -599,6 +599,69 @@ static void testTheSkyIsNamedAndTheDarkIsNotBelieved() {
               "and the strip up the door frame cleared to the rated range");
     }
 
+    // AN OPERATOR OVERRULING THE TESTS. They are good and they are not infallible —
+    // a station in a glazed atrium reads as indoors, one in a doorway can read as
+    // out — and the operator knows where their own tripod stood.
+    {
+        // Fifteen rows is eleven degrees: an opening the tests reject, and the case
+        // the mark exists for.
+        rimg::RangeImage im = build(15, false, false);
+        rimg::Options forced = opt;
+        forced.skyPolicy = rimg::SkyPolicy::ForceOutdoor;
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, forced, sky);
+        CHECK(rep.reachedPole, "there is an opening at the zenith");
+        CHECK(rep.extentDeg < 25.0, "and the tests would have rejected it");
+        CHECK(rep.isSky, "but the mark says this setup was outdoors");
+        CHECK(rep.overridden, "and the report says the mark decided, not the tests");
+        uint64_t protectedCells = 0;
+        for (uint8_t v : sky) protectedCells += v;
+        CHECK(protectedCells > 0, "so the opening is protected and clears");
+    }
+    {
+        // And the other way: a wide open sky the operator says was not one. A
+        // glazed roof returns nothing and looks exactly like this.
+        rimg::RangeImage im = build(60, false, false);
+        rimg::Options forced = opt;
+        forced.skyPolicy = rimg::SkyPolicy::ForceIndoor;
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, forced, sky);
+        CHECK(rep.extentDeg > 40.0, "the opening is as wide as ever");
+        CHECK(!rep.isSky, "but the mark says it is not the sky");
+        CHECK(rep.overridden, "and says so");
+        uint64_t protectedCells = 0;
+        for (uint8_t v : sky) protectedCells += v;
+        CHECK(protectedCells == 0, "so none of it clears");
+        CHECK(im.statusAt(im.rows - 1, 0) == rimg::Status::OutsideFov,
+              "and the zenith is demoted like any other opening that is not sky");
+    }
+    {
+        // What a mark CANNOT do: conjure an opening where the zenith holds returns.
+        // There is nothing there to believe, and claiming otherwise would clear a
+        // cone straight up through a roof on the strength of a tick box.
+        rimg::RangeImage im = build(0, false, false);      // returns at the pole
+        rimg::Options forced = opt;
+        forced.skyPolicy = rimg::SkyPolicy::ForceOutdoor;
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, forced, sky);
+        CHECK(!rep.reachedPole, "the zenith holds returns");
+        CHECK(!rep.isSky, "so the mark has nothing to believe");
+        uint64_t protectedCells = 0;
+        for (uint8_t v : sky) protectedCells += v;
+        CHECK(protectedCells == 0, "and nothing is protected");
+    }
+    {
+        // A mark that agrees with the tests is not an override, and must not say it
+        // was one — otherwise the table would flag every outdoor setup as hand-set.
+        rimg::RangeImage im = build(60, false, false);
+        rimg::Options forced = opt;
+        forced.skyPolicy = rimg::SkyPolicy::ForceOutdoor;
+        std::vector<uint8_t> sky;
+        const rimg::SkyReport rep = rimg::identifySky(im, forced, sky);
+        CHECK(rep.isSky, "the tests and the mark agree");
+        CHECK(!rep.overridden, "so nothing was overridden");
+    }
+
     // WHICH WAY IS UP COMES FROM THE WORLD. The sky is up, and the only thing in
     // the file that says where up is once the scan is placed is its pose. An
     // upright instrument's own axis points at the world's zenith, so the sky is at

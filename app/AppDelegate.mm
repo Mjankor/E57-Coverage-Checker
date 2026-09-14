@@ -33,9 +33,11 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <string>
 #include <sys/stat.h>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -141,6 +143,11 @@ const char *kindLabel(check::Kind k) {
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSTableViewDataSource,
                                    NSTableViewDelegate, NSWindowDelegate,
                                    CloudViewDelegate>
+// Declared rather than left to be found later in the @implementation, because
+// these return C++ types and are called from above their definitions.
+- (std::vector<vis::Options::SkyOverride>)skyOverrides;
+- (const vis::Result::SetupSky *)carvedSkyForRow:(size_t)row;
+- (NSView *)skyCellForRow:(size_t)row width:(CGFloat)width;
 @end
 
 @implementation AppDelegate {
@@ -179,6 +186,15 @@ const char *kindLabel(check::Kind k) {
     //
     // The options are kept beside it because the saved file's header describes the
     // run, and _visOptions moves on as soon as the sheet is used again.
+    // INDOOR OR OUTDOOR, PER SETUP. Two halves, deliberately separate.
+    //
+    // `_skyMarks` is what the operator said, keyed the way the table keys its rows
+    // and surviving as long as the corpus is open — a mark is a statement about
+    // where a tripod stood, and re-running the filter does not change where it
+    // stood. `_lastRun->setupSky` is what the last carve worked out. The column
+    // shows the mark where there is one and the carve's verdict otherwise, so
+    // "what I said" and "what the data says" never get confused for one another.
+    std::map<std::pair<std::string, uint32_t>, bool> _skyMarks;
     std::shared_ptr<vis::Result> _lastRun;
     vis::Options                 _lastRunOptions;
     BOOL                 _useGpu;
@@ -236,6 +252,9 @@ const char *kindLabel(check::Kind k) {
     struct { NSString *ident; NSString *title; CGFloat minWidth; BOOL right; } cols[] = {
         {@"scan",   @"Setup",  80, NO},
         {@"status", @"Status", 70, NO},
+        // Filled in by the carve, from each scan's own sky test, and editable —
+        // see -skyStateForRow:.
+        {@"sky",    @"Sky",    78, NO},
         {@"points", @"Points", 56, YES},
     };
     for (auto &c : cols) {
@@ -369,23 +388,28 @@ const char *kindLabel(check::Kind k) {
 
     NSTableColumn *name   = _table.tableColumns[0];
     NSTableColumn *status = _table.tableColumns[1];
-    NSTableColumn *points = _table.tableColumns[2];
+    NSTableColumn *sky    = _table.tableColumns[2];
+    NSTableColumn *points = _table.tableColumns[3];
 
-    CGFloat statusW = 104, pointsW = 62;
-    if (avail < name.minWidth + statusW + pointsW) {
+    CGFloat statusW = 104, skyW = 86, pointsW = 62;
+    const CGFloat fixed = statusW + skyW + pointsW;
+    if (avail < name.minWidth + fixed) {
         // Not enough room for the preferred fixed widths: fall back to the
         // minimums, and if even those do not fit, share what there is.
         statusW = status.minWidth;
+        skyW    = sky.minWidth;
         pointsW = points.minWidth;
-        if (avail < name.minWidth + statusW + pointsW) {
-            const CGFloat scale = avail / (name.minWidth + statusW + pointsW);
+        if (avail < name.minWidth + statusW + skyW + pointsW) {
+            const CGFloat scale = avail / (name.minWidth + statusW + skyW + pointsW);
             statusW *= scale;
+            skyW    *= scale;
             pointsW *= scale;
         }
     }
     points.width = pointsW;
+    sky.width    = skyW;
     status.width = statusW;
-    name.width   = std::max(name.minWidth, avail - statusW - pointsW);
+    name.width   = std::max(name.minWidth, avail - statusW - skyW - pointsW);
 }
 
 - (void)windowDidResize:(NSNotification *)note { (void)note; [self layoutPanes]; }
@@ -1482,7 +1506,7 @@ const char *kindLabel(check::Kind k) {
     // labels now name a setting instead of explaining it, so they fit in 330 and
     // the sheet fits on a laptop screen — which the version that explained every
     // setting in its own text did not.
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 460)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 482)];
     // Label, value, and the explanation — which lives in a TOOLTIP rather than in
     // the sheet. Every one of these settings needs a paragraph to use well and
     // none of them needs it on screen at once: put them all in the sheet's own
@@ -1565,7 +1589,7 @@ const char *kindLabel(check::Kind k) {
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (int i = 0; i < 10; ++i) {
-        const CGFloat y = 432 - i * 28;
+        const CGFloat y = 454 - i * 28;
         NSTextField *l = [self labelWithText:rows[i].label frame:NSMakeRect(0, y, 330, 20)];
         l.toolTip = rows[i].tip;
         [acc addSubview:l];
@@ -1577,9 +1601,9 @@ const char *kindLabel(check::Kind k) {
 
     // WHICH FORMULATION OF THE CARVE. Here rather than buried, because the three
     // give different answers on the same data and the difference is the point.
-    NSTextField *methodLabel = [self labelWithText:@"Method" frame:NSMakeRect(0, 152, 60, 20)];
+    NSTextField *methodLabel = [self labelWithText:@"Method" frame:NSMakeRect(0, 174, 60, 20)];
     NSPopUpButton *method =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 149, 396, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 171, 396, 24) pullsDown:NO];
     [method addItemsWithTitles:@[@"March each scanner ray through the voxels it crosses",
                                  @"Sample the voxel's own footprint (17 rays)",
                                  @"One ray per voxel, through its centre (baseline)"]];
@@ -1609,9 +1633,9 @@ const char *kindLabel(check::Kind k) {
 
     // What region the question covers — the setting that changes the answer more
     // than any other, so it is a choice rather than a tick box.
-    NSTextField *regionLabel = [self labelWithText:@"Region" frame:NSMakeRect(0, 124, 60, 20)];
+    NSTextField *regionLabel = [self labelWithText:@"Region" frame:NSMakeRect(0, 146, 60, 20)];
     NSPopUpButton *region =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 121, 396, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 143, 396, 24) pullsDown:NO];
     [region addItemsWithTitles:@[@"Shrinkwrap of the returns (tightest)",
                                  @"Box around the surveyed extent",
                                  @"Everything in range of a setup"]];
@@ -1636,7 +1660,7 @@ const char *kindLabel(check::Kind k) {
     // the shell to be dropped, which a NEGATIVE buffer says better, as a distance
     // rather than as a switch. The tick box could only say whether; the number
     // says how far in to come.
-    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 96, 460, 20)];
+    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 118, 460, 20)];
     skyOnly.title = @"Clear only where the scan saw its own sky";
     skyOnly.toolTip =
         @"An empty cell is only evidence of empty space where the scan could name it "
@@ -1654,7 +1678,7 @@ const char *kindLabel(check::Kind k) {
     skyOnly.state = _visOptions.skyOnly ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:skyOnly];
 
-    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
+    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 96, 460, 20)];
     firstHit.title = @"Stop at the first evidence";
     firstHit.toolTip =
         @"Much faster, and exact for the unobserved set — which is the set being "
@@ -1667,7 +1691,7 @@ const char *kindLabel(check::Kind k) {
                    ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:firstHit];
 
-    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 460, 20)];
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
     solid.title = @"Show every unobserved voxel";
     solid.toolTip =
         @"Untick to draw only the frontier — where coverage stops — which is far "
@@ -1684,7 +1708,7 @@ const char *kindLabel(check::Kind k) {
     // belongs here: it only means anything when the region is the shrinkwrap, and
     // it is the difference between seeing the site and seeing a red mass in front
     // of it.
-    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 460, 20)];
+    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 460, 20)];
     insideWrap.title = @"Keep only unobserved voxels inside the shrinkwrap";
     insideWrap.toolTip =
         @"Drops the blanket of unobserved space that otherwise wraps the site out to "
@@ -1694,6 +1718,26 @@ const char *kindLabel(check::Kind k) {
     insideWrap.font = [NSFont systemFontOfSize:11];
     insideWrap.state = _intersectWrap ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:insideWrap];
+    // WHICH DECIDES A SETUP'S SKY: the test, or the Sky column in the setups list.
+    // A switch rather than an implicit "marks win", so the two can be compared on
+    // the same corpus without the marks having to be cleared and retyped.
+    NSButton *useMarks = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 460, 20)];
+    useMarks.title = @"Use the indoor/outdoor column instead of the sky test";
+    useMarks.toolTip =
+        @"Whether a setup saw the sky is decided per scan, and by default the scan's "
+        @"own raster decides it: an opening at the zenith wide enough, far enough "
+        @"around, and not bordered inside the instrument's minimum range.\n\nTick this "
+        @"to use the Sky column in the setups list instead. Setups left on Auto still "
+        @"fall to the test, so marking two stations in a corpus of nine hundred leaves "
+        @"the rest measured.\n\nA mark cannot conjure sky where the zenith holds "
+        @"returns — there is nothing there to believe, and clearing a cone up through "
+        @"a roof on the strength of a tick box is exactly what this tool exists to "
+        @"catch. The column shows when that has happened.";
+    [useMarks setButtonType:NSButtonTypeSwitch];
+    useMarks.font = [NSFont systemFontOfSize:11];
+    useMarks.state = _visOptions.useSkyOverrides ? NSControlStateValueOn : NSControlStateValueOff;
+    [acc addSubview:useMarks];
+
     // The connectivity pass. Off by default and the only control here that can
     // remove a real finding, so it says what it costs rather than just what it does.
     NSButton *classify = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 460, 20)];
@@ -1801,6 +1845,8 @@ const char *kindLabel(check::Kind k) {
     const BOOL intersectWrap = _intersectWrap;
     opt.solid        = (solid.state == NSControlStateValueOn);
     opt.classifyVoids = (classify.state == NSControlStateValueOn);
+    opt.useSkyOverrides = (useMarks.state == NSControlStateValueOn);
+    opt.skyOverrides    = [self skyOverrides];
     opt.method       = methodOrder[std::clamp<NSInteger>(method.indexOfSelectedItem, 0, 2)];
     opt.earlyOut     = (firstHit.state == NSControlStateValueOn)
                      ? carve::EarlyOut::AnyEvidence : carve::EarlyOut::Saturated;
@@ -2162,6 +2208,8 @@ const char *kindLabel(check::Kind k) {
             if (!me) return;
             me->_lastRun = result;
             me->_lastRunOptions = opt;
+            // The Sky column reads from this run, so it is stale until reloaded.
+            [me->_table reloadData];
             [me->_cloudView setVoxelResult:*result];
             me->_voxelToggle.state = NSControlStateValueOn;
             [me styleLayerToggle:me->_voxelToggle];
@@ -2216,12 +2264,113 @@ const char *kindLabel(check::Kind k) {
         case check::Kind::Unified:    label.textColor = [NSColor systemRedColor];    break;
         case check::Kind::Ambiguous:  label.textColor = [NSColor systemOrangeColor]; break;
         }
+    } else if ([column.identifier isEqualToString:@"sky"]) {
+        return [self skyCellForRow:(size_t)row width:column.width];
     } else {
         label.stringValue = ns(humanCount(e.recordCount));
         label.alignment = NSTextAlignmentRight;
         label.textColor = [NSColor secondaryLabelColor];
     }
     return label;
+}
+
+// --- indoor or outdoor ------------------------------------------------------
+
+// What the last carve decided about one scan, if it decided anything.
+- (const vis::Result::SetupSky *)carvedSkyForRow:(size_t)row {
+    if (!_lastRun || row >= _survey.scans.size()) return nullptr;
+    const indexer::ScanRef &e = _survey.scans[row];
+    for (const vis::Result::SetupSky &ss : _lastRun->setupSky)
+        if (ss.scanIndex == e.scanIndex && ss.path == e.path) return &ss;
+    return nullptr;
+}
+
+// The cell: a popup, because the three states are a choice and a tick box has two.
+//
+// "Auto" is not a third kind of setup, it is the absence of a mark — the carve
+// decides, and the popup shows what it decided so the column reads as an answer
+// rather than as an empty control.
+- (NSView *)skyCellForRow:(size_t)row width:(CGFloat)width {
+    NSPopUpButton *pop =
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 2, std::max<CGFloat>(60, width - 4), 22)
+                                   pullsDown:NO];
+    pop.bordered = NO;
+    pop.font = [NSFont systemFontOfSize:11];
+    pop.tag  = NSInteger(row);
+    pop.target = self;
+    pop.action = @selector(skyMarkChanged:);
+
+    const indexer::ScanRef &e = _survey.scans[row];
+    const vis::Result::SetupSky *carved = [self carvedSkyForRow:row];
+    const auto key = std::make_pair(e.path, uint32_t(e.scanIndex));
+    const auto mark = _skyMarks.find(key);
+
+    // The automatic entry carries the carve's answer, so the column says something
+    // before anyone has marked anything.
+    NSString *autoTitle = @"Auto";
+    if (carved) autoTitle = carved->outdoor ? @"Auto · outdoor" : @"Auto · indoor";
+    [pop addItemsWithTitles:@[autoTitle, @"Indoor", @"Outdoor"]];
+    [pop selectItemAtIndex:(mark == _skyMarks.end() ? 0 : (mark->second ? 2 : 1))];
+
+    // The evidence, on hover. "Outdoor" on its own is not something anyone can
+    // check; the three numbers the test turned on are.
+    NSMutableString *tip = [NSMutableString string];
+    if (!carved) {
+        [tip appendString:@"Not carved yet — run the visibility filter and this fills in "
+                          @"from each scan's own sky test."];
+    } else if (!carved->reachedPole) {
+        [tip appendString:@"Indoor: the zenith holds returns, so there is no opening there "
+                          @"at all. Marking this one outdoor cannot conjure one — there is "
+                          @"nothing to believe."];
+    } else {
+        [tip appendFormat:@"The opening at this scan's zenith reaches %.0f° across %.0f° of "
+                          @"bearing, bordered at %.2f m — so the test calls it %@.",
+                          carved->extentDeg, carved->arcDeg, carved->borderM,
+                          carved->outdoor ? @"outdoor" : @"indoor"];
+        if (carved->overridden)
+            [tip appendString:@"\n\nThat verdict came from your mark, not from the test."];
+    }
+    [tip appendString:@"\n\nMarks only take effect when “Use the indoor/outdoor column” is "
+                      @"ticked on the run sheet; without it the sky test decides every setup "
+                      @"and your marks are kept but idle."];
+    pop.toolTip = tip;
+    return pop;
+}
+
+- (void)skyMarkChanged:(id)sender {
+    NSPopUpButton *pop = (NSPopUpButton *)sender;
+    const NSInteger row = pop.tag;
+    if (row < 0 || (size_t)row >= _survey.scans.size()) return;
+    const indexer::ScanRef &e = _survey.scans[(size_t)row];
+    const auto key = std::make_pair(e.path, uint32_t(e.scanIndex));
+
+    switch (pop.indexOfSelectedItem) {
+    case 1:  _skyMarks[key] = false; break;   // indoor
+    case 2:  _skyMarks[key] = true;  break;   // outdoor
+    default: _skyMarks.erase(key);   break;   // back to the test
+    }
+
+    // Said plainly, because a mark that silently does nothing until a tick box is
+    // found is worse than no mark at all.
+    if (_skyMarks.empty()) {
+        _status.stringValue = @"No setups marked — the sky test decides all of them.";
+    } else {
+        _status.stringValue = [NSString stringWithFormat:
+            @"%zu setup(s) marked by hand. %@",
+            _skyMarks.size(),
+            _visOptions.useSkyOverrides
+                ? @"The next run will use them."
+                : @"Tick “Use the indoor/outdoor column” on the run sheet to use them."];
+    }
+}
+
+// The marks, in the shape vis::run wants them.
+- (std::vector<vis::Options::SkyOverride>)skyOverrides {
+    std::vector<vis::Options::SkyOverride> out;
+    out.reserve(_skyMarks.size());
+    for (const auto &kv : _skyMarks)
+        out.push_back({kv.first.first, kv.first.second, kv.second});
+    return out;
 }
 
 @end

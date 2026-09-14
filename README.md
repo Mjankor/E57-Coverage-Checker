@@ -37,6 +37,7 @@ ray-march carve on the GPU.
 | viewer on the store, two-phase open | done |
 | **range-image builder** | done and tested |
 | no-return classification (cone, min range, sky) | done and tested |
+| per-setup indoor/outdoor, with a manual override | done and tested |
 | **CPU reference visibility pass** | done and tested |
 | parallel tiles, brick culling, domain clipping | done and tested |
 | **shrinkwrap domain, signed buffer, gap bridging** | done and tested |
@@ -282,6 +283,27 @@ command line tool on a path is indistinguishable from a current one.
 
 Every report names the build that produced it. If the revision at the top is not
 the one you just built, nothing below it is worth reading.
+
+## Indoor or outdoor, per setup
+
+The setups list has a **Sky** column. The carve fills it in from each scan's own
+sky test — an opening at the zenith wide enough, far enough around, and not
+bordered inside the instrument's minimum range (DESIGN.md §4) — and hovering a cell
+gives the three numbers it turned on, so "outdoor" is something you can check
+rather than something you are told.
+
+It is editable. Auto leaves the test to decide; Indoor and Outdoor say you know
+better, which happens: a station in a glazed atrium reads as indoors, one in a
+doorway can read as out. Marks are per scan, survive re-runs, and only take effect
+when **Use the indoor/outdoor column instead of the sky test** is ticked on the run
+sheet — a switch rather than an implicit "marks win", so the two can be compared on
+the same corpus without clearing and retyping them. Setups left on Auto still fall
+to the test, so marking two stations out of nine hundred leaves the rest measured.
+
+One thing a mark cannot do is conjure sky where the zenith holds returns. There is
+nothing there to believe, and clearing a cone up through a roof on the strength of a
+tick box is the exact failure this tool exists to catch — so Outdoor on such a scan
+leaves it indoors, and the column says so.
 
 ## Getting the answer out
 

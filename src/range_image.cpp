@@ -1296,9 +1296,19 @@ SkyReport identifySky(RangeImage& im, const Options& opt, std::vector<uint8_t>& 
         }
     }
 
-    rep.isSky = extent >= opt.skyMinExtentDeg &&
-                (opt.skyMinArcDeg <= 0.0 || rep.arcDeg >= opt.skyMinArcDeg) &&
-                !rep.borderTooClose;
+    const bool passes = extent >= opt.skyMinExtentDeg &&
+                        (opt.skyMinArcDeg <= 0.0 || rep.arcDeg >= opt.skyMinArcDeg) &&
+                        !rep.borderTooClose;
+    // AND WHETHER THE TESTS DECIDE. An operator who knows this tripod stood outside
+    // can say so; what they cannot do is conjure an opening where the zenith holds
+    // returns, and they do not — this point is only reached when one was found.
+    // See Options::skyPolicy.
+    switch (opt.skyPolicy) {
+    case SkyPolicy::Auto:         rep.isSky = passes; break;
+    case SkyPolicy::ForceOutdoor: rep.isSky = true;   break;
+    case SkyPolicy::ForceIndoor:  rep.isSky = false;  break;
+    }
+    rep.overridden = (rep.isSky != passes);
     if (rep.isSky) return rep;
 
     // NOT SKY, SO IT CLEARS NOTHING. One path out for all three ways of failing —
@@ -2713,6 +2723,8 @@ bool build(e57::Reader& reader, size_t scanIndex, const Options& opt,
         out.diag.skyArcDeg         = rep.arcDeg;
         out.diag.skyBorderMedianM  = rep.borderMedianM;
         out.diag.skyBorderTooClose = rep.borderTooClose;
+        out.diag.skyReachedPole    = rep.reachedPole;
+        out.diag.skyOverridden     = rep.overridden;
         out.diag.zenithDemoted = rep.demotedCells;
         filterDarkBorderedZones(out, cellIntensity, sky, opt);
 

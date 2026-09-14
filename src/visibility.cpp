@@ -599,6 +599,17 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         for (uint32_t i = 0; i < scansInFile[f]; ++i) jobs.push_back({f, i});
 
     std::vector<std::unique_ptr<rimg::RangeImage>> built(jobs.size());
+    // The operator's marks, if the run is using them, looked up per job. A linear
+    // scan per job: there are a handful of marks against a corpus of scans, and a
+    // map would cost more to build than it saves.
+    auto policyFor = [&](const Job& job) {
+        if (!opt.useSkyOverrides) return rimg::SkyPolicy::Auto;
+        for (const Options::SkyOverride& o : opt.skyOverrides)
+            if (o.scanIndex == job.scan && o.path == paths[job.path])
+                return o.outdoor ? rimg::SkyPolicy::ForceOutdoor
+                                 : rimg::SkyPolicy::ForceIndoor;
+        return rimg::SkyPolicy::Auto;
+    };
     {
         unsigned nb = opt.threads ? opt.threads : std::thread::hardware_concurrency();
         if (nb == 0) nb = 1;
@@ -631,7 +642,11 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
                 if (openPath == job.path) {
                     auto img = std::make_unique<rimg::RangeImage>();
                     std::string rerr;
-                    if (rimg::build(own, job.scan, ro, *img, rerr))
+                    // A copy per job, because the sky policy is per scan and
+                    // everything else here is not.
+                    rimg::Options jo = ro;
+                    jo.skyPolicy = policyFor(job);
+                    if (rimg::build(own, job.scan, jo, *img, rerr))
                         built[size_t(j)] = std::move(img);
                 }
                 const uint64_t d = done.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -652,7 +667,8 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         if (stop.load()) { out.cancelled = true; err = "cancelled"; return false; }
     }
 
-    for (auto& img : built) {
+    for (size_t bi = 0; bi < built.size(); ++bi) {
+        auto& img = built[bi];
         if (!img) {
             // A scan with no usable raster cannot contribute evidence, and
             // inventing one would invent visibility. Skipped and counted.
@@ -666,6 +682,22 @@ bool run(const std::vector<std::string>& paths, const Options& opt,
         if (img->diag.binStep > 1) {
             ++out.setupsBinned;
             out.worstBinStep = std::max(out.worstBinStep, img->diag.binStep);
+        }
+        // Which setups saw the sky, recorded HERE rather than in the aggregation
+        // loop below, because that loop walks the images that survived and this
+        // needs the job the image came from — the file and the scan index, which is
+        // how the setups table keys its own rows.
+        {
+            Result::SetupSky ss;
+            ss.path        = paths[jobs[bi].path];
+            ss.scanIndex   = uint32_t(jobs[bi].scan);
+            ss.outdoor     = img->diag.skyFound;
+            ss.reachedPole = img->diag.skyReachedPole;
+            ss.overridden  = img->diag.skyOverridden;
+            ss.extentDeg   = img->diag.skyExtentDeg;
+            ss.arcDeg      = img->diag.skyArcDeg;
+            ss.borderM     = img->diag.skyBorderMedianM;
+            out.setupSky.push_back(std::move(ss));
         }
         images.push_back(std::move(img));
     }
@@ -1363,6 +1395,17 @@ bool save(const Result& r, const Options& opt, SavePart part,
           : opt.domain == DomainMode::MeasuredExtent ? "surveyed extent box"
                                                      : "range spheres",
             opt.domainMargin, opt.wrapSpanGaps));
+    {
+        uint64_t outdoor = 0, marked = 0;
+        for (const Result::SetupSky& ss : r.setupSky) {
+            outdoor += ss.outdoor ? 1 : 0;
+            marked  += ss.overridden ? 1 : 0;
+        }
+        add(fmt("sky seen from %llu of %llu setups%s",
+                (unsigned long long)outdoor, (unsigned long long)r.setupSky.size(),
+                marked ? fmt(", %llu of them decided by hand rather than by the test",
+                             (unsigned long long)marked).c_str() : ""));
+    }
     add(fmt("%llu setups used; %.3f m^3 unobserved of %.3f m^3 reported on",
             (unsigned long long)r.setupsUsed, r.unknownVolume(), r.reportedVolume));
 

@@ -111,6 +111,26 @@ struct Options {
     // Means nothing under Method::RayMarch, which has no per-voxel loop to stop.
     carve::EarlyOut earlyOut = carve::EarlyOut::AnyEvidence;
 
+    // INDOOR OR OUTDOOR, SAID BY THE OPERATOR RATHER THAN THE SKY TEST.
+    //
+    // One entry per scan the operator has an opinion about, keyed the way the
+    // setups table keys its rows: the file it came from and the scan's index
+    // within it. Scans with no entry fall through to the test, so a corpus where
+    // two stations were marked by hand still has its other nine hundred decided
+    // from the data.
+    //
+    // Only consulted when `useSkyOverrides` is set — the run sheet's switch between
+    // "the sky test decides" and "the column decides". Kept separate because the
+    // marks are worth remembering across runs while a sweep is being done with the
+    // test, and a switch is how you compare the two without losing the marks.
+    struct SkyOverride {
+        std::string path;
+        uint32_t    scanIndex = 0;
+        bool        outdoor   = false;
+    };
+    std::vector<SkyOverride> skyOverrides;
+    bool useSkyOverrides = false;
+
     // Which formulation of the carve to run — see carve::Method. RayMarch is the
     // specified one and the default; the two gathers are kept so the three can be
     // run against each other on real data.
@@ -335,6 +355,26 @@ struct Result {
     // something anyone can act on, and a run that produces no voxels at all should
     // say what stopped it without needing a second command run afterwards.
     std::string  mappingRefusedWhy;
+    // WHETHER EACH SETUP SAW THE SKY, one entry per scan that produced a usable
+    // range image, in the order they were built.
+    //
+    // The aggregate counts below say how many; this says which, and on what
+    // evidence, because "three of your setups are outdoors" is not something anyone
+    // can check and "this one, on an opening 44 degrees wide right around, bordered
+    // at three metres" is. It is what fills the setups table's own column, and what
+    // an operator disagrees with by marking that column.
+    struct SetupSky {
+        std::string path;                 // the file, as the table keys its rows
+        uint32_t    scanIndex = 0;
+        bool        outdoor = false;      // the sky was named and believed
+        bool        reachedPole = false;  // there was an opening at the zenith at all
+        bool        overridden = false;   // the verdict came from a mark, not the test
+        double      extentDeg = 0;        // and the three numbers behind it
+        double      arcDeg = 0;
+        double      borderM = -1;
+    };
+    std::vector<SetupSky> setupSky;
+
     // Setups whose blind cone was found, and how many were mounted inverted.
     uint64_t     setupsWithBlindCone = 0;
     // Setups that had at least one zone of no-returns inside the instrument's

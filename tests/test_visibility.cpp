@@ -148,6 +148,84 @@ static bool statsEqual(const carve::Stats& a, const carve::Stats& b) {
 
 // ---------------------------------------------------------------------------
 
+// WHICH SETUPS SAW THE SKY, per setup rather than as a count, and what happens
+// when the operator disagrees.
+//
+// The room fixture is enclosed, so every station in it is indoors and the sky test
+// says so. That makes it the right fixture for the override: the marks have to be
+// able to move a verdict the test is confident about, and the result has to say
+// that they did rather than presenting a forced answer as a measured one.
+static void testTheSetupsSayWhetherTheySawSky() {
+    std::printf("indoor or outdoor, per setup\n");
+
+    const std::string path = tmpPath("setupsky");
+    CHECK(fixture::write(path, {roomScan("west", -3.0, 2.0, 1.5),
+                                roomScan("east",  3.0, 2.0, 1.5)}, 512), "fixture written");
+
+    vis::Options opt;
+    opt.voxelSize  = 0.25;
+    opt.maxRange   = 8.0;
+    opt.tileVoxels = 32;
+
+    vis::Result r;
+    std::string err;
+    CHECK(vis::run({path}, opt, nullptr, r, err), err.empty() ? "ran" : err.c_str());
+    CHECK(r.setupSky.size() == 2, "one verdict per setup, not a count");
+    if (r.setupSky.size() != 2) return;
+
+    for (const vis::Result::SetupSky& ss : r.setupSky) {
+        CHECK(ss.path == path, "each names the file it came from");
+        CHECK(!ss.outdoor, "an enclosed room has no setup that saw the sky");
+        CHECK(!ss.overridden, "and the test decided it, unaided");
+    }
+    std::printf("      (reachedPole %d/%d, extent %.1f deg, arc %.1f deg, border %.2f m)\n",
+                int(r.setupSky[0].reachedPole), int(r.setupSky[1].reachedPole),
+                r.setupSky[0].extentDeg, r.setupSky[0].arcDeg, r.setupSky[0].borderM);
+    CHECK(r.setupSky[0].scanIndex != r.setupSky[1].scanIndex,
+          "and they are told apart by their scan index");
+    CHECK(r.setupsWithSky == 0, "which agrees with the count");
+
+    // The operator marks one of them outdoors. The switch is what arms the marks,
+    // so with it off nothing changes — that is the whole point of having it.
+    vis::Options marked = opt;
+    marked.skyOverrides.push_back({path, 0, true});
+
+    vis::Result ignored;
+    CHECK(vis::run({path}, marked, nullptr, ignored, err), "ran with the marks disarmed");
+    CHECK(ignored.setupsWithSky == 0, "a mark does nothing until the switch is on");
+    CHECK(!ignored.setupSky[0].overridden, "and nothing claims to have been overridden");
+
+    marked.useSkyOverrides = true;
+    vis::Result forced;
+    CHECK(vis::run({path}, marked, nullptr, forced, err), "ran with the marks armed");
+    CHECK(forced.setupSky.size() == 2, "still one verdict per setup");
+    if (forced.setupSky.size() != 2) return;
+
+    // Marked outdoors, and the fixture's zenith is open, so the opening there is
+    // now believed — and the result says the verdict was not the test's.
+    const vis::Result::SetupSky& a = forced.setupSky[0];
+    CHECK(a.scanIndex == 0, "the mark landed on the scan it named");
+    if (a.reachedPole) {
+        CHECK(a.outdoor, "a setup marked outdoors has its own opening believed");
+        CHECK(a.overridden, "and says the mark decided it, not the test");
+        CHECK(forced.setupsWithSky == 1, "which the count agrees with");
+    } else {
+        // No opening at the zenith at all: there is nothing to believe, and the
+        // mark must not invent one. This is the honest half of the rule.
+        CHECK(!a.outdoor, "a mark cannot conjure sky where the zenith holds returns");
+    }
+    CHECK(!forced.setupSky[1].outdoor, "the unmarked setup is untouched");
+    CHECK(!forced.setupSky[1].overridden, "and still decided by the test");
+
+    // And the other way: marking a setup indoors is believed too.
+    vis::Options indoors = opt;
+    indoors.useSkyOverrides = true;
+    indoors.skyOverrides.push_back({path, 0, false});
+    vis::Result shut;
+    CHECK(vis::run({path}, indoors, nullptr, shut, err), "ran with an indoor mark");
+    CHECK(!shut.setupSky[0].outdoor, "a setup marked indoors names no sky");
+}
+
 // Settings that exist in two places have to agree in both. One of them did not
 // once: the library documented a filter as off and the job defaulted it on, so
 // every actual run disagreed with the documented behaviour, silently.
@@ -1928,6 +2006,7 @@ static void testAnIndoorCorpusCannotSeeThroughItsOwnRoof() {
 
 int main() {
     testDefaultsAgreeWithTheLibrary();
+    testTheSetupsSayWhetherTheySawSky();
     testVoxelHash();
     testTouchesObserved();
     testRebase();
