@@ -149,7 +149,9 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
     uint64_t                   _cacheBytes;
 
     std::vector<simd_float3>   _setups;
+    std::vector<simd_float3>   _selectedSetups;
     id<MTLBuffer>              _setupBuffer;
+    id<MTLBuffer>              _selectedSetupBuffer;
     id<MTLBuffer>              _voxelBuffer;
     size_t                     _voxelCount;
     id<MTLBuffer>              _wrapBuffer;
@@ -274,6 +276,27 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
     // with a copy per node.
 }
 
+// Packs markers to three floats each and uploads them. Shared by both marker
+// sets so the padding trap documented below is avoided in one place rather than
+// two — see the static_assert.
+- (id<MTLBuffer>)packMarkers:(const std::vector<simd_float3> &)markers {
+    if (markers.empty()) return nil;
+    std::vector<float> packed(3 * markers.size());
+    for (size_t i = 0; i < markers.size(); ++i) {
+        packed[3 * i + 0] = markers[i].x;
+        packed[3 * i + 1] = markers[i].y;
+        packed[3 * i + 2] = markers[i].z;
+    }
+    return [_device newBufferWithBytes:packed.data()
+                                length:packed.size() * sizeof(float)
+                               options:MTLResourceStorageModeShared];
+}
+
+- (void)setSelectedSetupMarkers:(const std::vector<simd_float3> &)markers {
+    _selectedSetups = markers;
+    _selectedSetupBuffer = [self packMarkers:_selectedSetups];
+}
+
 - (void)setSetupMarkers:(const std::vector<simd_float3> &)markers {
     _setups = markers;
     _setupBuffer = nil;
@@ -298,15 +321,10 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
     // because a single vertex only ever reads element zero.
     static_assert(sizeof(simd_float3) == 16,
                   "simd_float3 is padded; the packed upload below is why");
-    std::vector<float> packed(3 * _setups.size());
-    for (size_t i = 0; i < _setups.size(); ++i) {
-        packed[3 * i + 0] = _setups[i].x;
-        packed[3 * i + 1] = _setups[i].y;
-        packed[3 * i + 2] = _setups[i].z;
-    }
-    _setupBuffer = [_device newBufferWithBytes:packed.data()
-                                        length:packed.size() * sizeof(float)
-                                       options:MTLResourceStorageModeShared];
+    _setupBuffer = [self packMarkers:_setups];
+    // A selection made against the old list means nothing against a new one.
+    _selectedSetups.clear();
+    _selectedSetupBuffer = nil;
 }
 
 // Per-node buffer for the fallback path, with least-recently-used eviction.
@@ -434,6 +452,20 @@ constexpr uint64_t kNodeCacheBudget = 2ull * 1024 * 1024 * 1024;
         [enc setVertexBuffer:_setupBuffer offset:0 atIndex:0];
         [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
         [enc drawPrimitives:MTLPrimitiveTypePoint vertexStart:0 vertexCount:_setups.size()];
+
+        // The selected ones again, over the top. Bigger so they read through a
+        // crowd, and cyan because every other thing drawn here is warm — the
+        // points, the orange markers, the red unobserved voxels — so nothing else
+        // can be mistaken for a selection.
+        if (_selectedSetupBuffer && !_selectedSetups.empty()) {
+            u.pointSize = 24.0f;
+            u.tint      = simd_make_float4(0.25f, 0.95f, 1.0f, 1.0f);
+            [enc setVertexBuffer:_selectedSetupBuffer offset:0 atIndex:0];
+            [enc setVertexBytes:&u length:sizeof(u) atIndex:1];
+            [enc drawPrimitives:MTLPrimitiveTypePoint
+                    vertexStart:0
+                    vertexCount:_selectedSetups.size()];
+        }
     }
 
     if (_showPivot) {

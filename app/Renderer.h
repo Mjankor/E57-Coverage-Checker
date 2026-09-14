@@ -42,6 +42,12 @@
 // Setup positions in the store's local frame, drawn as markers. Available from
 // headers alone, so these are shown while the store is still being built.
 - (void)setSetupMarkers:(const std::vector<simd_float3> &)markers;
+// The subset currently selected in the setups list, drawn again on top: larger,
+// in a colour nothing else uses, so the row you are looking at is findable in a
+// cloud of a thousand. A second buffer and a second draw rather than a per-marker
+// colour, because the marker shader takes one tint for the batch and this needs no
+// more than that.
+- (void)setSelectedSetupMarkers:(const std::vector<simd_float3> &)markers;
 
 - (void)drawInView:(MTKView *)view
             camera:(const viewer::OrbitCamera &)camera

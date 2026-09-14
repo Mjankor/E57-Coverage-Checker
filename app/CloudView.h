@@ -36,6 +36,11 @@
 // Stage one: setup positions in the file's coordinate system, flat xyz triples.
 // Drawn immediately, before any point has been decoded.
 - (void)setSetups:(const std::vector<double> &)fileFrameXYZ;
+// Which of them are selected in the setups list, as WORLD positions rather than
+// indices: the marker list holds only the usable scans while the table lists all
+// of them, so an index into one is not an index into the other, and passing
+// positions removes the mapping rather than getting it right.
+- (void)setSelectedSetups:(const std::vector<double> &)fileFrameXYZ;
 
 // Stage two: the point store. Takes over rendering; setups are re-expressed in
 // the store's origin so the two stay registered.

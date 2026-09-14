@@ -292,9 +292,21 @@ bordered inside the instrument's minimum range (DESIGN.md §4) — and hovering 
 gives the three numbers it turned on, so "outdoor" is something you can check
 rather than something you are told.
 
-It is editable. Auto leaves the test to decide; Indoor and Outdoor say you know
-better, which happens: a station in a glazed atrium reads as indoors, one in a
-doorway can read as out. Marks are per scan, survive re-runs, and only take effect
+It is editable, per row from the popup or over a whole selection with
+**Processing ▸ Cycle Indoor / Outdoor** (⌘K), which steps Auto → Indoor → Outdoor
+→ Auto. The list takes shift-click for a run and ⌘-click to add or drop one, so
+marking a site's worth of setups is one keystroke rather than thirty menus; a mixed
+selection takes one step together, from the first selected row, rather than each row
+cycling into a different mix on every press.
+
+Selected setups are drawn **cyan and larger** in the cloud, over the orange markers,
+so the row you are looking at is findable among a thousand. Everything else drawn
+there is warm — the points, the markers, the red unobserved voxels — so nothing can
+be mistaken for a selection.
+
+Auto leaves the test to decide; Indoor and Outdoor say you know better, which
+happens: a station in a glazed atrium reads as indoors, one in a doorway can read as
+out. Marks are per scan, survive re-runs, and only take effect
 when **Use the indoor/outdoor column instead of the sky test** is ticked on the run
 sheet — a switch rather than an implicit "marks win", so the two can be compared on
 the same corpus without clearing and retyping them. Setups left on Auto still fall

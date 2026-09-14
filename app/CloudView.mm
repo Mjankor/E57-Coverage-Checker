@@ -171,6 +171,18 @@
     [self viewChanged];
 }
 
+- (void)setSelectedSetups:(const std::vector<double> &)fileFrameXYZ {
+    if (!_renderer) return;
+    std::vector<simd_float3> markers;
+    markers.reserve(fileFrameXYZ.size() / 3);
+    for (size_t i = 0; i + 2 < fileFrameXYZ.size(); i += 3)
+        markers.push_back(simd_make_float3(float(fileFrameXYZ[i + 0] - _origin[0]),
+                                           float(fileFrameXYZ[i + 1] - _origin[1]),
+                                           float(fileFrameXYZ[i + 2] - _origin[2])));
+    [_renderer setSelectedSetupMarkers:markers];
+    self.needsDisplay = YES;
+}
+
 - (void)setSetups:(const std::vector<double> &)fileFrameXYZ {
     _setupsFileFrame = fileFrameXYZ;
     if (!_store.isOpen() && !_setupsFileFrame.empty()) {

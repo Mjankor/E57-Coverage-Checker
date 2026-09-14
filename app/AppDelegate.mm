@@ -245,6 +245,9 @@ const char *kindLabel(check::Kind k) {
     _table.dataSource = self;
     _table.delegate = self;
     _table.usesAlternatingRowBackgroundColors = YES;
+    // Shift-click for a run, command-click to add or remove one. Marking a site's
+    // worth of setups indoors is otherwise thirty separate popup menus.
+    _table.allowsMultipleSelection = YES;
     _table.rowHeight = 30;
     // Widths are set in -layoutPanes from the width actually available, so all
     // three columns are visible whatever the sidebar has been dragged to. These
@@ -598,6 +601,12 @@ const char *kindLabel(check::Kind k) {
     // the raster cell, what the scanner did there, and what that setup therefore
     // says. The explanation for a voxel that came out wrong.
     [procMenu addItemWithTitle:@"Explain a Point…" action:@selector(explainPoint:) keyEquivalent:@"p"];
+    [procMenu addItem:[NSMenuItem separatorItem]];
+    // Auto -> Indoor -> Outdoor -> Auto, over every selected row at once. The
+    // popups in the column are for one setup; this is for the thirty you just
+    // shift-clicked.
+    [procMenu addItemWithTitle:@"Cycle Indoor / Outdoor"
+                        action:@selector(cycleSkyMark:) keyEquivalent:@"k"];
     [procMenu addItem:[NSMenuItem separatorItem]];
     // On by default. The carver is a "try" — every failure it can have comes
     // back as a declined tile that the CPU then carves — so the worst a machine
@@ -1058,6 +1067,7 @@ const char *kindLabel(check::Kind k) {
     // Nothing to save until something has been carved, and the shell only exists
     // when the run asked for one. Greyed rather than offered and then refused.
     if (item.action == @selector(explainPoint:)) return !_busy && !_paths.empty();
+    if (item.action == @selector(cycleSkyMark:))  return _table.selectedRowIndexes.count > 0;
     if (item.action == @selector(saveVoxels:))
         return !_busy && _lastRun && !_lastRun->voxels.empty();
     if (item.action == @selector(saveWrap:))
@@ -2335,6 +2345,67 @@ const char *kindLabel(check::Kind k) {
                       @"and your marks are kept but idle."];
     pop.toolTip = tip;
     return pop;
+}
+
+// Auto -> Indoor -> Outdoor -> Auto, applied to every selected row.
+//
+// One step for the whole selection rather than one per row: a mixed selection
+// would otherwise cycle into a different mix on every press and never settle.
+// The first selected row's state decides the step, so pressing it repeatedly
+// walks the whole selection through the three states together.
+- (void)cycleSkyMark:(id)sender {
+    (void)sender;
+    NSIndexSet *sel = _table.selectedRowIndexes;
+    if (sel.count == 0) {
+        _status.stringValue = @"Select some setups in the list first.";
+        return;
+    }
+
+    // 0 auto, 1 indoor, 2 outdoor — read from the first row, applied to all.
+    int next = 1;
+    const NSUInteger first = sel.firstIndex;
+    if (first < _survey.scans.size()) {
+        const indexer::ScanRef &e = _survey.scans[first];
+        const auto it = _skyMarks.find(std::make_pair(e.path, uint32_t(e.scanIndex)));
+        next = (it == _skyMarks.end()) ? 1 : (it->second ? 0 : 2);
+    }
+
+    __block NSUInteger changed = 0;
+    [sel enumerateIndexesUsingBlock:^(NSUInteger row, BOOL *stop) {
+        (void)stop;
+        if (row >= self->_survey.scans.size()) return;
+        const indexer::ScanRef &e = self->_survey.scans[row];
+        const auto key = std::make_pair(e.path, uint32_t(e.scanIndex));
+        if (next == 0)      self->_skyMarks.erase(key);
+        else                self->_skyMarks[key] = (next == 2);
+        ++changed;
+    }];
+
+    [_table reloadData];
+    NSString *what = next == 0 ? @"Auto" : (next == 1 ? @"Indoor" : @"Outdoor");
+    _status.stringValue = [NSString stringWithFormat:
+        @"%lu setup(s) set to %@. %@", (unsigned long)changed, what,
+        _visOptions.useSkyOverrides
+            ? @"The next run will use the column."
+            : @"Tick “Use the indoor/outdoor column” on the run sheet to use it."];
+}
+
+// The selection, shown in the cloud as well as in the list.
+//
+// World positions rather than row indices, because the marker list holds only the
+// usable scans while the table lists all of them — see CloudView::setSelectedSetups.
+- (void)tableViewSelectionDidChange:(NSNotification *)note {
+    (void)note;
+    std::vector<double> sel;
+    NSIndexSet *rows = _table.selectedRowIndexes;
+    [rows enumerateIndexesUsingBlock:^(NSUInteger row, BOOL *stop) {
+        (void)stop;
+        if (row >= self->_survey.scans.size()) return;
+        const indexer::ScanRef &e = self->_survey.scans[row];
+        if (!e.usable) return;            // no marker is drawn for it to highlight
+        for (int k = 0; k < 3; ++k) sel.push_back(e.setup[k]);
+    }];
+    [_cloudView setSelectedSetups:sel];
 }
 
 - (void)skyMarkChanged:(id)sender {
