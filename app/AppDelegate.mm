@@ -146,6 +146,7 @@ const char *kindLabel(check::Kind k) {
 // Declared rather than left to be found later in the @implementation, because
 // these return C++ types and are called from above their definitions.
 - (std::vector<vis::Options::SkyOverride>)skyOverrides;
+- (std::vector<size_t>)selectedScanRows;
 - (const vis::Result::SetupSky *)carvedSkyForRow:(size_t)row;
 - (NSView *)skyCellForRow:(size_t)row width:(CGFloat)width;
 @end
@@ -2347,6 +2348,22 @@ const char *kindLabel(check::Kind k) {
     return pop;
 }
 
+// The selected rows, as plain indices into _survey.scans.
+//
+// Walked rather than enumerated with a block. A block captures by value and the
+// capture is const, so building a std::vector inside one does not compile without
+// __block — and __block on a C++ container to work around a five-line loop is the
+// wrong trade. Both callers want the same list, so they share this.
+- (std::vector<size_t>)selectedScanRows {
+    std::vector<size_t> rows;
+    NSIndexSet *sel = _table.selectedRowIndexes;
+    for (NSUInteger row = sel.firstIndex; row != NSNotFound;
+         row = [sel indexGreaterThanIndex:row]) {
+        if (row < _survey.scans.size()) rows.push_back(size_t(row));
+    }
+    return rows;
+}
+
 // Auto -> Indoor -> Outdoor -> Auto, applied to every selected row.
 //
 // One step for the whole selection rather than one per row: a mixed selection
@@ -2355,36 +2372,30 @@ const char *kindLabel(check::Kind k) {
 // walks the whole selection through the three states together.
 - (void)cycleSkyMark:(id)sender {
     (void)sender;
-    NSIndexSet *sel = _table.selectedRowIndexes;
-    if (sel.count == 0) {
+    const std::vector<size_t> rows = [self selectedScanRows];
+    if (rows.empty()) {
         _status.stringValue = @"Select some setups in the list first.";
         return;
     }
 
     // 0 auto, 1 indoor, 2 outdoor — read from the first row, applied to all.
-    int next = 1;
-    const NSUInteger first = sel.firstIndex;
-    if (first < _survey.scans.size()) {
-        const indexer::ScanRef &e = _survey.scans[first];
-        const auto it = _skyMarks.find(std::make_pair(e.path, uint32_t(e.scanIndex)));
-        next = (it == _skyMarks.end()) ? 1 : (it->second ? 0 : 2);
-    }
+    const indexer::ScanRef &firstScan = _survey.scans[rows.front()];
+    const auto it = _skyMarks.find(std::make_pair(firstScan.path,
+                                                  uint32_t(firstScan.scanIndex)));
+    const int next = (it == _skyMarks.end()) ? 1 : (it->second ? 0 : 2);
 
-    __block NSUInteger changed = 0;
-    [sel enumerateIndexesUsingBlock:^(NSUInteger row, BOOL *stop) {
-        (void)stop;
-        if (row >= self->_survey.scans.size()) return;
-        const indexer::ScanRef &e = self->_survey.scans[row];
+    for (size_t row : rows) {
+        const indexer::ScanRef &e = _survey.scans[row];
         const auto key = std::make_pair(e.path, uint32_t(e.scanIndex));
-        if (next == 0)      self->_skyMarks.erase(key);
-        else                self->_skyMarks[key] = (next == 2);
-        ++changed;
-    }];
+        if (next == 0) _skyMarks.erase(key);
+        else           _skyMarks[key] = (next == 2);
+    }
+    const size_t changed = rows.size();
 
     [_table reloadData];
     NSString *what = next == 0 ? @"Auto" : (next == 1 ? @"Indoor" : @"Outdoor");
     _status.stringValue = [NSString stringWithFormat:
-        @"%lu setup(s) set to %@. %@", (unsigned long)changed, what,
+        @"%zu setup(s) set to %@. %@", changed, what,
         _visOptions.useSkyOverrides
             ? @"The next run will use the column."
             : @"Tick “Use the indoor/outdoor column” on the run sheet to use it."];
@@ -2397,14 +2408,11 @@ const char *kindLabel(check::Kind k) {
 - (void)tableViewSelectionDidChange:(NSNotification *)note {
     (void)note;
     std::vector<double> sel;
-    NSIndexSet *rows = _table.selectedRowIndexes;
-    [rows enumerateIndexesUsingBlock:^(NSUInteger row, BOOL *stop) {
-        (void)stop;
-        if (row >= self->_survey.scans.size()) return;
-        const indexer::ScanRef &e = self->_survey.scans[row];
-        if (!e.usable) return;            // no marker is drawn for it to highlight
+    for (size_t row : [self selectedScanRows]) {
+        const indexer::ScanRef &e = _survey.scans[row];
+        if (!e.usable) continue;          // no marker is drawn for it to highlight
         for (int k = 0; k < 3; ++k) sel.push_back(e.setup[k]);
-    }];
+    }
     [_cloudView setSelectedSetups:sel];
 }
 

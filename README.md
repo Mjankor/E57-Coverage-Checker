@@ -398,6 +398,16 @@ It verifies the object graph resolves, that referenced files exist on disk,
 that no source is silently missing from the build, and that schemes point at
 real targets. Run it after editing the project.
 
+`tools/lint_objcpp.py` does the same job for `app/*.mm`, which CMake never
+compiles — so a mistake there is found by whoever next opens Xcode. It checks the
+two that have actually been made: a selector sent with `@selector()` that nothing
+defines, and a C++ container captured by a block and mutated inside it, which does
+not compile because the capture is const but reads exactly like code that should.
+
+```sh
+python3 tools/lint_objcpp.py app
+```
+
 **CMake**
 
 ```sh
