@@ -1541,23 +1541,30 @@ const char *kindLabel(check::Kind k) {
 
     // --- parameters -------------------------------------------------------
     // Laid out from the top down, in one place, because it is a fixed stack and
-    // adding a control by eyeballing a y is how the region popup ended up drawn
-    // over the fourth parameter row.
+    // adding a control by eyeballing a y is how the region popup once ended up
+    // drawn over the fourth parameter row.
     //
-    //   354 326 298 270 242 214 186 158 130   nine label/value rows, 28 apart
-    //    99                                    the region popup, 24 tall, clearing 130 by 7
-    //    74  52  30   8                        four tick boxes, 22 apart
+    //   432 … 198   ten label/value rows, 26 apart
+    //   166         the method popup, 24 tall, clearing the last row by 8
+    //   138         the region popup, 24 tall
+    //   111 90 69 48 27 6   six tick boxes, 21 apart
     //
-    // The stack grows UPWARDS as things are added: a new tick box pushes the popup
+    // The stack grows UPWARDS as things are added: a new tick box pushes the popups
     // and the rows up, a new row pushes only the top of the view. Nothing below a
-    // new control moves, so adding one cannot land it on top of another — which is
-    // how the popup once came to be drawn over the fourth parameter row.
+    // new control moves, so adding one cannot land it on top of another.
     //
-    // 460 wide, down from 620, because the explanations moved to TOOLTIPS. The
-    // labels now name a setting instead of explaining it, so they fit in 330 and
-    // the sheet fits on a laptop screen — which the version that explained every
-    // setting in its own text did not.
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 482)];
+    // FOUR HUNDRED POINTS WIDE, and that width is load-bearing. An NSAlert sizes
+    // itself around its message text and gives the accessory view a content column
+    // of about that much; an accessory WIDER than the column is not expanded to fit,
+    // it is CLIPPED. At 460 the right edge of every value field and the chevron of
+    // both popups fell off the side of the sheet: nothing reported an error, all the
+    // controls were there, and a slice of each was simply not drawn.
+    //
+    // So every rect below is expressed against kSheetW rather than a literal, and
+    // kSheetW is the only number to change if this ever needs to be wider — though
+    // wider than the alert's own column will clip again however it is written.
+    const CGFloat kSheetW = 400;
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, kSheetW, 460)];
     // Label, value, and the explanation — which lives in a TOOLTIP rather than in
     // the sheet. Every one of these settings needs a paragraph to use well and
     // none of them needs it on screen at once: put them all in the sheet's own
@@ -1640,11 +1647,13 @@ const char *kindLabel(check::Kind k) {
     };
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (int i = 0; i < 10; ++i) {
-        const CGFloat y = 454 - i * 28;
-        NSTextField *l = [self labelWithText:rows[i].label frame:NSMakeRect(0, y, 330, 20)];
+        const CGFloat y = 432 - i * 26;
+        NSTextField *l = [self labelWithText:rows[i].label
+                                       frame:NSMakeRect(0, y, kSheetW - 104, 20)];
         l.toolTip = rows[i].tip;
         [acc addSubview:l];
-        NSTextField *f = [self fieldWithValue:rows[i].value frame:NSMakeRect(340, y - 3, 90, 22)];
+        NSTextField *f = [self fieldWithValue:rows[i].value
+                                        frame:NSMakeRect(kSheetW - 96, y - 3, 96, 22)];
         f.toolTip = rows[i].tip;
         [acc addSubview:f];
         [fields addObject:f];
@@ -1652,9 +1661,10 @@ const char *kindLabel(check::Kind k) {
 
     // WHICH FORMULATION OF THE CARVE. Here rather than buried, because the three
     // give different answers on the same data and the difference is the point.
-    NSTextField *methodLabel = [self labelWithText:@"Method" frame:NSMakeRect(0, 174, 60, 20)];
+    NSTextField *methodLabel = [self labelWithText:@"Method" frame:NSMakeRect(0, 169, 56, 20)];
     NSPopUpButton *method =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 171, 396, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(60, 166, kSheetW - 60, 24)
+                                   pullsDown:NO];
     [method addItemsWithTitles:@[@"March each scanner ray through the voxels it crosses",
                                  @"Sample the voxel's own footprint (17 rays)",
                                  @"One ray per voxel, through its centre (baseline)"]];
@@ -1684,9 +1694,10 @@ const char *kindLabel(check::Kind k) {
 
     // What region the question covers — the setting that changes the answer more
     // than any other, so it is a choice rather than a tick box.
-    NSTextField *regionLabel = [self labelWithText:@"Region" frame:NSMakeRect(0, 146, 60, 20)];
+    NSTextField *regionLabel = [self labelWithText:@"Region" frame:NSMakeRect(0, 141, 56, 20)];
     NSPopUpButton *region =
-        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(62, 143, 396, 24) pullsDown:NO];
+        [[NSPopUpButton alloc] initWithFrame:NSMakeRect(60, 138, kSheetW - 60, 24)
+                                   pullsDown:NO];
     [region addItemsWithTitles:@[@"Shrinkwrap of the returns (tightest)",
                                  @"Box around the surveyed extent",
                                  @"Everything in range of a setup"]];
@@ -1711,7 +1722,7 @@ const char *kindLabel(check::Kind k) {
     // the shell to be dropped, which a NEGATIVE buffer says better, as a distance
     // rather than as a switch. The tick box could only say whether; the number
     // says how far in to come.
-    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 118, 460, 20)];
+    NSButton *skyOnly = [[NSButton alloc] initWithFrame:NSMakeRect(0, 111, kSheetW, 20)];
     skyOnly.title = @"Clear only where the scan saw its own sky";
     skyOnly.toolTip =
         @"An empty cell is only evidence of empty space where the scan could name it "
@@ -1729,7 +1740,7 @@ const char *kindLabel(check::Kind k) {
     skyOnly.state = _visOptions.skyOnly ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:skyOnly];
 
-    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 96, 460, 20)];
+    NSButton *firstHit = [[NSButton alloc] initWithFrame:NSMakeRect(0, 90, kSheetW, 20)];
     firstHit.title = @"Stop at the first evidence";
     firstHit.toolTip =
         @"Much faster, and exact for the unobserved set — which is the set being "
@@ -1742,7 +1753,7 @@ const char *kindLabel(check::Kind k) {
                    ? NSControlStateValueOn : NSControlStateValueOff;
     [acc addSubview:firstHit];
 
-    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 74, 460, 20)];
+    NSButton *solid = [[NSButton alloc] initWithFrame:NSMakeRect(0, 69, kSheetW, 20)];
     solid.title = @"Show every unobserved voxel";
     solid.toolTip =
         @"Untick to draw only the frontier — where coverage stops — which is far "
@@ -1759,7 +1770,7 @@ const char *kindLabel(check::Kind k) {
     // belongs here: it only means anything when the region is the shrinkwrap, and
     // it is the difference between seeing the site and seeing a red mass in front
     // of it.
-    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 52, 460, 20)];
+    NSButton *insideWrap = [[NSButton alloc] initWithFrame:NSMakeRect(0, 48, kSheetW, 20)];
     insideWrap.title = @"Keep only unobserved voxels inside the shrinkwrap";
     insideWrap.toolTip =
         @"Drops the blanket of unobserved space that otherwise wraps the site out to "
@@ -1772,7 +1783,7 @@ const char *kindLabel(check::Kind k) {
     // WHICH DECIDES A SETUP'S SKY: the test, or the Sky column in the setups list.
     // A switch rather than an implicit "marks win", so the two can be compared on
     // the same corpus without the marks having to be cleared and retyped.
-    NSButton *useMarks = [[NSButton alloc] initWithFrame:NSMakeRect(0, 30, 460, 20)];
+    NSButton *useMarks = [[NSButton alloc] initWithFrame:NSMakeRect(0, 27, kSheetW, 20)];
     useMarks.title = @"Use the indoor/outdoor column instead of the sky test";
     useMarks.toolTip =
         @"Whether a setup saw the sky is decided per scan, and by default the scan's "
@@ -1791,7 +1802,7 @@ const char *kindLabel(check::Kind k) {
 
     // The connectivity pass. Off by default and the only control here that can
     // remove a real finding, so it says what it costs rather than just what it does.
-    NSButton *classify = [[NSButton alloc] initWithFrame:NSMakeRect(0, 8, 460, 20)];
+    NSButton *classify = [[NSButton alloc] initWithFrame:NSMakeRect(0, 6, kSheetW, 20)];
     classify.title = @"Keep only unobserved space enclosed by the survey";
     classify.toolTip =
         @"Drops unobserved space you can reach from outside the site without crossing "
