@@ -18,6 +18,8 @@
     // Setup positions in the file frame, kept in double so they can be
     // re-expressed when the store's origin arrives.
     std::vector<double>      _setupsFileFrame;
+    std::vector<size_t>      _setupRows;      // marker -> setups-list row
+    BOOL                     _dragMoved;
     double                   _origin[3];
     lod::Aabb                _setupBounds;
     BOOL                     _haveSetupBounds;
@@ -183,8 +185,10 @@
     self.needsDisplay = YES;
 }
 
-- (void)setSetups:(const std::vector<double> &)fileFrameXYZ {
+- (void)setSetups:(const std::vector<double> &)fileFrameXYZ
+             rows:(const std::vector<size_t> &)rows {
     _setupsFileFrame = fileFrameXYZ;
+    _setupRows = rows;
     if (!_store.isOpen() && !_setupsFileFrame.empty()) {
         // No store yet, so the setups define the frame. Centring on them keeps
         // float offsets small even at UTM magnitudes.
@@ -226,6 +230,7 @@
     _tree = lod::Tree{};
     _selection = lod::Selection{};
     _setupsFileFrame.clear();
+    _setupRows.clear();
     _haveSetupBounds = NO;
     [_renderer setSetupMarkers:std::vector<simd_float3>{}];
     [self clearVoxels];
@@ -310,6 +315,7 @@
 - (void)mouseDown:(NSEvent *)event {
     _lastPoint = [self viewPoint:event];
     _dragging  = YES;
+    _dragMoved = NO;
     _orbiting  = (event.modifierFlags & NSEventModifierFlagControl) != 0;
     if (_orbiting) [self pickPivotAtCentre];
 }
@@ -321,12 +327,70 @@
     const float dx = (float)((p.x - _lastPoint.x) * scale);
     const float dy = (float)((p.y - _lastPoint.y) * scale);
     _lastPoint = p;
+    // A hand never holds quite still, so a click is a press and release within a
+    // couple of points rather than one with no motion at all.
+    if (dx * dx + dy * dy > 4.0f) _dragMoved = YES;
     if (_orbiting) _camera.orbit(dx, dy);
     else           _camera.pan(dx, dy);
     [self viewChanged];
 }
 
-- (void)mouseUp:(NSEvent *)event { (void)event; _dragging = NO; _orbiting = NO; }
+- (void)mouseUp:(NSEvent *)event {
+    const BOOL wasClick = _dragging && !_dragMoved && !_orbiting;
+    _dragging = NO;
+    _orbiting = NO;
+    if (wasClick) [self clickSetupAt:[self viewPoint:event] modifiers:event.modifierFlags];
+}
+
+// Which setup marker, if any, a click landed on.
+//
+// Projected rather than picked from the depth buffer: the markers are a few dozen
+// known world positions, so putting them through the same view-projection the
+// renderer used and measuring the distance on screen is exact, needs no readback,
+// and cannot pick something the marker pass did not draw. The nearest to the
+// CAMERA wins among those inside the disc, which is what makes a marker in front
+// take the click from one behind it.
+//
+// The NDC-radius conversion is the one picker.cpp uses, for the same reason: it
+// converts once rather than putting every candidate back into pixels.
+- (void)clickSetupAt:(NSPoint)p modifiers:(NSEventModifierFlags)mods {
+    if (!_renderer.showSetups || _setupsFileFrame.empty() ||
+        _setupRows.size() * 3 != _setupsFileFrame.size()) return;
+
+    const NSRect b = self.bounds;
+    if (b.size.width <= 0 || b.size.height <= 0) return;
+    // MTKView is not flipped, so view y runs up, the same way NDC does.
+    const float ndcX = float((p.x / b.size.width)  * 2.0 - 1.0);
+    const float ndcY = float((p.y / b.size.height) * 2.0 - 1.0);
+
+    // Twelve points: a marker is drawn at 13 px and a click should not have to be
+    // dead centre on it.
+    const float radiusPx = 12.0f * float(self.window ? self.window.backingScaleFactor : 1.0);
+    const m3::Mat4 vp = _camera.viewProjection();
+    const float rx = 2.0f * radiusPx / float(std::max(1, _camera.viewportWidth()));
+    const float ry = 2.0f * radiusPx / float(std::max(1, _camera.viewportHeight()));
+
+    size_t best = SIZE_MAX;
+    float  bestDepth = 1e30f;
+    for (size_t i = 0; i < _setupRows.size(); ++i) {
+        const m3::Vec4 clip = vp * m3::Vec4{float(_setupsFileFrame[i * 3 + 0] - _origin[0]),
+                                            float(_setupsFileFrame[i * 3 + 1] - _origin[1]),
+                                            float(_setupsFileFrame[i * 3 + 2] - _origin[2]),
+                                            1.0f};
+        if (clip.w <= 1e-6f) continue;                  // behind the camera
+        const float dx = (clip.x / clip.w - ndcX) / rx;
+        const float dy = (clip.y / clip.w - ndcY) / ry;
+        if (dx * dx + dy * dy > 1.0f) continue;         // outside the pick disc
+        if (clip.w < bestDepth) { bestDepth = clip.w; best = i; }
+    }
+
+    if ([self.cloudDelegate respondsToSelector:@selector(cloudViewDidClickSetupRow:extend:toggle:)]) {
+        [self.cloudDelegate cloudViewDidClickSetupRow:(best == SIZE_MAX ? NSNotFound
+                                                                    : _setupRows[best])
+                                           extend:(mods & NSEventModifierFlagShift) != 0
+                                           toggle:(mods & NSEventModifierFlagCommand) != 0];
+    }
+}
 
 - (void)rightMouseDown:(NSEvent *)event {
     _lastPoint = [self viewPoint:event];

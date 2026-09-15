@@ -300,7 +300,8 @@ selection takes one step together, from the first selected row, rather than each
 cycling into a different mix on every press.
 
 Selected setups are drawn **cyan and larger** in the cloud, over the orange markers,
-so the row you are looking at is findable among a thousand. Everything else drawn
+so the row you are looking at is findable among a thousand — and clicking a marker
+in the cloud selects its row, with the same shift and ⌘ gestures the list takes. Everything else drawn
 there is warm — the points, the markers, the red unobserved voxels — so nothing can
 be mistaken for a selection.
 

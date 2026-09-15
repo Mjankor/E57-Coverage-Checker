@@ -44,14 +44,24 @@ MUTATORS = ("push_back", "emplace_back", "emplace", "insert", "erase", "clear",
 
 
 def method_names(src: str) -> set:
-    """Selectors defined in this file, as full selector strings."""
+    """Selectors defined in this file, as full selector strings.
+
+    DOTALL on the signature, because an Objective-C method signature wraps across
+    lines as often as not and a line-at-a-time match simply does not see those —
+    which this checker got wrong first time out, reporting a perfectly good
+    three-line delegate method as undefined. `[^;{]*` is bounded by the brace that
+    opens the body, and a signature can hold neither character.
+    """
     out = set()
-    for m in re.finditer(r"^\s*[-+]\s*\([^)]*\)\s*([A-Za-z_]\w*)((?:\s*:\s*\([^)]*\)\s*\w+)*)\s*\{",
-                         src, re.M):
-        head, rest = m.group(1), m.group(2)
-        parts = re.findall(r"([A-Za-z_]\w*)\s*:", rest)
-        out.add(head + ":" * (rest.count(":") // 2) if False else
-                (head + ":" + "".join(p + ":" for p in parts[1:]) if rest.strip() else head))
+    for m in re.finditer(r"^[ \t]*[-+][ \t]*\([^)]*\)([^;{]*)\{", src, re.M | re.S):
+        sig = m.group(1)
+        parts = re.findall(r"([A-Za-z_]\w*)\s*:", sig)
+        if parts:
+            out.add("".join(p + ":" for p in parts))
+        else:
+            name = sig.strip().split()[0] if sig.strip() else ""
+            if name:
+                out.add(name)
     return out
 
 

@@ -25,6 +25,13 @@
 
 @protocol CloudViewDelegate <NSObject>
 - (void)cloudViewDidChangeView:(NSString *)status;
+// A setup marker was clicked. `row` indexes the setups list, not the marker list —
+// see setSetups:rows:. `extend` is shift held (select the run to it), `toggle` is
+// command (add or drop this one); a plain click replaces the selection. `row` is
+// NSNotFound when the click landed on no marker, which clears it.
+- (void)cloudViewDidClickSetupRow:(NSUInteger)row
+                           extend:(BOOL)extend
+                           toggle:(BOOL)toggle;
 @end
 
 @interface CloudView : MTKView
@@ -35,7 +42,14 @@
 
 // Stage one: setup positions in the file's coordinate system, flat xyz triples.
 // Drawn immediately, before any point has been decoded.
-- (void)setSetups:(const std::vector<double> &)fileFrameXYZ;
+// The setup markers, and which row of the setups list each one came from.
+//
+// The two are passed together because the marker list holds only the usable scans
+// while the list shows all of them, so a marker's index is not a row — and the bug
+// that mismatch causes is a click selecting the wrong setup, which looks exactly
+// like a correct selection. `rows` must be the same length as the marker count.
+- (void)setSetups:(const std::vector<double> &)fileFrameXYZ
+             rows:(const std::vector<size_t> &)rows;
 // Which of them are selected in the setups list, as WORLD positions rather than
 // indices: the marker list holds only the usable scans while the table lists all
 // of them, so an index into one is not an index into the other, and passing

@@ -147,6 +147,8 @@ const char *kindLabel(check::Kind k) {
 // these return C++ types and are called from above their definitions.
 - (std::vector<vis::Options::SkyOverride>)skyOverrides;
 - (std::vector<size_t>)selectedScanRows;
+- (void)reloadTableKeepingSelection;
+- (void)layoutPanes;
 - (const vis::Result::SetupSky *)carvedSkyForRow:(size_t)row;
 - (NSView *)skyCellForRow:(size_t)row width:(CGFloat)width;
 @end
@@ -395,11 +397,43 @@ const char *kindLabel(check::Kind k) {
     NSTableColumn *sky    = _table.tableColumns[2];
     NSTableColumn *points = _table.tableColumns[3];
 
-    CGFloat statusW = 104, skyW = 86, pointsW = 62;
-    const CGFloat fixed = statusW + skyW + pointsW;
-    if (avail < name.minWidth + fixed) {
-        // Not enough room for the preferred fixed widths: fall back to the
-        // minimums, and if even those do not fit, share what there is.
+    // MEASURED, not guessed. The three fixed columns get what their own contents
+    // need and no more, which is the only way to be compact and complete at once:
+    // 104 points was picked by eye for "Status" and truncated every row of a real
+    // corpus to "struc…scan", while "Sky" sat half empty beside it.
+    //
+    // Capped, because one column must not be allowed to eat the list: a scan whose
+    // status is "no grid declared, spread suggests several" would otherwise take
+    // 240 points and leave no room for the name. Past the cap the text truncates
+    // and the tooltip carries it, which is the right trade for the rare row.
+    NSDictionary *attrs = @{NSFontAttributeName: [NSFont systemFontOfSize:11]};
+    auto textWidth = ^CGFloat(NSString *str) {
+        return str.length ? [str sizeWithAttributes:attrs].width : 0;
+    };
+    // What a cell costs beyond its text: the table's own inset either side.
+    const CGFloat cellPad = 10;
+
+    CGFloat statusW = textWidth(status.title), skyW = textWidth(sky.title),
+            pointsW = textWidth(points.title);
+    for (const indexer::ScanRef &e : _survey.scans) {
+        statusW = std::max(statusW, textWidth(ns(e.status.empty() ? kindLabel(e.kind)
+                                                                  : e.status)));
+        pointsW = std::max(pointsW, textWidth(ns(humanCount(e.recordCount))));
+    }
+    // The Sky cell is a popup, so it costs its widest title plus the arrows. Its
+    // widest is the automatic entry carrying the carve's answer.
+    skyW = std::max(skyW, textWidth(@"Auto · outdoor")) + 22;
+
+    statusW = std::min(statusW + cellPad, CGFloat(160));
+    pointsW = std::min(pointsW + cellPad, CGFloat(90));
+    skyW    = std::min(skyW + cellPad,    CGFloat(130));
+    statusW = std::max(statusW, status.minWidth);
+    skyW    = std::max(skyW,    sky.minWidth);
+    pointsW = std::max(pointsW, points.minWidth);
+
+    if (avail < name.minWidth + statusW + skyW + pointsW) {
+        // Not enough room even for that: fall back to the minimums, and if even
+        // those do not fit, share what there is.
         statusW = status.minWidth;
         skyW    = sky.minWidth;
         pointsW = points.minWidth;
@@ -1348,9 +1382,15 @@ const char *kindLabel(check::Kind k) {
         if (cancel->load()) { finish(@"Cancelled."); return; }
 
         std::vector<double> setups;
+        std::vector<size_t> setupRows;
         setups.reserve(survey.scans.size() * 3);
-        for (const auto &sc : survey.scans)
-            if (sc.usable) for (int k = 0; k < 3; ++k) setups.push_back(sc.setup[k]);
+        setupRows.reserve(survey.scans.size());
+        for (size_t i = 0; i < survey.scans.size(); ++i) {
+            const auto &sc = survey.scans[i];
+            if (!sc.usable) continue;     // no marker is drawn for it
+            for (int k = 0; k < 3; ++k) setups.push_back(sc.setup[k]);
+            setupRows.push_back(i);       // which LIST row this marker is
+        }
 
         const size_t usable = survey.usableCount();
         const size_t files  = survey.filesRead;
@@ -1361,7 +1401,7 @@ const char *kindLabel(check::Kind k) {
             if (!me) return;
             me->_survey = survey;
             [me->_table reloadData];
-            [me->_cloudView setSetups:setups];
+            [me->_cloudView setSetups:setups rows:setupRows];
             me->_status.stringValue = [NSString stringWithFormat:
                 @"%zu setups from %zu files   ·   %s declared points   ·   indexing…",
                 usable, files, declared.c_str()];
@@ -2220,7 +2260,7 @@ const char *kindLabel(check::Kind k) {
             me->_lastRun = result;
             me->_lastRunOptions = opt;
             // The Sky column reads from this run, so it is stale until reloaded.
-            [me->_table reloadData];
+            [me reloadTableKeepingSelection];
             [me->_cloudView setVoxelResult:*result];
             me->_voxelToggle.state = NSControlStateValueOn;
             [me styleLayerToggle:me->_voxelToggle];
@@ -2240,6 +2280,37 @@ const char *kindLabel(check::Kind k) {
 }
 
 // --- viewer callback ------------------------------------------------------
+
+// A setup marker was clicked in the cloud. The same three gestures the list takes,
+// so the two ways in behave alike: plain replaces, shift extends to the run,
+// command adds or drops one.
+- (void)cloudViewDidClickSetupRow:(NSUInteger)row
+                           extend:(BOOL)extend
+                           toggle:(BOOL)toggle {
+    if (row == NSNotFound) {
+        // A click on empty space clears the selection, unless a modifier says the
+        // user is building one and merely missed.
+        if (!extend && !toggle) [_table deselectAll:nil];
+        return;
+    }
+    if (row >= (NSUInteger)_survey.scans.size()) return;
+
+    if (toggle) {
+        if ([_table.selectedRowIndexes containsIndex:row]) [_table deselectRow:(NSInteger)row];
+        else [_table selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:YES];
+    } else if (extend && _table.selectedRowIndexes.count) {
+        const NSUInteger anchor = _table.selectedRowIndexes.firstIndex;
+        const NSUInteger lo = std::min<NSUInteger>(anchor, row);
+        const NSUInteger hi = std::max<NSUInteger>(anchor, row);
+        [_table selectRowIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(lo, hi - lo + 1)]
+            byExtendingSelection:NO];
+    } else {
+        [_table selectRowIndexes:[NSIndexSet indexSetWithIndex:row] byExtendingSelection:NO];
+    }
+    // Bring it into view: selecting a row you cannot see is indistinguishable from
+    // selecting nothing.
+    [_table scrollRowToVisible:(NSInteger)row];
+}
 
 - (void)cloudViewDidChangeView:(NSString *)status {
     if (!_busy) _status.stringValue = status;
@@ -2348,6 +2419,21 @@ const char *kindLabel(check::Kind k) {
     return pop;
 }
 
+// Reloads the table and puts the selection back.
+//
+// reloadData drops it, which made the cycle command single-shot: pressing it twice
+// to get from Auto to Outdoor deselected everything on the first press. The
+// selection is a statement about which setups are being worked on and survives a
+// redraw of what they say.
+- (void)reloadTableKeepingSelection {
+    NSIndexSet *sel = [_table.selectedRowIndexes copy];
+    [_table reloadData];
+    if (sel.count) [_table selectRowIndexes:sel byExtendingSelection:NO];
+    // The column widths are measured from the contents, so they move when the
+    // contents do.
+    [self layoutPanes];
+}
+
 // The selected rows, as plain indices into _survey.scans.
 //
 // Walked rather than enumerated with a block. A block captures by value and the
@@ -2392,7 +2478,7 @@ const char *kindLabel(check::Kind k) {
     }
     const size_t changed = rows.size();
 
-    [_table reloadData];
+    [self reloadTableKeepingSelection];
     NSString *what = next == 0 ? @"Auto" : (next == 1 ? @"Indoor" : @"Outdoor");
     _status.stringValue = [NSString stringWithFormat:
         @"%zu setup(s) set to %@. %@", changed, what,
