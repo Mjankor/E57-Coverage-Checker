@@ -2073,13 +2073,28 @@ const char *kindLabel(check::Kind k) {
         if (result->domain.kind == carve::Domain::Kind::Wrap && result->wrapGrid.pulledIn)
             warn = [warn stringByAppendingFormat:
                     result->wrapGrid.pulledInCells == 0
-                        ? @"   ·   ⚠︎ NOTHING WAS PULLED IN (%llu of %llu setups inside a kept "
-                           "region): the outside rolled into the building, because the opening "
+                        ? @"   ·   ⚠︎ NOTHING WAS PULLED IN (%llu of %llu setups inside interior "
+                           "space): the outside rolled into the building, because the opening "
                            "the shell may bridge is narrower than the way in. Widen it past the "
                            "widest corridor end or room opening."
-                        : @"   ·   %llu of %llu setups ended up inside a region the pull-in kept",
+                        : @"   ·   %llu of %llu setups ended up inside interior space",
                     (unsigned long long)result->wrapGrid.setupsPulledIn,
                     (unsigned long long)result->wrapGrid.setupsSeen];
+        // HOW MUCH OF THE ENCLOSED SPACE SURVIVED THE EROSION, which is the pair
+        // that says whether the bridge is eating the rooms — and which was computed
+        // and never printed. The setups line above cannot say it: an instrument
+        // stands in one cell, and one cell is not a coverage measure. When the
+        // interior filter was dropping whole rooms, this read 50% on a two-room
+        // building while the setups line read one of one.
+        if (result->domain.kind == carve::Domain::Kind::Wrap && result->wrapGrid.pulledIn &&
+            result->wrapGrid.enclosedCells)
+            warn = [warn stringByAppendingFormat:
+                    @"   ·   %.0f%% of the space the flood could not reach was deep enough to "
+                     "keep (%llu of %llu cells)",
+                    100.0 * double(result->wrapGrid.pulledInCells) /
+                        double(result->wrapGrid.enclosedCells),
+                    (unsigned long long)result->wrapGrid.pulledInCells,
+                    (unsigned long long)result->wrapGrid.enclosedCells];
         else if (result->domain.kind == carve::Domain::Kind::Wrap &&
                  result->wrapGrid.interiorOnly && !result->wrapGrid.sealLeaked)
             warn = [warn stringByAppendingFormat:

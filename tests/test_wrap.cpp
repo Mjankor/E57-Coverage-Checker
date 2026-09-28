@@ -703,8 +703,10 @@ static void testEachEnclosedRegionIsJudgedOnItsOwn() {
     // And the numbers that say which way each part was decided, since a picture
     // of a pull-in that did nothing looks exactly like the positive answer.
     CHECK(g.setupsSeen == 2, "both setups were on the grid");
-    CHECK(g.setupsPulledIn == 1, "one of them stood in a region the pull-in kept");
-    CHECK(g.enclosedCells > 0 && g.keptInCells > 0, "and there was enclosed space to keep");
+    CHECK(g.setupsPulledIn == 1,
+          "one stands in interior space and one — the shed's, which leaked — does not");
+    CHECK(g.enclosedCells > 0 && g.pulledInCells > 0,
+          "and some of the space the flood could not reach was deep enough to keep");
 }
 
 // A SURVEY WITH NO CLOSED END, which is the ordinary indoor job: it stops mid
@@ -743,7 +745,7 @@ static void testAnOpenEndedSurveyFallsBackAndSaysSo() {
 
     CHECK(g.pulledInCells == 0,
           "a ball narrower than the corridor rolls down it, so nothing is pulled in");
-    CHECK(g.setupsPulledIn == 0, "and the setup is not inside a kept region");
+    CHECK(g.setupsPulledIn == 0, "and the setup is not inside interior space");
     CHECK(g.skinnedSurfaces > 0, "every surface fell back to the skin");
     CHECK(g.reportedCells > 0, "which is an answer, where an empty domain would not be");
     CHECK(g.containsReported(4.0, 0.3, 1.5), "the space against a wall is in the question");
@@ -813,19 +815,26 @@ static void testAnOpenEndedSurveyFallsBackAndSaysSo() {
     CHECK(!w.containsReported(4.0, -0.8, 1.5), "and nothing beyond it is");
 }
 
-// A ROOM WITH A DESK IN IT AND A VOID ABOVE IT.
+// A ROOM WITH A DESK IN IT AND A VOID ABOVE IT, AND ALL THREE ARE THE ANSWER.
 //
 // Everything the ball cannot get into is beyond its sweep, and that is not only
 // the rooms: it is the inside of the desk, the space between a suspended ceiling
 // and the slab, the cavity in a stud wall. Each is enclosed, deeper than the
-// offset, and — being sealed — entirely unobserved, so each comes back as a solid
-// mass of unobserved voxels. A scatter of them through the furniture and a sheet
-// just below the ceiling is what that looks like on a real job.
+// offset, and — being sealed — entirely unobserved.
 //
-// The instrument says which interiors are the question. It stood in the room; it
-// never stood inside the desk.
-static void testACavityIsNotARoom() {
-    std::printf("a cavity is not a room, however enclosed it is\n");
+// WHICH IS THE POINT. This test used to assert the opposite, and that was the
+// mistake: the masses of unobserved voxels in the furniture and under the slab
+// were read as clutter and filtered out, by keeping only the enclosed region an
+// instrument stood in. Occluded space is the deliverable. Nobody measured the
+// inside of the desk, so it is unobserved, and a program asked which space the
+// scanners did not see has no business dropping it — still less dropping the
+// roofspace bay, the plant room and the ceiling void that the same filter could
+// not tell apart from it.
+//
+// So the assertions are inverted, and the cost is honest: a job with a lot of
+// closed furniture will show it. That is a reading of the survey, not noise.
+static void testACavityIsOccludedSpaceToo() {
+    std::printf("a sealed cavity is occluded space, and stays in the answer\n");
 
     const double lo[3] = {0, 0, 0}, hi[3] = {12, 10, 3.4};
     wrap::Options opt;
@@ -864,14 +873,68 @@ static void testACavityIsNotARoom() {
 
     CHECK(g.pulledInCells > 0, "the room was pulled in");
     CHECK(g.containsReported(2.0, 2.0, 1.5), "the room's air is the question");
-    CHECK(!g.containsReported(5.0, 4.5, 0.4), "the inside of the desk is not");
-    CHECK(!g.containsReported(6.0, 5.0, 3.1), "nor is the void above the suspended ceiling");
-    CHECK(!g.containsReported(-1.0, 5.0, 1.5), "nor is anything outside the room");
+    CHECK(g.containsReported(5.0, 4.5, 0.4), "and so is the inside of the desk");
+    CHECK(g.containsReported(6.0, 5.0, 3.1), "and the void above the suspended ceiling");
+    // And the outside is still gone, which is the wrap's actual job. Nothing about
+    // keeping the cavities widens the shell by a cell.
+    CHECK(!g.containsReported(-1.0, 5.0, 1.5), "while nothing outside the room is");
+    CHECK(!g.containsReported(6.0, 5.0, 6.0), "nor anything above the roof");
+    // The instrument is standing in space the wrap calls interior. Worth pinning
+    // BECAUSE the counter used to be incapable of saying otherwise: the bit it read
+    // was the bit the filter seeded at that very cell.
+    CHECK(g.setupsSeen == 1 && g.setupsPulledIn == 1,
+          "and the one setup is inside the region the pull-in kept");
+}
+
+// TWO SEALED ROOMS SHARING A WALL, AND ONE INSTRUMENT.
+//
+// The narrowest statement of what the interior filter did, and the reason it had
+// to go. Both rooms are enclosed, both are deeper than the offset, and one of them
+// has a tripod in it. Under the filter the other room was struck out entirely —
+// not merely left out of the report but out of the CARVE's question, reduced to the
+// skin on its own faces, with setupsPulledIn reading one of one throughout.
+//
+// A room nobody entered is the single most valuable thing this program can find.
+static void testARoomNobodyEnteredIsStillTheQuestion() {
+    std::printf("a room nobody entered is still the question\n");
+
+    const double lo[3] = {0, 0, 0}, hi[3] = {12, 6, 3};
+    wrap::Options opt;
+    opt.buffer   = -0.2;
+    opt.cell     = 0.2;
+    opt.spanGaps = 3.0;
+    wrap::Grid g;
+    std::string err;
+    CHECK(wrap::size(lo, hi, opt, g, err), err.empty() ? "sized" : err.c_str());
+
+    const double t = g.cell;
+    for (uint32_t z = 0; z < g.dim[2]; ++z)
+        for (uint32_t y = 0; y < g.dim[1]; ++y)
+            for (uint32_t x = 0; x < g.dim[0]; ++x) {
+                double c[3];
+                g.cellCentre(x, y, z, c);
+                if (c[0] < -0.05 || c[0] > 12.05 || c[1] < -0.05 || c[1] > 6.05 ||
+                    c[2] < -0.05 || c[2] > 3.05) continue;
+                // The outer shell, and a party wall down the middle.
+                if (c[0] < t || c[0] > 12.0 - t || c[1] < t || c[1] > 6.0 - t ||
+                    c[2] < t || c[2] > 3.0 - t || std::fabs(c[0] - 6.0) < t)
+                    g.inDomain[g.index(x, y, z)] |= 1u;
+            }
+    const std::vector<double> setups = {3.0, 3.0, 1.5};
+    wrap::build(opt, g, setups);
+
+    CHECK(g.containsReported(3.0, 3.0, 1.5), "the room the instrument stood in");
+    CHECK(g.containsReported(9.0, 3.0, 1.5), "and the room it did not");
+    CHECK(!g.containsReported(-1.0, 3.0, 1.5), "and neither is the open ground outside");
+    // Both rooms are interior, so every surface here bounds one and none falls back
+    // to the skin. That is what separates this from a freestanding wall.
+    CHECK(g.pulledInCells > 0, "both were deep enough to pull the boundary into");
 }
 
 int main() {
     std::printf("E57 Coverage Checker — shrinkwrap tests\n\n");
-    testACavityIsNotARoom();
+    testACavityIsOccludedSpaceToo();
+    testARoomNobodyEnteredIsStillTheQuestion();
     testEachEnclosedRegionIsJudgedOnItsOwn();
     testAnOpenEndedSurveyFallsBackAndSaysSo();
     testTheShellBridgesAnOpeningAndStaysOutside();

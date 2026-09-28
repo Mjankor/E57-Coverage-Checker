@@ -21,11 +21,10 @@ constexpr uint16_t kBarrier  = 1u << 4;   // sealed: what the flood cannot cross
 // The watertight surface of the surveyed shell: the measured returns, plus the
 // cells that close the openings between them. See the envelope note in build().
 constexpr uint16_t kEnvelope = 1u << 5;
-// A region the survey encloses that is deep enough to pull the boundary into, and
-// the whole of the enclosed region it belongs to. See the per-region note in
-// build(): the negative buffer is decided one enclosed region at a time.
+// A region the survey encloses that is deep enough to pull the boundary into. See
+// the per-region note in build(): the negative buffer is decided one enclosed
+// region at a time, by the flood and the erosion and by nothing else.
 constexpr uint16_t kCore     = 1u << 6;
-constexpr uint16_t kKeptIn   = 1u << 7;
 // The skin around every surface, kept apart from the interiors so the sign can
 // choose between them, and what the ANSWER is about — as against what the carve
 // was asked. Nine bits and ten: the byte this used to be had none spare, and a
@@ -95,66 +94,6 @@ constexpr uint16_t kReported = 1u << 9;
 // the setup test in build(), which asks whether the flood reached a cell an
 // instrument was standing in. Nothing that happened inside a building is outside
 // it.
-
-// Spreads `mark` through everything that is not `blocked`, from wherever `mark`
-// already is. The same span walk floodOutside uses, for the same reason: a region
-// can be tens of millions of cells and a stack of single cells over it is not
-// affordable where the spans covering it number in the thousands.
-void spreadThrough(Grid& g, uint16_t mark, uint16_t blocked) {
-    const uint32_t X = g.dim[0], Y = g.dim[1], Z = g.dim[2];
-    struct Span { uint32_t z, y, x0, x1; };
-    std::vector<Span> stack;
-
-    auto open = [&](uint32_t x, uint32_t y, uint32_t z) {
-        const uint16_t b = g.inDomain[g.index(x, y, z)];
-        return !(b & blocked) && !(b & mark);
-    };
-    auto fill = [&](uint32_t x, uint32_t y, uint32_t z) {
-        if (!open(x, y, z)) return;
-        uint32_t x0 = x, x1 = x;
-        while (x0 > 0 && open(x0 - 1, y, z)) --x0;
-        while (x1 + 1 < X && open(x1 + 1, y, z)) ++x1;
-        for (uint32_t i = x0; i <= x1; ++i) g.inDomain[g.index(i, y, z)] |= mark;
-        stack.push_back({z, y, x0, x1});
-    };
-
-    // Seeded from every run already marked, so the caller marks the seeds and this
-    // carries them as far as they reach.
-    //
-    // The seed runs are EXTENDED along x as they are found, not merely pushed. A
-    // run of already-marked cells cannot be grown by `fill`, which refuses a cell
-    // that carries the mark — so pushing it as it stands leaves the only way out
-    // of it through a neighbouring line in y or z. A region reachable from its
-    // seed only along x is then never marked at all: a corridor a cell wide in the
-    // other two axes, and, less obviously, any region whose seed happens to sit in
-    // a line that its walls close off.
-    for (uint32_t z = 0; z < Z; ++z)
-        for (uint32_t y = 0; y < Y; ++y)
-            for (uint32_t x = 0; x < X; ++x)
-                if (g.inDomain[g.index(x, y, z)] & mark) {
-                    uint32_t x0 = x, x1 = x;
-                    while (x1 + 1 < X &&
-                           ((g.inDomain[g.index(x1 + 1, y, z)] & mark) ||
-                            open(x1 + 1, y, z))) ++x1;
-                    while (x0 > 0 && open(x0 - 1, y, z)) --x0;
-                    for (uint32_t i = x0; i <= x1; ++i) g.inDomain[g.index(i, y, z)] |= mark;
-                    stack.push_back({z, y, x0, x1});
-                    x = x1;
-                }
-
-    while (!stack.empty()) {
-        const Span s = stack.back();
-        stack.pop_back();
-        const int32_t dy[4] = {-1, 1, 0, 0};
-        const int32_t dz[4] = {0, 0, -1, 1};
-        for (int k = 0; k < 4; ++k) {
-            const int64_t ny = int64_t(s.y) + dy[k], nz = int64_t(s.z) + dz[k];
-            if (ny < 0 || nz < 0 || ny >= int64_t(Y) || nz >= int64_t(Z)) continue;
-            for (uint32_t x = s.x0; x <= s.x1; ++x)
-                fill(x, uint32_t(ny), uint32_t(nz));
-        }
-    }
-}
 
 // Exact squared Euclidean distance transform, one axis at a time.
 //
@@ -745,9 +684,9 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
         // door stood open while the survey ran. Deciding the whole site on one
         // flood made all of those share a verdict, and the verdict failed on the
         // hardest of them — so a leak in a shed took the question away from the
-        // building. Each is assessed alone: deep enough for the erosion to leave a
-        // core and it is an interior; too thin, or not enclosed, and the skin above
-        // is all it gets.
+        // building. Each is assessed alone, by the flood and the erosion: deep
+        // enough for the erosion to leave a core and it is an interior; too thin,
+        // or reached by the flood, and the skin above is all it gets.
         //
         // Beyond the ball's sweep is the interior; beyond it by the offset as well
         // is the core a boundary would be pulled back to. See the note on dCentre:
@@ -755,49 +694,65 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
         const double coreCells = sealCells + bufCells;
         const double coreSq    = coreCells * coreCells;
         for (size_t i = 0; i < grid.inDomain.size(); ++i) {
-            if (dCentre[i] <= sealSq) grid.inDomain[i] |= kSeed;   // swept: exterior
-            else if (dCentre[i] > coreSq) grid.inDomain[i] |= kCore;
+            if (dCentre[i] > coreSq) grid.inDomain[i] |= kCore;
         }
 
-        // WHICH INTERIORS ARE ROOMS, AND WHICH ARE CAVITIES. Everything the ball
-        // cannot get into is beyond its sweep, and that is not only the rooms: it
-        // is the inside of a desk, the void over a suspended ceiling, the cavity in
-        // a stud wall. Each is enclosed, deeper than the offset, and — being sealed
-        // — entirely unobserved, so each came back as a solid mass of unobserved
-        // voxels. The instrument says which is which: it stood in the rooms and
-        // never inside a desk. Seeded at the setups, spread through the interior,
-        // and blocked by the sweep AND by the surfaces — the sweep alone lets the
-        // spread walk through the side of a desk and claim its inside.
-        bool seeded = false;
-        for (size_t i = 0; i + 2 < setupsXYZ.size(); i += 3) {
-            int64_t c[3];
-            bool inGrid = true;
-            for (int k = 0; k < 3; ++k) {
-                c[k] = int64_t(std::floor(setupsXYZ[i + size_t(k)] / grid.cell)) - grid.lo[k];
-                if (c[k] < 0 || c[k] >= int64_t(grid.dim[k])) { inGrid = false; break; }
-            }
-            if (!inGrid) continue;
-            const size_t j = grid.index(uint32_t(c[0]), uint32_t(c[1]), uint32_t(c[2]));
-            if (grid.inDomain[j] & kSeed) continue;        // swept: not an interior
-            grid.inDomain[j] |= kKeptIn;
-            seeded = true;
-        }
-        if (!seeded)
-            for (size_t i = 0; i < grid.inDomain.size(); ++i)
-                if (grid.inDomain[i] & kCore) grid.inDomain[i] |= kKeptIn;
-        spreadThrough(grid, kKeptIn, uint16_t(kSeed | kOccupied | kEnvelope));
-        for (size_t i = 0; i < grid.inDomain.size(); ++i)
-            if (!(grid.inDomain[i] & kKeptIn))
-                grid.inDomain[i] = uint16_t(grid.inDomain[i] & ~kCore);
-        for (uint16_t& b : grid.inDomain) b = uint16_t(b & ~kSeed);
+        // AND NOTHING SUBTRACTS FROM THE INSIDE. That is the rule, and it is a
+        // correction — the two lines above used to be followed by a filter that
+        // deleted most of what they found.
+        //
+        // The filter asked which enclosed regions were ROOMS and which were
+        // CAVITIES: the inside of a desk, the void over a suspended ceiling, the
+        // gap in a stud wall. Each is enclosed, deeper than the offset, sealed and
+        // therefore wholly unobserved, so each came back as a solid mass of
+        // unobserved voxels — and that was read as clutter. The instrument was made
+        // to decide, on the argument that it stood in the rooms and never inside a
+        // desk: the region holding a setup was kept and every other one was struck
+        // out, its core cleared, leaving it out of the carve's question as well as
+        // out of the answer.
+        //
+        // IT WAS DELETING THE DELIVERABLE. A sealed desk is occluded space, and
+        // occluded space is the thing this program exists to find. So is the void
+        // over a suspended ceiling; so is a roofspace bay behind a truss, a plant
+        // room behind a closed door, a duct nobody opened. None of them has a
+        // tripod in it, and the test could not tell them from the desk. Measured on
+        // a roofspace with trusses sealing each bay at the wrap's own cell size and
+        // an instrument standing IN the roofspace: 7.8 per cent of it survived, the
+        // one bay the tripod was in, out of thirteen. With the instrument in the
+        // room below instead, nothing at all. And two sealed rooms sharing a wall,
+        // with a setup in one, left the other reduced to the skin on its own faces
+        // — no question asked about it, and no way to tell from the numbers.
+        //
+        // Nor was the loss visible: setupsPulledIn read one of one throughout,
+        // because the bit it counted at each setup's cell was the bit seeded there.
+        //
+        // The wrap's job is to say where the site stops. The flood does that, from
+        // outside and inward, and what it cannot reach is inside by construction.
+        // Whether an interior is interesting is not a question about geometry and
+        // there is nothing here entitled to answer it.
 
         // Into the carve's question, whichever way the buffer points.
+        //
+        // Both counters are over FREE cells, so that pulledInCells against
+        // enclosedCells is a fraction of the same thing. An occupied cell far from
+        // any ball centre is kCore too — it holds measured surface and it is deep
+        // inside the site — and counting it on one side of that comparison and not
+        // the other put the ratio over 100 per cent, which is not a reading anybody
+        // can use.
         for (size_t i = 0; i < grid.inDomain.size(); ++i) {
             const uint16_t b = grid.inDomain[i];
-            if (b & kCore) { grid.inDomain[i] = uint16_t(b | kInDomain); ++grid.pulledInCells; }
-            if (!(b & (kOutside | kOccupied))) ++grid.enclosedCells;
-            if (b & kKeptIn) ++grid.keptInCells;
+            if (b & kCore) grid.inDomain[i] = uint16_t(b | kInDomain);
+            if (b & (kOutside | kOccupied)) continue;
+            ++grid.enclosedCells;
+            if (b & kCore) ++grid.pulledInCells;
         }
+        // Whether each instrument ended up standing in space the wrap calls
+        // interior. A GENUINE test now, and it was not before: the bit this reads
+        // used to be the bit seeded at this very cell, so it could only ever come
+        // back all-of-them. kCore is decided by the flood and the erosion, neither
+        // of which has heard of the setups, so a setup that lands outside its own
+        // building means the outside rolled in — the bridge is narrower than the way
+        // in — and that is worth saying out loud.
         for (size_t i = 0; i + 2 < setupsXYZ.size(); i += 3) {
             int64_t c[3];
             bool inGrid = true;
@@ -808,7 +763,7 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
             if (!inGrid) continue;
             ++grid.setupsSeen;
             if (grid.inDomain[grid.index(uint32_t(c[0]), uint32_t(c[1]),
-                                         uint32_t(c[2]))] & kKeptIn) ++grid.setupsPulledIn;
+                                         uint32_t(c[2]))] & kCore) ++grid.setupsPulledIn;
         }
 
         // WHAT IS REPORTED. Pulled in: the interiors, plus the skin on the
@@ -817,7 +772,12 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
         if (pullIn) {
             decidedReported = true;
             uint64_t seeds = 0;
-            const std::vector<double> dKept = distanceTo(grid, kKeptIn);
+            // Distance to an INTERIOR, which is what kCore is. This read the
+            // setup-seeded subset of the interiors until that subset was removed;
+            // the question it is asking — does this surface bound an interior, or
+            // is it a freestanding wall that needs a skin of its own — was always
+            // about the interiors themselves.
+            const std::vector<double> dCore = distanceTo(grid, kCore);
             const double boundsCells = coreCells + 1.0;   // the gap, and a cell of slack
             const double boundsSq    = boundsCells * boundsCells;
             const int64_t X = grid.dim[0], Y = grid.dim[1], Z = grid.dim[2];
@@ -827,10 +787,10 @@ void build(const Options& opt, Grid& grid, const std::vector<double>& setupsXYZ)
                         const size_t i = grid.index(uint32_t(x), uint32_t(y), uint32_t(z));
                         const uint16_t b = grid.inDomain[i];
                         if (!(b & (kOccupied | kEnvelope))) continue;
-                        // WITHIN REACH of a kept interior, not touching one: the
+                        // WITHIN REACH of an interior, not touching one: the
                         // interior begins a sweep plus an offset inside the
                         // surface, so nothing that bounds one is adjacent to it.
-                        if (dKept[i] <= boundsSq) continue;
+                        if (dCore[i] <= boundsSq) continue;
                         grid.inDomain[i] |= kSeed;
                         ++seeds;
                     }

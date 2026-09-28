@@ -268,6 +268,18 @@ the walls, which is how the space outside a building leaves the question rather
 than being filtered out of the answer afterwards; positive grows it outward for
 wall thickness and eaves.
 
+The wrap only ever removes the **outside**. It is built from the grid's boundary
+inward — a ball half the bridge width across, rolled in from open air until the
+survey stops it — so what it cannot reach is inside by construction, and nothing
+downstream subtracts from that. **Every enclosed region is kept**, whether or not
+an instrument stood in it: a roofspace bay behind a truss, a plant room behind a
+closed door, the void over a suspended ceiling, the inside of a closed desk. Each
+is space the scanners did not see, which is the thing being asked for. It does mean
+a job with a lot of closed furniture shows a scatter of small sealed masses; they
+are findings. The two numbers to read the wrap against are on the status line: how
+much of the space the flood could not reach was deep enough to keep, and how many
+setups ended up inside interior space at all.
+
 **Tile size** changes the working set and nothing else. Carving a volume as one
 large tile and as many small ones gives identical results, voxel for voxel —
 the voxel lattice is global and anchored at the world origin, so a voxel's

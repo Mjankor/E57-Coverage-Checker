@@ -116,6 +116,18 @@ struct Options {
     //   fails — the worst case is a region asked about too generously — and a leak
     //   in a shed can no longer take the question away from the building.
     //
+    //   AND DECIDED BY THE FLOOD AND THE EROSION ALONE. Nothing subtracts from an
+    //   interior once it is found. There was a filter here that did: it kept the
+    //   enclosed region each instrument stood in and struck out every other one, to
+    //   stop sealed cavities — the inside of a desk, the void over a suspended
+    //   ceiling — coming back as solid masses of unobserved voxels. Those masses
+    //   are the deliverable. A sealed cavity is occluded space, and so is a
+    //   roofspace bay behind a truss, a plant room behind a closed door, a duct
+    //   nobody opened: none has a tripod in it and the test could not tell them
+    //   apart. On a roofspace with an instrument standing in it, 7.8 per cent of the
+    //   roofspace survived — the one truss bay the tripod was in, of thirteen. See
+    //   the note in build().
+    //
     // The magnitudes are not comparable across the sign: +2 asks about a two
     // metre skin around everything measured; -2 asks about a whole interior less
     // a two metre skin. Both are useful, and they are different questions.
@@ -241,16 +253,25 @@ struct Grid {
     // What the assessment had to work with, which is what says WHY a negative
     // buffer did little.
     //
-    // `setupsPulledIn` against `setupsSeen` is the one to read: how many
-    // instruments ended up standing in a region the pull-in kept. None of them,
-    // and the outside rolled into the building — the opening the shell may bridge
-    // is narrower than the way in. Measured on an open-ended 2.8 m corridor: at a
-    // 1.6 m bridge nothing is pulled in and the setup is outside its own corridor;
-    // at 3.0 m, where the ball no longer fits down it, 30,870 cells are kept and
-    // the setup is inside. The other two are supporting detail — space the flood
-    // could not reach, and how much of it was deep enough to keep.
+    // `pulledInCells` against `enclosedCells` is the one to read: how much of the
+    // space the flood could not reach was deep enough to keep. They differ by the
+    // erosion — the pull-in itself, plus the ball's sweep — so a large gap between
+    // them on a job whose rooms are bigger than the sweep says the bridge is wide
+    // enough to be eating the rooms.
+    //
+    // `setupsPulledIn` against `setupsSeen` says whether each instrument ended up
+    // standing in space the wrap calls interior. None of them, and the outside
+    // rolled into the building: the opening the shell may bridge is narrower than
+    // the way in. Measured on an open-ended 2.8 m corridor — at a 1.6 m bridge
+    // nothing is pulled in and the setup is outside its own corridor; at 3.0 m,
+    // where the ball no longer fits down it, 30,870 cells are kept and the setup is
+    // inside.
+    //
+    // It is a real test now and it was not before. The bit it read at each setup's
+    // cell used to be the bit the interior filter had just seeded there, so it came
+    // back all-of-them however much of the building had been struck out — one of
+    // one, with half the building gone. kCore has never heard of the setups.
     uint64_t enclosedCells = 0;
-    uint64_t keptInCells = 0;
     uint64_t setupsSeen = 0;
     uint64_t setupsPulledIn = 0;
     bool     coarsened = false;    // the cell size grew to fit the budget
